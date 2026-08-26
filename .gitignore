@@ -19,3 +19,7 @@ data/
 # caches
 frontend/.npm-cache/
 *.tsbuildinfo
+
+# caches
+frontend/.npm-cache/
+*.tsbuildinfo
