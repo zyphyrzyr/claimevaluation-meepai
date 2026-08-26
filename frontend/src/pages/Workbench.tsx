@@ -71,6 +71,20 @@ export default function Workbench() {
           })}
         </div>
       )}
+
+      {/* 独立模拟法庭快捷入口（三分钟看产品最抓人的部分） */}
+      <Link
+        to="/moot"
+        className="mt-6 flex items-center justify-between bg-ink text-white rounded-xl p-5 hover:bg-ink-light transition-colors"
+      >
+        <div>
+          <div className="font-medium">独立模拟法庭 · 诉前对抗演练</div>
+          <div className="text-sm text-white/50 mt-0.5">
+            不建案不评估，输入案情直接开庭——AI 被告当庭抗辩，法官归纳薄弱点
+          </div>
+        </div>
+        <span className="text-ember text-sm font-medium">开庭演练 →</span>
+      </Link>
     </div>
   )
 }

@@ -3,10 +3,14 @@ import Workbench from './pages/Workbench'
 import NewCase from './pages/NewCase'
 import Evaluation from './pages/Evaluation'
 import DecisionDashboard from './pages/DecisionDashboard'
+import MootCourt from './pages/MootCourt'
+import MootStandalone from './pages/MootStandalone'
+import Report from './pages/Report'
 
 const navItems = [
   { to: '/workbench', label: '工作台' },
   { to: '/new', label: '新建案件' },
+  { to: '/moot', label: '模拟法庭' },
 ]
 
 export default function App() {
@@ -45,6 +49,9 @@ export default function App() {
           <Route path="/new" element={<NewCase />} />
           <Route path="/cases/:id/evaluation" element={<Evaluation />} />
           <Route path="/cases/:id/dashboard" element={<DecisionDashboard />} />
+          <Route path="/cases/:id/moot" element={<MootCourt />} />
+          <Route path="/cases/:id/report" element={<Report />} />
+          <Route path="/moot" element={<MootStandalone />} />
         </Routes>
       </main>
 

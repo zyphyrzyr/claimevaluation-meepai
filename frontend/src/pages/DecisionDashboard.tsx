@@ -170,7 +170,8 @@ export default function DecisionDashboard() {
               )
             })}
             <div className="text-xs text-ink/40 pt-1">
-              对抗检验修正系数：{data.correction_coeff ?? 1.0}（模拟法庭 P2 接入后产出）
+              对抗检验修正系数：{data.correction_coeff ?? 1.0}
+              {data.correction_coeff && data.correction_coeff !== 1 && '（模拟法庭已回写）'}
             </div>
           </div>
         </div>
@@ -225,6 +226,22 @@ export default function DecisionDashboard() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* 下一步动作 */}
+      <div className="flex flex-wrap gap-3">
+        <button
+          onClick={() => { window.location.href = `/cases/${id}/moot` }}
+          className="bg-ember text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ember-dark transition-colors"
+        >
+          启动模拟法庭（压力测试）
+        </button>
+        <a
+          href={`/cases/${id}/report`}
+          className="border border-ink/20 text-ink px-4 py-2 rounded-lg text-sm hover:bg-ink-pale transition-colors"
+        >
+          查看决策备忘录
+        </a>
       </div>
     </div>
   )
