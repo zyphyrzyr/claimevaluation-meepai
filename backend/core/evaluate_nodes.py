@@ -29,6 +29,13 @@ def _evidence_brief(ctx: CaseContext) -> str:
 
 
 def _base(ctx: CaseContext) -> str:
+    injected = ""
+    if ctx.injected_knowledge:
+        from .knowledge import build_injection_text
+        injected = f"""
+## 知识库参考材料（用户勾选注入）
+{build_injection_text(ctx.injected_knowledge)}
+"""
     return f"""## 案情描述
 {ctx.case_description[:3000]}
 
@@ -40,7 +47,7 @@ def _base(ctx: CaseContext) -> str:
 
 ## 用户经验与观点
 {ctx.viewpoints_text() or "（无）"}
-"""
+{injected}"""
 
 
 def evaluate_rights(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:

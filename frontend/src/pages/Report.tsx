@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { api } from '../api'
+import { api, knowledgeApi } from '../api'
+import { diffLines, DiffRow } from '../utils/diff'
 
 /**
- * 决策备忘录：结构化备忘录 + 一页纸摘要 + 版本快照（v1/v2 并存）+ 庭审记录入口
+ * 决策备忘录：结构化备忘录 + 一页纸摘要 + 版本快照（v1/v2 diff 对比）+ 庭审记录入口
+ * + 本案要点一键沉淀到全局经验库（来源 C）
  */
 
 const LEVEL_BADGE: Record<string, string> = {
@@ -21,6 +23,45 @@ export default function Report() {
   const [error, setError] = useState('')
   const [showMarkdown, setShowMarkdown] = useState(false)
   const [saving, setSaving] = useState(false)
+
+  // 版本 diff
+  const [diffVersion, setDiffVersion] = useState<number | null>(null)
+  const [diffRows, setDiffRows] = useState<DiffRow[] | null>(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+
+  // 经验沉淀
+  const [depositInfo, setDepositInfo] = useState('')
+
+  const openDiff = async (version: number) => {
+    if (!id || !memo) return
+    setDiffVersion(version)
+    setDiffRows(null)
+    setDiffLoading(true)
+    try {
+      const snap = await api.version(id, version)
+      setDiffRows(diffLines(snap.markdown_content ?? '', memo.markdown ?? ''))
+    } catch (e) {
+      setError(String(e))
+      setDiffVersion(null)
+    } finally {
+      setDiffLoading(false)
+    }
+  }
+
+  const deposit = async () => {
+    if (!id || !memo) return
+    const content = [
+      `结论：${memo.one_pager.conclusion}（决策分 ${memo.scores.final ?? '—'}）`,
+      `法律可行性 ${memo.scores.legal_feasibility ?? '—'} × 业务预期 ${memo.scores.business_expectation ?? '—'}；置信度 ${memo.confidence ?? '—'}%。`,
+      ...memo.one_pager.reasons.map((r: string) => `· ${r}`),
+    ].join('\n')
+    try {
+      await knowledgeApi.deposit(id, `${memo.case_name} 评估结论（${memo.cause_type}）`, content)
+      setDepositInfo('已沉淀到全局经验库，后续案件可召回复用')
+    } catch (e) {
+      setError(String(e))
+    }
+  }
 
   const load = () => {
     if (!id) return
@@ -85,12 +126,60 @@ export default function Report() {
           {versions.map((v) => (
             <button
               key={v.id}
-              onClick={() => alert(`版本 v${v.version}（${v.generated_at}）\n\n对比视图 P3 迭代中，当前可先在「Markdown 源码」中查看实时版`)}
-              className="text-xs px-2.5 py-1 rounded-full border border-ink/20 text-ink/70 hover:border-ink/50"
+              onClick={() => openDiff(v.version)}
+              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                diffVersion === v.version
+                  ? 'border-ember text-ember bg-ember/5'
+                  : 'border-ink/20 text-ink/70 hover:border-ink/50'
+              }`}
             >
               v{v.version} · {v.generated_at?.slice(5, 16)}
             </button>
           ))}
+          <span className="text-[11px] text-ink/35">点击版本号查看与当前版的对比</span>
+        </div>
+      )}
+
+      {/* 版本 diff 对比 */}
+      {diffVersion != null && (
+        <div className="bg-white rounded-xl border border-ink/10 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-medium">
+              版本对比：v{diffVersion} <span className="text-ink/40">→</span> 当前（实时）
+            </h2>
+            <div className="flex items-center gap-3">
+              <span className="text-[11px] text-ink/40">
+                <span className="text-red-600">■ 删除</span>　<span className="text-green-700">■ 新增</span>
+              </span>
+              <button
+                onClick={() => { setDiffVersion(null); setDiffRows(null) }}
+                className="text-xs text-ink/50 hover:text-ink"
+              >
+                关闭对比
+              </button>
+            </div>
+          </div>
+          {diffLoading ? (
+            <p className="text-sm text-ink/40 py-4">加载版本内容…</p>
+          ) : diffRows ? (
+            <div className="bg-ink-pale/40 rounded-lg p-4 text-xs font-mono leading-relaxed overflow-x-auto max-h-[480px] overflow-y-auto">
+              {diffRows.map((r, i) => (
+                <div
+                  key={i}
+                  className={
+                    r.type === 'add'
+                      ? 'text-green-700 bg-green-50'
+                      : r.type === 'remove'
+                        ? 'text-red-600 bg-red-50 line-through decoration-red-300'
+                        : 'text-ink/60'
+                  }
+                >
+                  {r.type === 'add' ? '+ ' : r.type === 'remove' ? '- ' : '  '}
+                  {r.text || ' '}
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -206,8 +295,15 @@ export default function Report() {
           </Link>
         )}
         <button
-          onClick={() => setShowMarkdown(!showMarkdown)}
+          onClick={deposit}
           className="text-ember hover:underline font-medium"
+          disabled={!!depositInfo}
+        >
+          {depositInfo || '沉淀本案要点到全局经验库 →'}
+        </button>
+        <button
+          onClick={() => setShowMarkdown(!showMarkdown)}
+          className="text-ink/60 hover:underline"
         >
           {showMarkdown ? '收起' : '展开'} Markdown 源码（Word 导出内容源）
         </button>

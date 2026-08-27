@@ -83,6 +83,15 @@ def create_case(payload: CaseCreate, db: Session = Depends(get_db)):
     ctx.case_id = case.id
     case.context_json = ctx.to_dict()
     db.commit()
+
+    # 来源 A：证据文本自动入库到本案材料库（case_id 隔离，供 RAG 自动召回）
+    if payload.evidence_texts.strip():
+        from core.knowledge import ingest_case_materials
+        try:
+            ingest_case_materials(db, case.id, payload.evidence_texts)
+        except Exception:
+            pass  # 入库失败不阻断建案
+
     return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                    goal_type=case.goal_type, status=case.status,
                    created_at=case.created_at.isoformat())

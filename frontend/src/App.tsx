@@ -6,11 +6,14 @@ import DecisionDashboard from './pages/DecisionDashboard'
 import MootCourt from './pages/MootCourt'
 import MootStandalone from './pages/MootStandalone'
 import Report from './pages/Report'
+import KnowledgeBase from './pages/KnowledgeBase'
+import AdvisorPanel from './components/AdvisorPanel'
 
 const navItems = [
   { to: '/workbench', label: '工作台' },
   { to: '/new', label: '新建案件' },
   { to: '/moot', label: '模拟法庭' },
+  { to: '/knowledge', label: '经验库' },
 ]
 
 export default function App() {
@@ -52,8 +55,12 @@ export default function App() {
           <Route path="/cases/:id/moot" element={<MootCourt />} />
           <Route path="/cases/:id/report" element={<Report />} />
           <Route path="/moot" element={<MootStandalone />} />
+          <Route path="/knowledge" element={<KnowledgeBase />} />
         </Routes>
       </main>
+
+      {/* 伴随式追问顾问：案件页面全程悬浮 */}
+      <AdvisorPanel />
 
       <footer className="text-center text-xs text-ink/30 py-4">
         本系统为 AI 辅助评估工具，结果仅供内部决策参考，不构成正式法律意见

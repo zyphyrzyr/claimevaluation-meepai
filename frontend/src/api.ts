@@ -138,3 +138,77 @@ export async function runEvaluation(
     }
   }
 }
+
+// ============================================================
+// 知识库（P3 RAG：全局经验库 / 案件材料库双集合分库）
+// ============================================================
+
+export interface KnowledgeEntryItem {
+  id: string
+  scope: 'global' | 'case'
+  case_id: string | null
+  source_type: string
+  source_type_label: string
+  title: string
+  content?: string
+  snippet?: string
+  stale: boolean
+  chunk_count: number
+  created_at: string
+}
+
+export interface SearchHit extends KnowledgeEntryItem {
+  score: number
+  matched_chunk: string
+}
+
+export const knowledgeApi = {
+  info: () => request<{ backend: string; embedding: string }>('/knowledge/info'),
+  entries: (params: { scope?: string; case_id?: string }) => {
+    const q = new URLSearchParams()
+    if (params.scope) q.set('scope', params.scope)
+    if (params.case_id) q.set('case_id', params.case_id)
+    return request<KnowledgeEntryItem[]>(`/knowledge/entries?${q}`)
+  },
+  createEntry: (payload: { scope: string; case_id?: string; source_type: string; title: string; content: string }) =>
+    request<{ ok: boolean; id: string }>('/knowledge/entries', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  deleteEntry: (id: string) => request<{ ok: boolean }>(`/knowledge/entries/${id}`, { method: 'DELETE' }),
+  search: (payload: { query: string; case_id?: string; scope?: string; top_k?: number }) =>
+    request<SearchHit[]>('/knowledge/search', { method: 'POST', body: JSON.stringify(payload) }),
+  caseEntries: (caseId: string) => request<KnowledgeEntryItem[]>(`/knowledge/cases/${caseId}/entries`),
+  ingest: (caseId: string, evidence_texts: string) =>
+    request<{ ok: boolean; ingested: number }>(`/knowledge/cases/${caseId}/ingest`, {
+      method: 'POST',
+      body: JSON.stringify({ evidence_texts }),
+    }),
+  inject: (caseId: string, entry_ids: string[]) =>
+    request<{ ok: boolean; injected: number }>(`/knowledge/cases/${caseId}/inject`, {
+      method: 'POST',
+      body: JSON.stringify({ entry_ids }),
+    }),
+  deposit: (caseId: string, title: string, content: string) =>
+    request<{ ok: boolean; id: string }>(`/knowledge/cases/${caseId}/deposit`, {
+      method: 'POST',
+      body: JSON.stringify({ title, content }),
+    }),
+}
+
+// ============================================================
+// 伴随式追问顾问（唯一对话 Agent，全程悬浮）
+// ============================================================
+
+export interface AdvisorMessage {
+  role: 'user' | 'assistant'
+  content: string
+  recall?: { id: string; title: string; score: number }[]
+}
+
+export const advisorApi = {
+  history: (caseId: string) => request<{ messages: AdvisorMessage[] }>(`/advisor/${caseId}/history`),
+  /** SSE 对话：recall → delta* → done */
+  chat: (caseId: string, question: string, onEvent: (e: any) => void) =>
+    ssePost(`/advisor/${caseId}/chat`, { question }, onEvent),
+}

@@ -57,13 +57,25 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db)):
     if ctx.scores.get("final") is None:
         raise HTTPException(400, "案件尚未完成评估，请先完成主诉评估再启动模拟法庭")
 
+    # RAG 自动召回（§7）：案件材料库 + 全局经验库，注入庭审材料
+    recall = {"context": "", "refs": []}
+    try:
+        from core.knowledge import recall_for_context
+        recall_query = (ctx.case_description or "")[:200] + " " + " ".join(
+            g.get("item", "") for g in (ctx.gap_list or [])[:3])
+        recall = recall_for_context(db, case_id, recall_query, top_k=3)
+    except Exception:
+        pass
+
     events: queue.Queue = queue.Queue()
     result_holder: dict = {}
 
     def work():
         try:
             before = dict(ctx.scores)
-            gen = moot_service.run_embedded(ctx)
+            if recall["refs"]:
+                events.put({"event": "recall", "refs": recall["refs"]})
+            gen = moot_service.run_embedded(ctx, recall_context=recall["context"])
             while True:
                 try:
                     event = next(gen)
@@ -143,13 +155,24 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
 
     events: queue.Queue = queue.Queue()
 
+    # RAG 自动召回：独立演练仅全局经验库
+    recall = {"context": "", "refs": []}
+    try:
+        from core.knowledge import recall_for_context
+        recall = recall_for_context(db, None, payload.case_description[:300], top_k=3)
+    except Exception:
+        pass
+
     def work():
         try:
+            if recall["refs"]:
+                events.put({"event": "recall", "refs": recall["refs"]})
             gen = moot_service.run_standalone(
                 payload.case_description,
                 cause_type=payload.cause_type,
                 viewpoints=payload.viewpoints,
                 plaintiff_points=payload.plaintiff_points,
+                recall_context=recall["context"],
             )
             final = None
             while True:

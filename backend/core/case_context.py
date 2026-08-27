@@ -27,6 +27,12 @@ class CaseContext:
     # 用户观点（注入所有 LLM 节点 prompt；§5.4 手动勾选为主）
     user_viewpoints: List[str] = field(default_factory=list)
 
+    # 知识库注入（§7 手动勾选条目，注入所有 LLM 评估节点；保复现性）
+    injected_knowledge: List[Dict[str, Any]] = field(default_factory=list)
+
+    # 伴随式追问顾问（唯一对话 Agent）的历史
+    advisor_messages: List[Dict[str, Any]] = field(default_factory=list)
+
     # 各维度结果 {node: {status: ok/failed/stale, result: {...}, error, updated_at}}
     dimension_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
@@ -51,6 +57,15 @@ class CaseContext:
 
     def viewpoints_text(self) -> str:
         return "\n".join(f"- {v}" for v in self.user_viewpoints)
+
+    def injected_knowledge_text(self) -> str:
+        if not self.injected_knowledge:
+            return ""
+        lines = []
+        for e in self.injected_knowledge:
+            tag = "案件材料" if e.get("scope") == "case" else "经验库"
+            lines.append(f"- [{tag}] {e.get('title', '')}：{(e.get('snippet') or '')[:200]}")
+        return "\n".join(lines)
 
     def add_viewpoint(self, text: str, source: str = "manual") -> None:
         self.user_viewpoints.append(text)

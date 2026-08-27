@@ -133,13 +133,18 @@ def _final_event(result: MootCourtResult, mode: str) -> Dict[str, Any]:
     }
 
 
-def run_embedded(ctx: CaseContext):
+def run_embedded(ctx: CaseContext, recall_context: str = ""):
     """
     内嵌模式：评估流程内的压力测试。
+    recall_context：RAG 自动召回材料（案件材料库 + 全局经验库，路由层组好传入）
     生成器：yield 逐轮事件；最后返回 moot_finished 事件 dict。
     调用方负责：ctx.correction_coeff 回写后重算 synthesize（见 routers/moot.py）。
     """
     materials = _materials_from_ctx(ctx)
+    if recall_context:
+        materials["evidence_summary"] = (
+            (materials["evidence_summary"] or "")
+            + "\n\n【知识库召回材料】\n" + recall_context)
     gen = _mock_run(materials) if _use_mock() else _real_run(
         ctx.case_description, materials, ctx.viewpoints_text())
     result = None
@@ -172,15 +177,20 @@ def run_embedded(ctx: CaseContext):
 
 def run_standalone(case_description: str, cause_type: str = "商标侵权",
                    viewpoints: List[str] = None,
-                   plaintiff_points: str = "") -> Generator[Dict[str, Any], None, None]:
+                   plaintiff_points: str = "",
+                   recall_context: str = "") -> Generator[Dict[str, Any], None, None]:
     """
     独立演练模式：跳过评估，手动组料。产出演练报告，不回写任何评分。
+    recall_context：全局经验库自动召回材料（无案件上下文）。
     """
     viewpoints = viewpoints or []
+    evidence_summary = ""
+    if recall_context:
+        evidence_summary = "【知识库召回材料】\n" + recall_context
     materials = {
         "rights_assessment": plaintiff_points or "（独立演练：未提供权利基础评估，由 AI 从案情自行组织）",
         "infringement_assessment": "",
-        "evidence_summary": "",
+        "evidence_summary": evidence_summary,
         "evidence_checklist": {"has_rights_proof": True,
                                "has_infringement_proof": True,
                                "has_damage_proof": False},
