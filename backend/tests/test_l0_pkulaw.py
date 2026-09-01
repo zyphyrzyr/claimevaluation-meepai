@@ -251,7 +251,8 @@ class TestMemoEnrichment:
         memo = report_generator.generate_memo("案", ctx, pkulaw=True)
 
         assert memo["pkulaw"]["status"] == "skipped"
-        assert "六、法律检索与引用核验" not in memo["markdown"]
+        # 断言章节标题而非序号：序号是动态编排的，写死会在加/减章节时误报
+        assert "法律检索与引用核验" not in memo["markdown"]
         assert "北大法宝" not in memo["markdown"]
 
     def test_enrichment_never_alters_the_score(self, monkeypatch):
@@ -297,7 +298,7 @@ class TestMemoEnrichment:
         memo = report_generator.generate_memo(
             "案", _scored_ctx(cause_type=CAUSE_COPYRIGHT), pkulaw=True)
         md = memo["markdown"]
-        assert "六、法律检索与引用核验" in md
+        assert "法律检索与引用核验" in md
         assert "中华人民共和国著作权法" in md
         assert "某某著作权侵权案" in md
         assert "核验通过 2 条" in md

@@ -19,6 +19,35 @@ def _fmt(v, suffix: str = "") -> str:
     return f"{v}{suffix}"
 
 
+_CN_NUM = "一二三四五六七八九十"
+
+
+def _cn(n: int) -> str:
+    return _CN_NUM[n - 1] if 1 <= n <= len(_CN_NUM) else str(n)
+
+
+class _Sections:
+    """
+    章节号按**实际渲染顺序**递增。
+
+    模拟法庭、判例价值、法宝检索三节都是条件渲染，硬编码编号会出现
+    「三、证据盘点」直接跳到「五、一页纸摘要」的断号，看着像漏了一章。
+    """
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def add(self, lines, title: str) -> None:
+        self.n += 1
+        lines.append(f"## {_cn(self.n)}、{title}")
+        lines.append("")
+
+    def heading(self, title: str) -> str:
+        """给不在主流程里拼装的章节用（如法宝增强节）；不渲染就别调，否则会跳号"""
+        self.n += 1
+        return f"## {_cn(self.n)}、{title}"
+
+
 def quadrant(legal: float, business: float) -> str:
     """
     二维四象限。
@@ -139,14 +168,14 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     """决策备忘录 → Markdown（Word 导出的内容源，P4 接 html-to-docx）"""
     s = data["scores"]
     rec = data["recommendation"]
+    sec = _Sections()
     lines = []
     lines.append(f"# 主诉评估决策备忘录：{data['case_name']}")
     lines.append("")
     lines.append(f"> 案由：{data['cause_type']} ｜ 业务目标：{data['goal_type']} ｜ "
                  f"评估模型：v4 二维主诉决策模型")
     lines.append("")
-    lines.append("## 一、核心结论")
-    lines.append("")
+    sec.add(lines, "核心结论")
     lines.append(f"- **主诉决策分**：{_fmt(s.get('final'))}（法律可行性 {_fmt(s.get('legal_feasibility'))} "
                  f"与 业务预期 {_fmt(s.get('business_expectation'))} 的均衡水平）")
     lines.append(f"- **决策象限**：{data['quadrant']}")
@@ -166,8 +195,7 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
         lines.append("")
 
     # 维度明细
-    lines.append("## 二、维度明细")
-    lines.append("")
+    sec.add(lines, "维度明细")
     dim = data["dimensions"]
     if dim["rights"]:
         lines.append(f"### 权利基础（{_fmt(dim['rights'].get('score'))} 分）")
@@ -178,26 +206,48 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
         if dim["infringement"].get("elements"):
             for el in dim["infringement"]["elements"]:
                 lines.append(f"- **{el.get('name')}**（{el.get('status')}）：{el.get('analysis', '')}")
+        if dim["infringement"].get("analysis"):
+            lines.append("")
+            lines.append(dim["infringement"]["analysis"])
         lines.append("")
     if dim["procedure"]:
         lines.append(f"### 诉讼程序（{_fmt(dim['procedure'].get('score'))} 分）")
         for r in dim["procedure"].get("risks", []):
             lines.append(f"- {r.get('item')}（{r.get('level')}）：{r.get('detail', '')}")
+        if dim["procedure"].get("analysis"):
+            lines.append("")
+            lines.append(dim["procedure"]["analysis"])
         lines.append("")
     if dim["damages"]:
         d = dim["damages"]
         lines.append(f"### 判赔规模（{_fmt(d.get('score'))} 分）")
         lines.append(f"类案判赔区间：P10 {_fmt(d.get('p10'), ' 万')} / P50 {_fmt(d.get('p50'), ' 万')} / "
-                     f"P90 {_fmt(d.get('p90'), ' 万')}；回报倍数 {_fmt(d.get('return_multiple'))}")
+                     f"P90 {_fmt(d.get('p90'), ' 万')}；回报倍数 {_fmt(d.get('return_multiple'))}"
+                     + (f"；侵权规模支撑度 {d['scale_support']}" if d.get("scale_support") else ""))
+        if d.get("analysis"):
+            lines.append("")
+            lines.append(d["analysis"])
+        lines.append("")
+    if dim["precedent"]:
+        p = dim["precedent"]
+        lines.append(f"### 判例价值（{_fmt(p.get('score'))} 分）")
+        lines.append(f"首案指数 {_fmt(p.get('first_case_index'))}；"
+                     f"影响力层级：{p.get('influence_level') or '—'}")
+        if p.get("analysis"):
+            lines.append("")
+            lines.append(p["analysis"])
         lines.append("")
     if dim["recovery"]:
         lines.append(f"### 回款能力（{_fmt(dim['recovery'].get('recovery_ability'))} 分）")
+        for f in dim["recovery"].get("red_flags", []):
+            lines.append(f"- ⚠️ {f}")
+        for f in dim["recovery"].get("green_flags", []):
+            lines.append(f"- ✅ {f}")
         lines.append("")
 
     # 证据缺口
     ev = data["evidence"]
-    lines.append("## 三、证据盘点与缺口清单")
-    lines.append("")
+    sec.add(lines, "证据盘点与缺口清单")
     lines.append(f"证据完整度 {_fmt(ev['completeness'], '%')}。缺口清单：")
     lines.append("")
     for g in ev["gap_list"]:
@@ -207,15 +257,13 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
 
     # 模拟法庭
     if data["moot"]["rounds"]:
-        lines.append("## 四、模拟法庭压力测试")
-        lines.append("")
+        sec.add(lines, "模拟法庭压力测试")
         lines.append(f"修正系数：{data['moot']['correction_coeff']}（庭审记录另行导出）")
         lines.append("")
 
     # 一页纸摘要
     op = data["one_pager"]
-    lines.append("## 五、向上汇报一页纸摘要")
-    lines.append("")
+    sec.add(lines, "向上汇报一页纸摘要")
     lines.append(f"**结论**：{op['conclusion']}（{op['quadrant']}）")
     lines.append("")
     for r in op["reasons"]:
@@ -226,8 +274,8 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
         for a in op["actions"]:
             lines.append(f"- {a}")
 
-    # 北大法宝增强章节（未配置或失败时返回空，不渲染）
-    lines.extend(render_pkulaw_section(data.get("pkulaw") or {}))
+    # 北大法宝增强章节（未配置或失败时返回空，不渲染，也不占章节号）
+    lines.extend(render_pkulaw_section(data.get("pkulaw") or {}, numbering=sec))
 
     lines.append("")
     lines.append("---")
@@ -283,12 +331,18 @@ def enrich_with_pkulaw(data: Dict[str, Any], case_id: str,
     return data
 
 
-def render_pkulaw_section(pk: Dict[str, Any]) -> List[str]:
-    """法宝检索与核验结果 → markdown 行。返回空 list 表示这一节不渲染"""
+def render_pkulaw_section(pk: Dict[str, Any], numbering=None) -> List[str]:
+    """
+    法宝检索与核验结果 → markdown 行。返回空 list 表示这一节不渲染。
+
+    numbering 传 _Sections 时章节号顺延主流程；不传则不带编号
+    （调用方只拿它判断有无内容时也用这种）。
+    """
     if pk.get("status") in (None, "skipped", "error"):
         return []  # 未配置或失败：不留空章节，报告保持干净
 
-    lines = ["## 六、法律检索与引用核验（北大法宝）", ""]
+    title = "法律检索与引用核验（北大法宝）"
+    lines = [numbering.heading(title) if numbering is not None else f"## {title}", ""]
     ref = pk.get("reference") or {}
 
     laws = ref.get("laws") or []
