@@ -90,6 +90,36 @@ def _post_chat(messages: list, model: str, temperature: float, max_tokens: int,
         raise LLMError(f"LLM 调用失败: {e}")
 
 
+def ping(max_tokens: int = 16) -> Dict[str, Any]:
+    """
+    连通性自检：发一个最小请求，确认「key 有效 + 地址可达 + 模型名存在」。
+
+    换供应商后这一步能一次性排掉三类故障：key 拿错（401）、base_url 还指着
+    上一家（401/404）、模型名已下线（404）。这三类的表面症状都是「调不通」，
+    但根因完全不同，靠猜要很久。
+
+    失败返回 ok=False 而不抛异常：自检是给人看的，抛出去只会在界面上变成一个
+    红色 toast，把有用的诊断信息吃掉。
+    """
+    import time
+
+    started = time.time()
+    try:
+        model = pick_model(None)
+        text = call_text("你是连通性自检助手。", "只回复两个字：正常",
+                         temperature=0, max_tokens=max_tokens)
+    except LLMError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:                      # 解析失败等，同样不该抛
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {
+        "ok": True,
+        "model": model,
+        "latency_ms": int((time.time() - started) * 1000),
+        "reply": (text or "")[:50],
+    }
+
+
 def _clean_json(raw: str) -> str:
     """
     从模型输出里剥出 JSON 主体。

@@ -197,6 +197,70 @@ export const knowledgeApi = {
 }
 
 // ============================================================
+// 运行设置（高级设置：LLM 供应商切换）
+// ============================================================
+
+export interface ProviderInfo {
+  id: string
+  label: string
+  base_url: string
+  strong_model: string
+  fast_model: string
+  json_mode_models: string[]
+  max_tokens_param: string
+  cost_tier: string
+  cost_tier_label: string
+  console_url: string
+  notes: string
+  builtin: boolean
+  /** 该供应商自己的密钥环境变量名，用于提示「去哪儿配」 */
+  primary_key_env: string
+  /** 该供应商是否已配好密钥 */
+  available: boolean
+  key_source: string | null
+  /** 只含末 4 位的掩码；真实密钥永远不会下发到前端 */
+  key_masked: string | null
+  /** 以下为当前生效值（可能被 .env 手写项覆盖，与预设值不同） */
+  effective_base_url?: string
+  effective_strong_model?: string
+  effective_fast_model?: string
+  effective_json_mode_models?: string[]
+  effective_max_tokens_param?: string
+}
+
+export interface SettingsSnapshot {
+  current: ProviderInfo
+  /** default / file / env —— env 表示被环境变量顶住，设置页改不动 */
+  selection_source: string
+  providers: ProviderInfo[]
+  mock: boolean
+  mock_controlled_by: string
+  warnings: string[]
+  key_masked: string | null
+  env_path: string
+}
+
+export interface PingResult {
+  ok: boolean
+  model?: string
+  latency_ms?: number
+  reply?: string
+  error?: string
+  skipped?: string
+}
+
+export const settingsApi = {
+  providers: () => request<SettingsSnapshot>('/settings/providers'),
+  select: (provider_id: string) =>
+    request<{ ok: boolean; provider_id: string; warnings: string[] }>('/settings/provider', {
+      method: 'POST',
+      body: JSON.stringify({ provider_id }),
+    }),
+  test: (provider_id: string) =>
+    request<PingResult>(`/settings/providers/${provider_id}/test`, { method: 'POST' }),
+}
+
+// ============================================================
 // 伴随式追问顾问（唯一对话 Agent，全程悬浮）
 // ============================================================
 

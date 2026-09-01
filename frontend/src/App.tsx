@@ -7,6 +7,7 @@ import MootCourt from './pages/MootCourt'
 import MootStandalone from './pages/MootStandalone'
 import Report from './pages/Report'
 import KnowledgeBase from './pages/KnowledgeBase'
+import Settings from './pages/Settings'
 import AdvisorPanel from './components/AdvisorPanel'
 
 const navItems = [
@@ -14,6 +15,7 @@ const navItems = [
   { to: '/new', label: '新建案件' },
   { to: '/moot', label: '模拟法庭' },
   { to: '/knowledge', label: '经验库' },
+  { to: '/settings', label: '高级设置' },
 ]
 
 export default function App() {
@@ -56,6 +58,7 @@ export default function App() {
           <Route path="/cases/:id/report" element={<Report />} />
           <Route path="/moot" element={<MootStandalone />} />
           <Route path="/knowledge" element={<KnowledgeBase />} />
+          <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
 

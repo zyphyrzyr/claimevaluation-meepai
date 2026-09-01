@@ -6,6 +6,9 @@ v2.1 修正：删除旧三维权重；对抗修正系数统一为 v4 的 0.7-1.3
 import os
 from pathlib import Path
 
+from .providers import (ALL_KEY_ENV_NAMES, DEFAULT_PROVIDER_ID, get_preset,
+                        resolve_api_key)
+
 BASE_DIR = Path(__file__).resolve().parent.parent   # backend/
 PROJECT_DIR = BASE_DIR.parent                        # soft-ip-v4/
 
@@ -61,12 +64,9 @@ POWER_MEAN_P = -0.5
 
 # 模型路由（§1）：强模型承担法律推理重的节点，普通模型承担结构化提取
 #
-# 这三个是「默认值」，不是写死的供应商。任何 OpenAI 兼容接口都可以替换，
-# 通过 .env 的 LLM_* 系列覆盖即可，无需改代码：
-#   DeepSeek  LLM_BASE_URL=https://api.deepseek.com      LLM_STRONG_MODEL=deepseek-reasoner
-#   Kimi      LLM_BASE_URL=https://api.moonshot.ai/v1    LLM_STRONG_MODEL=kimi-k3
-# 换供应商时 JSON_MODE_MODELS 必须同步改：它是按模型名判断能否下发
-# response_format=json_object 的白名单，留着旧模型名等于静默关掉 json 模式。
+# 这三个是「最后兜底的默认值」，不是写死的供应商。换供应商的正确做法是在
+# providers.py 加一条预设（或把 LLM_PROVIDER 指向已有预设），而不是改这里。
+# 解析链是：.env / 环境变量显式值 > 预设值 > 本文件的模块常量。
 LLM_STRONG_MODEL = "deepseek-reasoner"
 LLM_FAST_MODEL = "deepseek-chat"
 STRONG_MODEL_NODES = {"infringement", "judge"}   # 侵权认定、法官归纳
@@ -101,10 +101,12 @@ _RUNTIME_SETTING_KEYS = [
     "QCC_API_TOKEN",
     "PKULAW_API_TOKEN",
     "SILICONFLOW_API_KEY",
+    # 各家供应商的密钥槽（由 providers.py 推导），新增供应商时不必回来改这里
+    *ALL_KEY_ENV_NAMES,
 ]
 _DEFAULTS = {
     "USE_MOCK": "True",
-    "LLM_PROVIDER": "deepseek",
+    "LLM_PROVIDER": DEFAULT_PROVIDER_ID,
     "LLM_API_KEY": "",
     "LLM_BASE_URL": "",
     "LLM_STRONG_MODEL": "",
@@ -112,10 +114,13 @@ _DEFAULTS = {
     "LLM_JSON_MODE_MODELS": "",
     "LLM_MAX_TOKENS_PARAM": "",
     "DEEPSEEK_API_KEY": "",
-    "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    # 必须留空。它一旦有默认值，就永远优先于预设的 base_url，
+    # 切到 Kimi 时地址还指着 DeepSeek——切了个寂寞。
+    "DEEPSEEK_BASE_URL": "",
     "QCC_API_TOKEN": "",
     "PKULAW_API_TOKEN": "",
     "SILICONFLOW_API_KEY": "",
+    **{name: "" for name in ALL_KEY_ENV_NAMES},
 }
 
 
@@ -130,7 +135,13 @@ def _read_env_file() -> dict:
     return values
 
 
-def get_runtime_settings() -> dict:
+def _merged_raw_values() -> dict:
+    """
+    .env 与环境变量合并后的原始字典（未解析、未脱敏，**含明文密钥**）。
+
+    只在后端内部使用，用于按预设逐个探测「这家有没有配 key」。
+    严禁出现在任何 HTTP 响应、日志或前端载荷里。
+    """
     file_values = _read_env_file()
     merged = dict(_DEFAULTS)
     # 优先级：默认值 < .env 文件（非空） < 真实环境变量（非空）。
@@ -146,22 +157,39 @@ def get_runtime_settings() -> dict:
         env_value = os.getenv(key)
         if env_value and env_value.strip():
             merged[key] = env_value
+    return merged
 
-    # LLM_* 优先于 DEEPSEEK_*；两者都空才落回模块级默认值。
-    # 这样已有 .env 一字不改也能跑，同时允许整体换供应商。
-    api_key = merged["LLM_API_KEY"].strip() or merged["DEEPSEEK_API_KEY"].strip()
+
+def get_runtime_settings() -> dict:
+    merged = _merged_raw_values()
+
+    # 解析链：显式值（.env / 环境变量） > 供应商预设 > 模块常量。
+    # 显式优先是为了保留手改 .env 的自由度；预设次之，让「选一个预设」就能
+    # 拿到成套参数；模块常量只是最后的兜底。
+    #
+    # 密钥不在这条链上——它只从 providers.resolve_api_key 取，那是全项目
+    # 唯一的取凭证入口（接 KMS 时只改那一处）。
+    preset = get_preset(merged["LLM_PROVIDER"])
+    api_key, key_source = resolve_api_key(preset, merged)
     base_url = (merged["LLM_BASE_URL"].strip()
                 or merged["DEEPSEEK_BASE_URL"].strip()
+                or preset.base_url
                 or "https://api.deepseek.com")
-    strong_model = merged["LLM_STRONG_MODEL"].strip() or LLM_STRONG_MODEL
-    fast_model = merged["LLM_FAST_MODEL"].strip() or LLM_FAST_MODEL
+    strong_model = (merged["LLM_STRONG_MODEL"].strip()
+                    or preset.strong_model or LLM_STRONG_MODEL)
+    fast_model = (merged["LLM_FAST_MODEL"].strip()
+                  or preset.fast_model or LLM_FAST_MODEL)
     json_mode_raw = merged["LLM_JSON_MODE_MODELS"].strip()
     json_mode_models = ({m.strip() for m in json_mode_raw.split(",") if m.strip()}
-                        if json_mode_raw else set(JSON_MODE_MODELS))
+                        if json_mode_raw
+                        else (set(preset.json_mode_models) or set(JSON_MODE_MODELS)))
 
     settings = {
         "use_mock": str(merged["USE_MOCK"]).lower() == "true",
-        "llm_provider": merged["LLM_PROVIDER"],
+        "llm_provider": preset.id,
+        "llm_provider_label": preset.label,
+        "llm_key_source": key_source,
+        "llm_cost_tier": preset.cost_tier,
         "llm_api_key": api_key,
         "llm_base_url": base_url,
         "llm_strong_model": strong_model,
