@@ -1,18 +1,34 @@
 """
-评分引擎 - v4 二维乘法模型（纯规则，零 LLM）
-主诉决策分 = 法律可行性 × 业务预期
-  法律可行性 = 权利基础 × 侵权认定 × 诉讼程序 × 对抗检验修正系数(0.7-1.3)
-  业务预期   = 要钱 → 判赔规模 × 回款能力 / 要名 → 判例价值
-证据完整度 → 独立置信度（不参与乘法）
+评分引擎 - v4 二维决策模型（纯规则，零 LLM）
+
+聚合方式（v2 校准方案）：分层幂平均，替代原先的全连乘
+  M_p(x₁..xₙ) = ((1/n)·Σ xᵢᵖ)^(1/p)      p = POWER_MEAN_P（默认 -0.5）
+
+  法律可行性 = M_p(权利基础, 侵权认定, 诉讼程序) × 修正系数
+  业务预期   = 要钱 → M_p(判赔规模, 回款能力) / 要名 → 判例价值
+  主诉决策分 = M_p(法律可行性, 业务预期)
+
+为什么换成幂平均（原先连乘的问题）：
+  连乘的压缩率随维度数变化，五维各打 80 分最终只有 32.8 分，分数被压出常识区间。
+  幂平均保留三件事：
+    ① 自洽性——各维度同分时总分等于该分数（五维 80 = 80）
+    ② 一票否决——p <= 0 时任一维度归零，总分严格归零
+    ③ 短板惩罚——p 越小越接近最小值，维度越不均衡分数越低于算术平均
+
+证据完整度 → 独立置信度（不参与聚合）
 红线命中 → 硬门禁拦截（不看分数）
 """
 
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 from .config import (
     ADVERSARIAL_COEFF_MIN, ADVERSARIAL_COEFF_MAX,
-    SCORE_THRESHOLD_GO, SCORE_THRESHOLD_PATCH,
+    SCORE_THRESHOLD_GO, SCORE_THRESHOLD_PATCH, POWER_MEAN_P,
 )
+
+# 判定 p 是否为 0（几何平均）的浮点容差
+_P_EPS = 1e-12
 
 
 def normalize(score, scale=100):
@@ -23,18 +39,47 @@ def clip_coefficient(c: float) -> float:
     return max(ADVERSARIAL_COEFF_MIN, min(c, ADVERSARIAL_COEFF_MAX))
 
 
+def power_mean(values: Iterable[float], p: Optional[float] = None) -> float:
+    """
+    幂平均（广义平均）M_p = ((1/n)·Σ xᵢᵖ)^(1/p)
+
+    - p = 1   算术平均，不惩罚短板
+    - p = 0   几何平均，温和惩罚
+    - p < 0   惩罚短板，越负越严厉；p → −∞ 时趋近取最小值
+    - 一票否决：p <= 0 且任一维度 <= 0 时直接返回 0.0
+      （必须短路——p < 0 时 0^p 发散，会得到 inf/nan）
+    - 入参应为 0–100 的分值；调用方需先过 normalize() 夹取，
+      否则越界值（如 120）会被放大而非截断。
+    """
+    if p is None:
+        p = POWER_MEAN_P
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return 0.0
+    if any(v <= 0 for v in vals):
+        return 0.0
+    if abs(p) < _P_EPS:
+        return math.exp(sum(math.log(v) for v in vals) / len(vals))
+    return (sum(v ** p for v in vals) / len(vals)) ** (1.0 / p)
+
+
 def calculate_legal_feasibility(
     rights_score: float,
     infringement_score: float,
     procedure_score: float,
     correction_coefficient: float = 1.0,
 ) -> float:
-    """法律可行性：等权相乘（一票否决逻辑）× 模拟法庭修正系数"""
-    r = normalize(rights_score)
-    i = normalize(infringement_score)
-    p = normalize(procedure_score)
+    """法律可行性：三维幂平均（任一维度归零则归零）× 模拟法庭修正系数
+
+    修正系数保持乘法语义：它是模拟法庭压力测试给出的主动调整，
+    与「连乘导致的被动尺度压扁」性质不同。
+    修正系数须 ≠ 0，否则会误触发一票否决语义（clip_coefficient 已保证 >= 0.7）。
+    """
+    r = normalize(rights_score) * 100
+    i = normalize(infringement_score) * 100
+    p = normalize(procedure_score) * 100
     c = clip_coefficient(correction_coefficient)
-    return round(r * i * p * c * 100, 1)
+    return round(max(0.0, min(power_mean([r, i, p]) * c, 100.0)), 1)
 
 
 def calculate_business_expectation(
@@ -45,19 +90,21 @@ def calculate_business_expectation(
 ) -> float:
     """
     业务预期分流：
-      要钱 → 判赔规模 × 回款能力（财务导向）
-      要名 → 判例价值（名誉导向，财务仅作参考）
+      要钱 → M_p(判赔规模, 回款能力)（财务导向）
+      要名 → 判例价值（名誉导向，财务仅作参考，单值不聚合）
     """
     if goal_type == "要钱":
-        d = normalize(damages_scale or 0)
-        r = normalize(recovery_ability or 0)
-        return round(d * r * 100, 1)
+        d = normalize(damages_scale or 0) * 100
+        r = normalize(recovery_ability or 0) * 100
+        return round(max(0.0, min(power_mean([d, r]), 100.0)), 1)
     return round(normalize(precedent_value or 0) * 100, 1)
 
 
 def calculate_overall_score(legal_feasibility: float, business_expectation: float) -> float:
-    """主诉决策分 = 法律可行性 × 业务预期（只有这两项相乘）"""
-    return round(normalize(legal_feasibility) * normalize(business_expectation) * 100, 1)
+    """主诉决策分 = M_p(法律可行性, 业务预期)（v2：连乘改为幂平均）"""
+    lg = normalize(legal_feasibility) * 100
+    bz = normalize(business_expectation) * 100
+    return round(max(0.0, min(power_mean([lg, bz]), 100.0)), 1)
 
 
 def calculate_confidence(evidence_completeness: float, retrieval_complete: bool = True) -> float:
@@ -95,7 +142,9 @@ def generate_recommendation(
     决策建议：
       红线 block → 暂不建议起诉（硬门禁，不看分数）
       数据不完整 → 评估未完成（不输出误导性结论）
-      ≥75 建议优先启动 / 60-74 补充短板后启动（指出最低分子维度） / <60 暂缓
+      ≥ SCORE_THRESHOLD_GO 建议优先启动
+      ≥ SCORE_THRESHOLD_PATCH 补充短板后启动（指出最低分子维度）
+      < SCORE_THRESHOLD_PATCH 暂缓
     """
     missing_dimensions = list(missing_dimensions or [])
 

@@ -8,6 +8,7 @@
 from typing import Any, Dict
 
 from .case_context import CaseContext
+from .config import QUADRANT_AXIS_MID
 
 
 def _fmt(v, suffix: str = "") -> str:
@@ -19,10 +20,20 @@ def _fmt(v, suffix: str = "") -> str:
 
 
 def quadrant(legal: float, business: float) -> str:
-    """二维四象限"""
+    """
+    二维四象限。
+
+    注意：这里的中线是「法律轴 / 业务轴各自的中线」，语义上不同于
+    scoring.generate_recommendation 用的「总分档位线」，两者独立命名
+    （QUADRANT_AXIS_MID vs SCORE_THRESHOLD_GO），不可合并为一个常量。
+
+    取值之所以与 SCORE_THRESHOLD_GO 对齐：幂平均恒满足
+    min(x,y) <= M_p(x,y) <= max(x,y)，故两轴均 >= 78 时总分必 >= 78，
+    不会出现「四象限判双优、决策卡片判补短板」的同屏矛盾。
+    """
     if legal is None or business is None:
         return "—"
-    hi_l, hi_b = 70, 70
+    hi_l, hi_b = QUADRANT_AXIS_MID, QUADRANT_AXIS_MID
     if legal >= hi_l and business >= hi_b:
         return "双优区（强推起诉）"
     if legal >= hi_l:
@@ -137,7 +148,7 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     lines.append("## 一、核心结论")
     lines.append("")
     lines.append(f"- **主诉决策分**：{_fmt(s.get('final'))}（法律可行性 {_fmt(s.get('legal_feasibility'))} "
-                 f"× 业务预期 {_fmt(s.get('business_expectation'))}）")
+                 f"与 业务预期 {_fmt(s.get('business_expectation'))} 的均衡水平）")
     lines.append(f"- **决策象限**：{data['quadrant']}")
     lines.append(f"- **评估置信度**：{_fmt(data['confidence'])}（独立输出，基于证据完整度）")
     if s.get("correction_coeff") and s["correction_coeff"] != 1.0:
