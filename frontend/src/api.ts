@@ -61,6 +61,20 @@ export const api = {
   transcript: (id: string) => request<any>(`/report/${id}/transcript`),
 }
 
+/**
+ * 输出物导出（Word）
+ *
+ * 用普通链接下载而不是 fetch + blob：走 fetch 的话中文文件名要靠前端自己
+ * 从 Content-Disposition 里解析，而 header 里的 RFC 5987 编码各家浏览器
+ * 处理不一致，很容易下载出一串 %E5%86%B3%E7%AD%96… 的名字。交给浏览器
+ * 原生下载最稳。
+ */
+export const exportUrls = {
+  memoDocx: (id: string, version?: number) =>
+    `${BASE}/report/${id}/memo.docx${version ? `?version=${version}` : ''}`,
+  transcriptDocx: (id: string) => `${BASE}/report/${id}/transcript.docx`,
+}
+
 /** 通用 SSE POST：逐事件回调 */
 async function ssePost(path: string, body: any, onEvent: (e: any) => void): Promise<void> {
   const resp = await fetch(`${BASE}${path}`, {

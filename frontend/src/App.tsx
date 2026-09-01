@@ -8,6 +8,7 @@ import MootStandalone from './pages/MootStandalone'
 import Report from './pages/Report'
 import KnowledgeBase from './pages/KnowledgeBase'
 import Settings from './pages/Settings'
+import OnePager from './pages/OnePager'
 import AdvisorPanel from './components/AdvisorPanel'
 
 const navItems = [
@@ -21,7 +22,8 @@ const navItems = [
 export default function App() {
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="bg-ink text-white">
+      {/* print:hidden —— 打印一页纸摘要时，站点导航与悬浮控件不该跟着印出来 */}
+      <header className="bg-ink text-white print:hidden">
         <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-6">
             <span className="font-medium tracking-wide">
@@ -56,6 +58,7 @@ export default function App() {
           <Route path="/cases/:id/dashboard" element={<DecisionDashboard />} />
           <Route path="/cases/:id/moot" element={<MootCourt />} />
           <Route path="/cases/:id/report" element={<Report />} />
+          <Route path="/cases/:id/onepager" element={<OnePager />} />
           <Route path="/moot" element={<MootStandalone />} />
           <Route path="/knowledge" element={<KnowledgeBase />} />
           <Route path="/settings" element={<Settings />} />
@@ -65,7 +68,7 @@ export default function App() {
       {/* 伴随式追问顾问：案件页面全程悬浮 */}
       <AdvisorPanel />
 
-      <footer className="text-center text-xs text-ink/30 py-4">
+      <footer className="text-center text-xs text-ink/30 py-4 print:hidden">
         本系统为 AI 辅助评估工具，结果仅供内部决策参考，不构成正式法律意见
       </footer>
     </div>

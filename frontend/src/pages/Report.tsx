@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { api, knowledgeApi } from '../api'
+import { api, exportUrls, knowledgeApi } from '../api'
 import { diffLines, DiffRow } from '../utils/diff'
 
 /**
@@ -106,8 +106,20 @@ export default function Report() {
             {memo.case_name} · {memo.cause_type} · 目标「{memo.goal_type}」
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           {snapshotInfo && <span className="text-xs text-green-700">{snapshotInfo}</span>}
+          <Link
+            to={`/cases/${id}/onepager`}
+            className="border border-ink/20 text-ink px-4 py-2 rounded-lg text-sm hover:bg-ink-pale transition-colors"
+          >
+            一页纸汇报视图
+          </Link>
+          <a
+            href={exportUrls.memoDocx(id!)}
+            className="border border-ink/20 text-ink px-4 py-2 rounded-lg text-sm hover:bg-ink-pale transition-colors"
+          >
+            下载 Word
+          </a>
           <button
             onClick={snapshot}
             disabled={saving || s.final == null}
@@ -151,6 +163,13 @@ export default function Report() {
               <span className="text-[11px] text-ink/40">
                 <span className="text-red-600">■ 删除</span>　<span className="text-green-700">■ 新增</span>
               </span>
+              {/* 导出必须显式指名版本：定稿存档与对外发出的要是同一份 */}
+              <a
+                href={exportUrls.memoDocx(id!, diffVersion)}
+                className="text-xs text-ink/70 hover:text-ember underline underline-offset-2"
+              >
+                导出 v{diffVersion}
+              </a>
               <button
                 onClick={() => { setDiffVersion(null); setDiffRows(null) }}
                 className="text-xs text-ink/50 hover:text-ink"

@@ -76,7 +76,7 @@ export default function AdvisorPanel() {
       {/* 悬浮按钮 */}
       <button
         onClick={() => setOpen(!open)}
-        className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-ember hover:bg-ember-dark text-white shadow-lg flex items-center justify-center transition-colors"
+        className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-ember hover:bg-ember-dark text-white shadow-lg flex items-center justify-center transition-colors print:hidden"
         title="伴随式追问顾问"
       >
         {open ? (
@@ -93,7 +93,7 @@ export default function AdvisorPanel() {
 
       {/* 对话窗 */}
       {open && (
-        <div className="fixed bottom-24 right-6 z-50 w-[380px] max-h-[70vh] flex flex-col bg-white rounded-2xl border border-ink/10 shadow-xl overflow-hidden">
+        <div className="fixed bottom-24 right-6 z-50 w-[380px] max-h-[70vh] flex flex-col bg-white rounded-2xl border border-ink/10 shadow-xl overflow-hidden print:hidden">
           <div className="bg-ink text-white px-4 py-3">
             <div className="text-sm font-medium">追问顾问</div>
             <div className="text-[11px] text-white/50 mt-0.5">
