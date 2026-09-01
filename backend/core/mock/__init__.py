@@ -12,7 +12,6 @@ from .mock_data import (
     mock_damages,
     mock_precedent,
     mock_defendant_profile,
-    mock_rule_hits,
     mock_moot_rounds,
     mock_judge_result,
 )
@@ -25,7 +24,6 @@ __all__ = [
     "mock_damages",
     "mock_precedent",
     "mock_defendant_profile",
-    "mock_rule_hits",
     "mock_moot_rounds",
     "mock_judge_result",
 ]

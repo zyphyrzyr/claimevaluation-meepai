@@ -6,8 +6,9 @@
 LLM 调用统一走 core.llm_gateway（模型路由：法官归纳 node="judge" 用强模型）
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
+from ..config import CAUSE_TRADEMARK
 from ..llm_gateway import call_text, call_json
 
 from . import prompts
@@ -30,8 +31,10 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float = 0.2
 class PlaintiffAgent:
     """原告代理律师 Agent - 拥有完整案件信息和单方评估结果"""
 
-    def __init__(self):
-        self.system_prompt = prompts.PLAINTIFF_SYSTEM
+    def __init__(self, cause_type: str = CAUSE_TRADEMARK):
+        self.cause_type = cause_type
+        self.profile = prompts.get_cause_profile(cause_type)
+        self.system_prompt = prompts.build_system_prompt("plaintiff", cause_type)
         self.role_name = "原告代理律师"
         self.history = []
 
@@ -43,6 +46,7 @@ class PlaintiffAgent:
     ) -> str:
         """第一步：开庭陈述"""
         user_prompt = prompts.OPENING_STATEMENT_USER.format(
+            cause_guide=self.profile["opening_guide"],
             case_description=case_description[:3000],
             rights_assessment=rights_assessment[:1500] if rights_assessment else "未提供",
             infringement_assessment=infringement_assessment[:1500] if infringement_assessment else "未提供"
@@ -62,6 +66,7 @@ class PlaintiffAgent:
     ) -> str:
         """第三步：举证回应"""
         user_prompt = prompts.EVIDENCE_PLAINTIFF_USER.format(
+            cause_guide=self.profile["evidence_guide"],
             defendant_response=defendant_response[:2000],
             case_description=case_description[:2000],
             evidence_summary=evidence_summary[:1500] if evidence_summary else "未上传证据文件",
@@ -90,8 +95,10 @@ class PlaintiffAgent:
 class DefendantAgent:
     """被告代理律师 Agent - 只知道公开案情，不知道原告内部评估"""
 
-    def __init__(self):
-        self.system_prompt = prompts.DEFENDANT_SYSTEM
+    def __init__(self, cause_type: str = CAUSE_TRADEMARK):
+        self.cause_type = cause_type
+        self.profile = prompts.get_cause_profile(cause_type)
+        self.system_prompt = prompts.build_system_prompt("defendant", cause_type)
         self.role_name = "被告代理律师"
         self.history = []
 
@@ -102,6 +109,7 @@ class DefendantAgent:
     ) -> str:
         """第二步：被告答辩"""
         user_prompt = prompts.DEFENSE_RESPONSE_USER.format(
+            cause_guide=self.profile["defense_guide"],
             plaintiff_opening=plaintiff_opening[:2000],
             case_description=case_description[:2000]
         )
@@ -135,8 +143,10 @@ class DefendantAgent:
 class JudgeAgent:
     """法官 Agent - 中立评判，产出修正系数"""
 
-    def __init__(self):
-        self.system_prompt = prompts.JUDGE_SYSTEM
+    def __init__(self, cause_type: str = CAUSE_TRADEMARK):
+        self.cause_type = cause_type
+        self.profile = prompts.get_cause_profile(cause_type)
+        self.system_prompt = prompts.build_system_prompt("judge", cause_type)
         self.role_name = "审判法官"
         self.history = []
 
@@ -147,6 +157,7 @@ class JudgeAgent:
     ) -> Dict[str, Any]:
         """第五步：法官归纳，返回结构化 JSON"""
         user_prompt = prompts.JUDGE_SUMMARY_USER.format(
+            cause_guide=self.profile["judge"],
             full_transcript=full_transcript[:5000],
             case_description=case_description[:2000]
         )

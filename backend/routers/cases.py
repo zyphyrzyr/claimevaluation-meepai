@@ -50,6 +50,20 @@ def create_case(payload: CaseCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, f"不支持的案由: {payload.cause_type}")
     if payload.goal_type not in GOAL_TYPES:
         raise HTTPException(400, f"不支持的业务目标: {payload.goal_type}")
+    if not payload.client_org.strip():
+        # 主诉评估的发起方就是原告，缺了它红线引擎的主体资格检查只能报
+        # 「有当事人但没有原告」并硬门禁拦截整个评估——与其让用户在流程末端
+        # 撞上红线，不如在录入时就拦下来。
+        raise HTTPException(400, "请填写我司主体（原告）：主诉评估必须由权利人发起")
+
+    # 当事人：红线引擎的主体资格检查依赖 parties（评测报告 P0-1）
+    parties = []
+    if payload.client_org.strip():
+        parties.append({"role": "plaintiff", "name": payload.client_org.strip(),
+                        "party_type": "company"})
+    if payload.defendant_name.strip():
+        parties.append({"role": "defendant", "name": payload.defendant_name.strip(),
+                        "party_type": payload.defendant_type})
 
     ctx = CaseContext(
         case_description=payload.case_description,
@@ -60,6 +74,7 @@ def create_case(payload: CaseCreate, db: Session = Depends(get_db)):
             "type": payload.defendant_type,
             "evidence_texts": payload.evidence_texts,
         },
+        parties=parties,
     )
     for v in payload.viewpoints:
         if v.strip():
@@ -76,9 +91,10 @@ def create_case(payload: CaseCreate, db: Session = Depends(get_db)):
     db.add(case)
     db.flush()
 
-    if payload.defendant_name:
-        db.add(Party(case_id=case.id, role="defendant",
-                     name=payload.defendant_name, party_type=payload.defendant_type))
+    # 原告此前只落在 Case.client_org，未进 Party 表，导致案件详情读不到当事人
+    for p in parties:
+        db.add(Party(case_id=case.id, role=p["role"],
+                     name=p["name"], party_type=p["party_type"]))
 
     ctx.case_id = case.id
     case.context_json = ctx.to_dict()

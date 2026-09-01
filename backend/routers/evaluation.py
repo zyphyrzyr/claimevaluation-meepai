@@ -13,8 +13,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.case_context import CaseContext
+from core.config import (SCORE_THRESHOLD_GO, SCORE_THRESHOLD_PATCH,
+                         QUADRANT_AXIS_MID, POWER_MEAN_P)
 from core.database import Case, ScoreSnapshot, AuditEvent, get_db
-from core.orchestrator import Orchestrator, NODE_ORDER, NODE_LABELS
+from core.orchestrator import (Orchestrator, NODE_ORDER, NODE_LABELS,
+                               BUSINESS_DIMENSIONS, RERUNNABLE_NODES)
 
 router = APIRouter()
 
@@ -53,7 +56,9 @@ def _save_ctx(db: Session, case: Case, ctx: CaseContext) -> None:
 
 @router.get("/nodes")
 def nodes_meta():
-    return {"order": NODE_ORDER, "labels": NODE_LABELS}
+    return {"order": NODE_ORDER, "labels": NODE_LABELS,
+            "business_dimensions": BUSINESS_DIMENSIONS,
+            "rerunnable": RERUNNABLE_NODES}
 
 
 @router.post("/{case_id}/run")
@@ -104,6 +109,8 @@ def evaluation_result(case_id: str, db: Session = Depends(get_db)):
     return {
         "case_id": case.id,
         "status": case.status,
+        "cause_type": case.cause_type,
+        "goal_type": case.goal_type,
         "scores": ctx.scores,
         "confidence": ctx.confidence,
         "recommendation": ctx.recommendation,
@@ -121,6 +128,13 @@ def evaluation_result(case_id: str, db: Session = Depends(get_db)):
             "metrics": (ctx.defendant_profile or {}).get("metrics", {}),
         },
         "correction_coeff": ctx.correction_coeff,
+        # 档位与四象限中线由后端下发，避免前端再硬编码一份（两处硬编码必然漂移）
+        "thresholds": {
+            "go": SCORE_THRESHOLD_GO,
+            "patch": SCORE_THRESHOLD_PATCH,
+            "quadrant_mid": QUADRANT_AXIS_MID,
+            "power_mean_p": POWER_MEAN_P,
+        },
     }
 
 
@@ -141,6 +155,18 @@ def rerun_node(case_id: str, payload: RerunRequest, db: Session = Depends(get_db
         orch.rerun_node(payload.node, guidance=payload.guidance)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    # 必须在 _save_ctx 之前取：_save_ctx 落库后会清空 audit_trail
+    stale = [{"node": n, "label": NODE_LABELS.get(n, n),
+              "reason": d.get("stale_reason", "")}
+             for n, d in ctx.dimension_results.items()
+             if d.get("status") == "stale"]
+    last_event = ctx.audit_trail[-1] if ctx.audit_trail else None
+    effect = (last_event or {}).get("effect", "")
+
     _save_ctx(db, case, ctx)
-    return {"ok": True, "dimension_results": ctx.dimension_results,
-            "scores": ctx.scores, "recommendation": ctx.recommendation}
+    return {"ok": True,
+            "dimension_results": ctx.dimension_results,
+            "scores": ctx.scores,
+            "recommendation": ctx.recommendation,
+            "stale_nodes": stale,          # 前端据此展示「待确认重跑」
+            "effect": effect}

@@ -29,8 +29,8 @@ export default function NewCase() {
 
   async function submit() {
     setError('')
-    if (!form.name.trim() || !form.case_description.trim()) {
-      setError('案件名称和案情描述为必填项')
+    if (!form.name.trim() || !form.case_description.trim() || !form.client_org.trim()) {
+      setError('案件名称、我司主体（原告）和案情描述为必填项')
       return
     }
     setSubmitting(true)
@@ -63,9 +63,9 @@ export default function NewCase() {
               placeholder="如：XX 商标侵权主诉评估" />
           </div>
           <div>
-            <label className={labelCls}>我司主体</label>
+            <label className={labelCls}>我司主体（原告）*</label>
             <input className={inputCls} value={form.client_org} onChange={set('client_org')}
-              placeholder="原告公司名称" />
+              placeholder="原告公司名称（主诉评估须由权利人发起）" />
           </div>
         </div>
 
@@ -90,7 +90,7 @@ export default function NewCase() {
                       : 'border-ink/15 bg-white text-ink/60 hover:border-ink/30'
                   }`}
                 >
-                  {t === '要钱' ? '要钱（判赔规模 × 回款能力）' : '要名（判例价值）'}
+                  {t === '要钱' ? '要钱（判赔规模 · 回款能力）' : '要名（判例价值）'}
                 </button>
               ))}
             </div>

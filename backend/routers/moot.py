@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from core import moot_service
 from core.case_context import CaseContext
+from core.config import CAUSE_TRADEMARK, SUPPORTED_CAUSE_TYPES
 from core.database import Case, MootRound, get_db
 from core.orchestrator import Orchestrator
 
@@ -142,7 +143,7 @@ def get_moot(case_id: str, db: Session = Depends(get_db)):
 
 class StandaloneMootRequest(BaseModel):
     case_description: str
-    cause_type: str = "商标侵权"
+    cause_type: str = CAUSE_TRADEMARK
     viewpoints: List[str] = []
     plaintiff_points: str = ""    # 我方主张要点（可选，替代权利基础评估结论）
 
@@ -152,6 +153,8 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
     """独立演练：不建案、不评估、不回写评分，输出演练报告"""
     if not payload.case_description.strip():
         raise HTTPException(400, "案情描述不能为空")
+    if payload.cause_type not in SUPPORTED_CAUSE_TYPES:
+        raise HTTPException(400, f"不支持的案由: {payload.cause_type}")
 
     events: queue.Queue = queue.Queue()
 

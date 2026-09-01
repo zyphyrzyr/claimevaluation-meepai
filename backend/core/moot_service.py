@@ -11,7 +11,8 @@ import time
 from typing import Any, Dict, Generator, List, Optional
 
 from .case_context import CaseContext
-from .config import get_runtime_settings
+from .config import CAUSE_TRADEMARK, get_runtime_settings
+from .legal_rules import build_evidence_checklist
 from .moot_court.procedure import MootCourtProcedure, MootCourtResult, STEP_NAMES
 
 
@@ -35,19 +36,9 @@ def _materials_from_ctx(ctx: CaseContext) -> Dict[str, Any]:
             parts.append(f"（评估分：{r['score']}）")
         return " ".join(parts) if parts else "未提供"
 
-    # 证据清单（供原告举证环节）
+    # 证据清单（供原告举证环节）——映射口径统一收敛到 legal_rules，避免两处漂移
     matrix = ctx.evidence_matrix or []
-    checklist = {
-        "has_rights_proof": any(
-            m.get("category") == "权利基础证据" and m.get("status") == "sufficient"
-            for m in matrix),
-        "has_infringement_proof": any(
-            m.get("category") == "侵权认定证据" and m.get("status") == "sufficient"
-            for m in matrix),
-        "has_damage_proof": any(
-            m.get("category") == "损害赔偿证据" and m.get("status") == "sufficient"
-            for m in matrix),
-    }
+    checklist = build_evidence_checklist(matrix)
     evidence_summary = "\n".join(
         f"- [{m.get('status', '')}] {m.get('item', '')}：{m.get('reason', '')}"
         for m in matrix[:12])
@@ -63,16 +54,17 @@ def _materials_from_ctx(ctx: CaseContext) -> Dict[str, Any]:
 # 运行（生成器：逐轮 yield 事件）
 # ============================================================
 
-def _mock_run(materials: Dict[str, Any]) -> Generator[Dict[str, Any], None, MootCourtResult]:
-    """Mock 模式：逐轮吐出预置发言"""
+def _mock_run(materials: Dict[str, Any],
+              cause_type: str = CAUSE_TRADEMARK) -> Generator[Dict[str, Any], None, MootCourtResult]:
+    """Mock 模式：逐轮吐出预置发言（按案由取对应剧本）"""
     from .mock import mock_moot_rounds, mock_judge_result
     result = MootCourtResult()
-    for rnd in mock_moot_rounds():
+    for rnd in mock_moot_rounds(cause_type):
         time.sleep(0.6)  # 演示节奏
         result.rounds.append(rnd)
         yield {"event": "round", **rnd}
     # 解析法官结果
-    judge_raw = mock_judge_result()
+    judge_raw = mock_judge_result(cause_type)
     result.correction_coefficient = float(judge_raw.get("correction_coefficient", 1.0))
     result.defense_strength = int(judge_raw.get("defense_strength", 50))
     result.judge_summary = judge_raw.get("summary", "")
@@ -90,7 +82,8 @@ def _mock_run(materials: Dict[str, Any]) -> Generator[Dict[str, Any], None, Moot
 
 
 def _real_run(case_description: str, materials: Dict[str, Any],
-              viewpoints: str = "") -> Generator[Dict[str, Any], None, MootCourtResult]:
+              viewpoints: str = "",
+              cause_type: str = CAUSE_TRADEMARK) -> Generator[Dict[str, Any], None, MootCourtResult]:
     """真实模式：MootCourtProcedure 分步运行"""
     if viewpoints:
         # 用户观点仅注入原告侧（影响我方主张组织，不影响被告抗辩生成）
@@ -102,6 +95,7 @@ def _real_run(case_description: str, materials: Dict[str, Any],
         infringement_assessment=materials.get("infringement_assessment", ""),
         evidence_summary=materials.get("evidence_summary", ""),
         evidence_checklist=materials.get("evidence_checklist"),
+        cause_type=cause_type,
     )
     result = MootCourtResult()
     for rr in procedure._run_steps():
@@ -145,8 +139,8 @@ def run_embedded(ctx: CaseContext, recall_context: str = ""):
         materials["evidence_summary"] = (
             (materials["evidence_summary"] or "")
             + "\n\n【知识库召回材料】\n" + recall_context)
-    gen = _mock_run(materials) if _use_mock() else _real_run(
-        ctx.case_description, materials, ctx.viewpoints_text())
+    gen = _mock_run(materials, ctx.cause_type) if _use_mock() else _real_run(
+        ctx.case_description, materials, ctx.viewpoints_text(), ctx.cause_type)
     result = None
     try:
         while True:
@@ -175,13 +169,14 @@ def run_embedded(ctx: CaseContext, recall_context: str = ""):
     yield _final_event(result, "embedded")
 
 
-def run_standalone(case_description: str, cause_type: str = "商标侵权",
+def run_standalone(case_description: str, cause_type: str = CAUSE_TRADEMARK,
                    viewpoints: List[str] = None,
                    plaintiff_points: str = "",
                    recall_context: str = "") -> Generator[Dict[str, Any], None, None]:
     """
     独立演练模式：跳过评估，手动组料。产出演练报告，不回写任何评分。
     recall_context：全局经验库自动召回材料（无案件上下文）。
+    cause_type：决定三方 Agent 的案由画像（请求权基础/抗辩路径/证据类型）。
     """
     viewpoints = viewpoints or []
     evidence_summary = ""
@@ -195,8 +190,8 @@ def run_standalone(case_description: str, cause_type: str = "商标侵权",
                                "has_infringement_proof": True,
                                "has_damage_proof": False},
     }
-    gen = _mock_run(materials) if _use_mock() else _real_run(
-        case_description, materials, "\n".join(viewpoints))
+    gen = _mock_run(materials, cause_type) if _use_mock() else _real_run(
+        case_description, materials, "\n".join(viewpoints), cause_type)
     result = None
     try:
         while True:

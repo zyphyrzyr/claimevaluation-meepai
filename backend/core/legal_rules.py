@@ -1,17 +1,49 @@
 """
-规则引擎 - 商标侵权案件红线检查
-第一版规则化内容：
+规则引擎 - 主诉红线硬门禁（三案由通用：商标侵权 / 著作权侵权 / 不正当竞争）
+
+六条规则（纯规则、零 LLM）：
 1. 诉讼时效是否临期
 2. 主体资格是否明显缺失
 3. 仲裁条款是否存在
-4. 是否缺少关键权利证明
-5. 是否缺少关键侵权固定证据
+4. 是否缺少关键权利证明          ← block
+5. 是否缺少关键侵权固定证据      ← block
 6. 是否缺少损害赔偿主张基础材料
+
+文案按案由中立撰写：权利证明在不同案由下分别是商标注册证、著作权登记证书、
+「有一定影响」的知名度证据，规则只判断是否缺失，不预设具体证据名称。
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable
 from datetime import datetime, timedelta
 from dataclasses import dataclass
+
+# v4 证据矩阵（evidence_matrix）的类别 -> 规则引擎证据清单（evidence_checklist）的字段
+# 映射口径：该类别下存在任一 status == "sufficient" 的条目即为 True
+EVIDENCE_CATEGORY_TO_CHECK = {
+    "has_rights_proof": "权利基础证据",
+    "has_infringement_proof": "侵权认定证据",
+    "has_damage_proof": "损害赔偿证据",
+}
+
+
+def build_evidence_checklist(evidence_matrix: Iterable[Dict[str, Any]]) -> Dict[str, bool]:
+    """
+    v4 的 evidence_matrix（每项带 category/status）→ 规则引擎所需的
+    evidence_checklist（三个布尔值）。
+
+    这是两套数据结构之间唯一的映射层。编排器与模拟法庭都走这里，
+    避免各写一份导致口径漂移。
+
+    口径：某类别下存在任一 status == "sufficient" 的条目即为 True。
+    partial / missing 均视为 False——证据不完整在民事诉讼中通常不足以支撑主张。
+    """
+    matrix = list(evidence_matrix or [])
+    return {
+        field: any(m.get("category") == category and m.get("status") == "sufficient"
+                   for m in matrix)
+        for field, category in EVIDENCE_CATEGORY_TO_CHECK.items()
+    }
+
 
 @dataclass
 class RuleResult:
@@ -108,20 +140,33 @@ class RuleEngine:
     def check_subject_qualification(self, case_facts: Dict) -> RuleResult:
         """
         规则2: 主体资格检查
-        原告必须是商标注册人或独占许可被许可人
-        """
+        原告必须是权利人或独占许可被许可人
+        （商标案由下为商标注册人，著作权案由下为著作权人/专有使用权人，
+          不正当竞争案由下为受影响经营者）"""
         parties = case_facts.get("parties", [])
         evidence_checklist = case_facts.get("evidence_checklist", {})
 
+        if not parties:
+            # 关键区分：「没采集到当事人数据」不等于「经核实没有原告」。
+            # 前者是信息缺失（warning），后者才是实体缺陷（block）。
+            # 早期实现把两者混为一谈，导致 parties 字段一空就 block 掉每一个案件。
+            return RuleResult(
+                rule_code="subject_qualification",
+                rule_name="主体资格检查",
+                severity="warning",
+                result="未采集当事人信息",
+                reason="未获取到原被告主体信息，无法校验主体资格，建议补充填写"
+            )
+
         # 检查是否有原告
-        has_plaintiff = any(p["role"] == "plaintiff" for p in parties)
+        has_plaintiff = any(p.get("role") == "plaintiff" for p in parties)
         if not has_plaintiff:
             return RuleResult(
                 rule_code="subject_qualification",
                 rule_name="主体资格检查",
                 severity="block",
                 result="缺少原告信息",
-                reason="未识别到原告（权利人）信息"
+                reason=f"已录入 {len(parties)} 位当事人，但其中没有原告（权利人）"
             )
 
         # 检查是否有权利证明
@@ -132,7 +177,7 @@ class RuleEngine:
                 rule_name="主体资格检查",
                 severity="warning",
                 result="权利证明可能缺失",
-                reason="未检测到商标注册证或独占许可合同上传"
+                reason="未检测到权利基础证明文件（商标注册证 / 作品登记证书 / 权属合同）上传"
             )
 
         return RuleResult(
@@ -140,7 +185,7 @@ class RuleEngine:
             rule_name="主体资格检查",
             severity="pass",
             result="原告主体资格完整",
-            reason="原告为注册商标持有人或独占被许可人"
+            reason="已录入原告，且持有权利基础证明"
         )
 
     def check_arbitration_clause(self, case_facts: Dict) -> RuleResult:
@@ -150,9 +195,13 @@ class RuleEngine:
         """
         case_description = case_facts.get("case_description", "")
 
-        # 关键词检测
+        # 关键词检测。先排除否定表述——「双方未约定仲裁协议」同样含「仲裁」二字，
+        # 不排除的话会把「明确没有仲裁条款」的案件误报为「可能存在仲裁协议」。
         arbitration_keywords = ["仲裁", "仲裁委员会", "arbitration", "仲裁条款"]
-        has_arbitration = any(kw in case_description for kw in arbitration_keywords)
+        negation_phrases = ["无仲裁", "没有仲裁", "未约定仲裁", "未签仲裁",
+                            "不存在仲裁", "不涉仲裁", "不通过仲裁", "未经仲裁"]
+        has_arbitration = (any(kw in case_description for kw in arbitration_keywords)
+                           and not any(p in case_description for p in negation_phrases))
 
         if has_arbitration:
             return RuleResult(
@@ -174,7 +223,7 @@ class RuleEngine:
     def check_missing_rights_proof(self, case_facts: Dict) -> RuleResult:
         """
         规则4: 权利证明缺失检查
-        必须提供：商标注册证、续展证明（如需要）
+        必须提供：商标注册证 / 作品登记证书 / 权属与知名度证据（按案由而定）
         """
         evidence_checklist = case_facts.get("evidence_checklist", {})
         has_rights_proof = evidence_checklist.get("has_rights_proof", False)
@@ -185,7 +234,7 @@ class RuleEngine:
                 rule_name="权利证明缺失检查",
                 severity="block",
                 result="缺少权利证明",
-                reason="未上传商标注册证或商标权利证明文件的，无法证明原告权利基础"
+                reason="未上传权利基础证明文件，无法证明原告权利基础"
             )
 
         return RuleResult(
@@ -193,7 +242,7 @@ class RuleEngine:
             rule_name="权利证明缺失检查",
             severity="pass",
             result="权利证明文件齐全",
-            reason="已上传商标注册证"
+            reason="已上传权利基础证明"
         )
 
     def check_missing_infringement_proof(self, case_facts: Dict) -> RuleResult:

@@ -9,7 +9,8 @@
 
 from typing import Any, Dict, List, Optional
 
-from .config import CAUSE_TRADEMARK, CAUSE_COPYRIGHT, CAUSE_UNFAIR_COMPETITION
+from .config import (CAUSE_TRADEMARK, CAUSE_COPYRIGHT,
+                     CAUSE_UNFAIR_COMPETITION, SUPPORTED_CAUSE_TYPES)
 from .llm_gateway import call_json
 
 # ============================================================
@@ -84,9 +85,23 @@ _SYSTEM = (
 )
 
 
+def require_supported_cause(cause_type: str) -> str:
+    """
+    校验案由并原样返回。未知案由抛 ValueError，不静默回落商标。
+
+    mock 数据（core/mock）与模拟法庭画像（core/moot_court/prompts）已各自做了
+    同样的收敛，这里是真实 Prompt 链路上的同一道闸。
+    """
+    if cause_type not in CHECKLISTS:
+        raise ValueError(
+            f"不支持的案由：{cause_type}；当前支持 {SUPPORTED_CAUSE_TYPES}")
+    return cause_type
+
+
 def _build_prompt(cause_type: str, case_description: str,
                   evidence_texts: str, user_viewpoints: str) -> str:
-    checklist = CHECKLISTS.get(cause_type, CHECKLISTS[CAUSE_TRADEMARK])
+    require_supported_cause(cause_type)
+    checklist = CHECKLISTS[cause_type]
     lines = []
     for cat in _CATEGORIES:
         for idx, entry in enumerate(checklist.get(cat, []), 1):
@@ -154,7 +169,10 @@ def review_evidence(
         from .mock import mock_evidence_review
         return mock_evidence_review(cause_type)
 
-    checklist = CHECKLISTS.get(cause_type, CHECKLISTS[CAUSE_TRADEMARK])
+    # 未知案由显式报错，不静默回落到商标清单：
+    # 回落会产出一份看起来正常、实际按商标要件核验的证据矩阵（评测报告 P2）
+    require_supported_cause(cause_type)
+    checklist = CHECKLISTS[cause_type]
     prompt = _build_prompt(cause_type, case_description, evidence_texts, user_viewpoints)
     result = call_json(_SYSTEM, prompt, node="evidence_review")
 

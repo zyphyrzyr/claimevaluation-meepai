@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Callable
 
+from ..config import CAUSE_TRADEMARK
 from .agents import PlaintiffAgent, DefendantAgent, JudgeAgent
 
 
@@ -100,7 +101,8 @@ class MootCourtProcedure:
             case_description="...",
             rights_assessment="...",
             infringement_assessment="...",
-            evidence_summary="..."
+            evidence_summary="...",
+            cause_type="著作权侵权"   # 决定请求权基础、抗辩路径与证据类型
         )
         result = procedure.run()  # 一次性运行
 
@@ -116,7 +118,8 @@ class MootCourtProcedure:
         rights_assessment: str = "",
         infringement_assessment: str = "",
         evidence_summary: str = "",
-        evidence_checklist: Optional[Dict[str, bool]] = None
+        evidence_checklist: Optional[Dict[str, bool]] = None,
+        cause_type: str = CAUSE_TRADEMARK
     ):
         self.case_description = case_description
         self.rights_assessment = rights_assessment
@@ -127,10 +130,12 @@ class MootCourtProcedure:
             "has_infringement_proof": True,
             "has_damage_proof": False
         }
+        self.cause_type = cause_type
 
-        self.plaintiff = PlaintiffAgent()
-        self.defendant = DefendantAgent()
-        self.judge = JudgeAgent()
+        # 三个 Agent 共用同一案由画像，保证三方在同一法律框架下对抗
+        self.plaintiff = PlaintiffAgent(cause_type)
+        self.defendant = DefendantAgent(cause_type)
+        self.judge = JudgeAgent(cause_type)
 
         self.rounds: List[RoundResult] = []
         self._transcript_parts: List[str] = []
@@ -308,7 +313,8 @@ def run_moot_court(
     rights_assessment: str = "",
     infringement_assessment: str = "",
     evidence_summary: str = "",
-    evidence_checklist: Optional[Dict[str, bool]] = None
+    evidence_checklist: Optional[Dict[str, bool]] = None,
+    cause_type: str = CAUSE_TRADEMARK
 ) -> Dict[str, Any]:
     """
     便捷函数：运行完整模拟法庭，返回 dict 格式结果
@@ -331,7 +337,8 @@ def run_moot_court(
         rights_assessment=rights_assessment,
         infringement_assessment=infringement_assessment,
         evidence_summary=evidence_summary,
-        evidence_checklist=evidence_checklist
+        evidence_checklist=evidence_checklist,
+        cause_type=cause_type
     )
     result = procedure.run()
     return result.to_dict()

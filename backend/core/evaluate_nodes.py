@@ -54,7 +54,7 @@ def evaluate_rights(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:
     """子维度 1.1 权利基础（<60 触发红灯）"""
     if use_mock:
         from .mock import mock_rights
-        return mock_rights()
+        return mock_rights(ctx.cause_type)
 
     focus = {
         "商标侵权": "商标是否有效注册、是否连续三年使用（防撤三）、核定范围是否覆盖侵权、是否驰名、无效/撤销风险",
@@ -83,7 +83,7 @@ def evaluate_infringement(ctx: CaseContext, use_mock: bool = False) -> Dict[str,
     """子维度 1.2 侵权认定（构成要件逐一认定）"""
     if use_mock:
         from .mock import mock_infringement
-        return mock_infringement()
+        return mock_infringement(ctx.cause_type)
 
     elements = {
         "商标侵权": ["商标性使用", "商品/服务相同或类似", "商标相同或近似", "混淆可能性", "是否正当使用"],
@@ -112,7 +112,7 @@ def evaluate_procedure(ctx: CaseContext, use_mock: bool = False) -> Dict[str, An
     """子维度 1.3 诉讼程序"""
     if use_mock:
         from .mock import mock_procedure
-        return mock_procedure()
+        return mock_procedure(ctx.cause_type)
 
     prompt = f"""{_base(ctx)}
 
@@ -132,7 +132,7 @@ def evaluate_damages(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]
     """判赔规模（要钱目标）：P10/P50/P90 + 回报倍数 + 侵权规模支撑度"""
     if use_mock:
         from .mock import mock_damages
-        return mock_damages()
+        return mock_damages(ctx.cause_type)
 
     prompt = f"""{_base(ctx)}
 
@@ -157,7 +157,7 @@ def evaluate_precedent(ctx: CaseContext, use_mock: bool = False) -> Dict[str, An
     """判例价值（要名目标）"""
     if use_mock:
         from .mock import mock_precedent
-        return mock_precedent()
+        return mock_precedent(ctx.cause_type)
 
     prompt = f"""{_base(ctx)}
 

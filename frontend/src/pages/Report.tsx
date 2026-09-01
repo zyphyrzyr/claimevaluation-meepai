@@ -52,7 +52,7 @@ export default function Report() {
     if (!id || !memo) return
     const content = [
       `结论：${memo.one_pager.conclusion}（决策分 ${memo.scores.final ?? '—'}）`,
-      `法律可行性 ${memo.scores.legal_feasibility ?? '—'} × 业务预期 ${memo.scores.business_expectation ?? '—'}；置信度 ${memo.confidence ?? '—'}%。`,
+      `法律可行性 ${memo.scores.legal_feasibility ?? '—'} 与 业务预期 ${memo.scores.business_expectation ?? '—'} 的均衡水平 ${memo.scores.final ?? '—'}；置信度 ${memo.confidence ?? '—'}%。`,
       ...memo.one_pager.reasons.map((r: string) => `· ${r}`),
     ].join('\n')
     try {
@@ -233,7 +233,7 @@ export default function Report() {
       {/* 核心指标 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-5">
         {[
-          { label: '主诉决策分', value: s.final, hint: '法律可行性 × 业务预期' },
+          { label: '主诉决策分', value: s.final, hint: '法律可行性与业务预期的均衡水平' },
           { label: '模拟法庭修正系数', value: s.correction_coeff, hint: s.correction_coeff !== 1 ? '已回写' : '未进行/无修正' },
           { label: '评估置信度', value: memo.confidence, suffix: '%', hint: '证据完整度决定' },
           { label: '证据缺口', value: memo.evidence.gap_list.length, suffix: ' 项', hint: `完整度 ${memo.evidence.completeness ?? 0}%` },

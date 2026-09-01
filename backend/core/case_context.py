@@ -17,6 +17,11 @@ class CaseContext:
     goal_type: str = "要钱"
     defendant_info: Dict[str, Any] = field(default_factory=dict)
 
+    # 当事人列表 [{"role": "plaintiff"|"defendant", "name": str, "party_type": str}]
+    # 供红线引擎的主体资格检查使用——早期实现缺这个字段，导致真实模式下
+    # 每个案件都被「缺少原告信息」block 掉（评测报告 P0-1）
+    parties: List[Dict[str, Any]] = field(default_factory=list)
+
     # 证据盘点产出
     evidence_matrix: List[Dict[str, Any]] = field(default_factory=list)
     gap_list: List[Dict[str, Any]] = field(default_factory=list)
