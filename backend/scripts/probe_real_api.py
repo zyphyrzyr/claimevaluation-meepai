@@ -24,7 +24,7 @@ for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
            "ALL_PROXY", "all_proxy"):
     os.environ.pop(_k, None)
 
-from core.config import get_runtime_settings, LLM_FAST_MODEL, LLM_STRONG_MODEL
+from core.config import get_runtime_settings
 
 OK, WARN, FAIL = "  [OK]  ", "  [WARN]", "  [FAIL]"
 results = []
@@ -53,14 +53,17 @@ else:
     record(OK, "USE_MOCK", "真实模式")
 
 KEYS = [
-    ("DEEPSEEK_API_KEY", "LLM 评估节点", True),
+    ("LLM_API_KEY", "LLM 评估节点", True),
     ("QCC_API_TOKEN", "企查查被告画像 / 回款能力", False),
     ("PKULAW_API_TOKEN", "北大法宝检索与引用核验", False),
     ("SILICONFLOW_API_KEY", "bge-m3 向量化（RAG 知识库）", False),
 ]
 missing_required = []
 for key, purpose, required in KEYS:
+    # 兼容旧 .env：填了 DEEPSEEK_API_KEY 也算配好了
     val = (settings.get(key.lower()) or "").strip()
+    if not val and key == "LLM_API_KEY":
+        val = (settings.get("DEEPSEEK_API_KEY") or "").strip()
     if val:
         record(OK, f"{key}", f"{purpose}（已配置，长度 {len(val)}）")
     elif required:
@@ -79,11 +82,17 @@ if missing_required:
 else:
     from core import llm_gateway
 
-    for label, model in (("普通模型", LLM_FAST_MODEL), ("强模型", LLM_STRONG_MODEL)):
+    # node 必须区分开：强模型只在 STRONG_MODEL_NODES 里才被路由到，
+    # 两次都传 node=None 的话测的是同一个模型，「强模型」这项等于假的。
+    probes = (
+        ("普通模型", settings["llm_fast_model"], None),
+        ("强模型", settings["llm_strong_model"], "infringement"),
+    )
+    for label, model, node in probes:
         t0 = time.time()
         try:
             text = llm_gateway.call_text(
-                "你是助手。", "只回复两个字：正常", node=None, max_tokens=16)
+                "你是助手。", "只回复两个字：正常", node=node, max_tokens=16)
             cost = time.time() - t0
             record(OK, f"{label} {model}", f"{cost:.1f}s，回复：{text[:20]!r}")
             llm_ok = True

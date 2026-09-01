@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("USE_MOCK", "True")
 
 from core import llm_gateway
+from core import config
 from core.config import LLM_FAST_MODEL, LLM_STRONG_MODEL, STRONG_MODEL_NODES
 
 
@@ -31,9 +32,12 @@ def _fake_response(content: str):
 @pytest.fixture
 def llm_ready(monkeypatch):
     """让网关认为已配置 key，并把 HTTP 出口换成可注入的假响应"""
+    # 派生自真实配置，只覆盖出口地址。写全量的话，以后每加一个配置项
+    # 都要回来改一遍，忘了就是 KeyError——而这类失败跟被测逻辑毫无关系。
     monkeypatch.setattr(llm_gateway, "_settings", lambda: {
-        "deepseek_api_key": "test-key",
-        "deepseek_base_url": "https://api.example.invalid",
+        **config.get_runtime_settings(),
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.example.invalid",
     })
     captured = {}
 
@@ -163,29 +167,44 @@ class TestStructurallyInvalidPayload:
 # ============================================================
 
 class TestRequestConstruction:
+    """
+    断言一律对齐「运行时解析出的模型名」而不是 config 里的模块常量。
+
+    写死常量的话，一旦通过 .env 换成别的供应商，这组用例会红——
+    但那不是缺陷，是切换生效了。测试要验的是「路由逻辑对不对」，
+    不该顺带把供应商钉死。
+    """
+
+    @staticmethod
+    def _model(slot: str) -> str:
+        return config.get_runtime_settings()[slot]
+
     def test_strong_nodes_get_the_strong_model(self, llm_ready):
         assert STRONG_MODEL_NODES, "强模型节点清单为空，模型路由等于没做"
         _call(llm_ready, '{"score": 80}', node="infringement")
-        assert llm_ready["payload"]["model"] == LLM_STRONG_MODEL
+        assert llm_ready["payload"]["model"] == self._model("llm_strong_model")
 
     def test_ordinary_nodes_get_the_fast_model(self, llm_ready):
         _call(llm_ready, '{"score": 80}', node="rights")
-        assert llm_ready["payload"]["model"] == LLM_FAST_MODEL
+        assert llm_ready["payload"]["model"] == self._model("llm_fast_model")
 
     def test_json_mode_is_requested_when_supported(self, llm_ready):
         """能开 json_object 就开，从源头消除格式问题"""
         _call(llm_ready, '{"score": 80}', node="rights")
         assert llm_ready["payload"].get("response_format", {}).get("type") == "json_object"
 
-    def test_json_mode_is_skipped_for_reasoner(self, llm_ready):
+    def test_json_mode_is_skipped_for_models_that_reject_it(self, llm_ready):
         """
-        deepseek-reasoner 不接受 response_format，下发会返回 400。
-        它正好承担侵权认定与法官归纳两个节点——全局开启会让这两处直接失败。
+        不在 LLM_JSON_MODE_MODELS 白名单里的模型（如 deepseek-reasoner）不接受
+        response_format，下发会返回 400。它正好承担侵权认定与法官归纳两个节点——
+        全局开启会让这两处直接失败。
         """
-        assert not llm_gateway.supports_json_mode(LLM_STRONG_MODEL)
+        strong = self._model("llm_strong_model")
+        if llm_gateway.supports_json_mode(strong):
+            pytest.skip(f"当前供应商的强模型 {strong} 支持 json 模式，本例不适用")
         _call(llm_ready, '{"score": 80}', node="infringement")
         assert "response_format" not in llm_ready["payload"], (
-            "reasoner 节点不得下发 response_format，否则 API 返回 400")
+            f"{strong} 不得下发 response_format，否则 API 返回 400")
 
     def test_reasoner_output_still_parses(self, llm_ready):
         """reasoner 没有 json 模式兜底，更依赖 _clean_json 的提取能力"""
@@ -218,9 +237,126 @@ class TestErrorDiagnosability:
     def test_missing_key_fails_loudly(self, monkeypatch):
         """未配 key 必须报出缺哪个 key，而不是被底层网络错误盖掉"""
         monkeypatch.setattr(llm_gateway, "get_runtime_settings", lambda: {
-            "deepseek_api_key": "", "deepseek_base_url": "https://x"})
-        with pytest.raises(llm_gateway.LLMError, match="DEEPSEEK_API_KEY"):
+            **config.get_runtime_settings(),
+            "llm_api_key": "", "llm_base_url": "https://x"})
+        with pytest.raises(llm_gateway.LLMError, match="LLM_API_KEY"):
             llm_gateway.call_json("sys", "user")
+
+    def test_missing_key_reports_where_requests_would_go(self, monkeypatch):
+        """
+        换供应商后最常见的失败：填了新 key 却没改 base_url，请求照旧发往上一家，
+        拿到 401 还以为是 key 错了。报错必须回显 base_url。
+        """
+        monkeypatch.setattr(llm_gateway, "get_runtime_settings", lambda: {
+            **config.get_runtime_settings(),
+            "llm_api_key": "", "llm_base_url": "https://api.moonshot.ai/v1",
+            "llm_provider": "kimi"})
+        with pytest.raises(llm_gateway.LLMError) as exc:
+            llm_gateway.call_json("sys", "user")
+        assert "moonshot" in str(exc.value)
+
+
+class TestProviderSwap:
+    """换 LLM 供应商只改 .env，不该动代码"""
+
+    KIMI_ENV = {
+        "LLM_PROVIDER": "kimi",
+        "LLM_API_KEY": "sk-kimi-test",
+        "LLM_BASE_URL": "https://api.moonshot.ai/v1",
+        "LLM_STRONG_MODEL": "kimi-k3",
+        "LLM_FAST_MODEL": "kimi-k2.6",
+        "LLM_JSON_MODE_MODELS": "kimi-k2.6",
+        "LLM_MAX_TOKENS_PARAM": "max_completion_tokens",
+    }
+
+    def test_length_field_name_is_configurable(self, monkeypatch, llm_ready):
+        """
+        长度上限的字段名各厂商不统一：Kimi 已把 max_tokens 标为弃用。
+        填错的后果是静默的——Kimi 回落到默认 131072，而它的限流按这个值预扣
+        额度，低额度账号会莫名其妙 429。所以字段名必须可配，不能硬编码。
+        """
+        for key, value in self.KIMI_ENV.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr(llm_gateway, "_settings", config.get_runtime_settings)
+
+        _call(llm_ready, '{"score": 80}', node="rights")
+        payload = llm_ready["payload"]
+        assert "max_completion_tokens" in payload
+        assert "max_tokens" not in payload
+
+    def test_default_length_field_stays_max_tokens(self, monkeypatch, llm_ready):
+        """不配置时用 max_tokens，DeepSeek / OpenAI 认这个，别把默认改坏"""
+        monkeypatch.delenv("LLM_MAX_TOKENS_PARAM", raising=False)
+        monkeypatch.setattr(llm_gateway, "_settings", config.get_runtime_settings)
+
+        _call(llm_ready, '{"score": 80}', node="rights")
+        assert llm_ready["payload"]["max_tokens"] == 4000
+
+    def test_every_llm_setting_is_env_driven(self, monkeypatch):
+        """这五个键少一个可配，换供应商就得改源码——那就不是配置驱动了"""
+        for key, value in self.KIMI_ENV.items():
+            monkeypatch.setenv(key, value)
+        s = config.get_runtime_settings()
+        assert s["llm_api_key"] == "sk-kimi-test"
+        assert s["llm_base_url"] == "https://api.moonshot.ai/v1"
+        assert s["llm_strong_model"] == "kimi-k3"
+        assert s["llm_fast_model"] == "kimi-k2.6"
+        assert s["llm_json_mode_models"] == {"kimi-k2.6"}
+        assert s["llm_provider"] == "kimi"
+
+    def test_routing_and_json_mode_follow_the_new_models(self, monkeypatch):
+        """
+        最容易漏的一环：模型名换了，但 json 模式白名单还写着旧模型名，
+        于是所有节点静默降级成文本解析——不报错，只是输出越来越不稳。
+        """
+        for key, value in self.KIMI_ENV.items():
+            monkeypatch.setenv(key, value)
+
+        assert llm_gateway.pick_model("infringement") == "kimi-k3"
+        assert llm_gateway.pick_model("rights") == "kimi-k2.6"
+        assert llm_gateway.supports_json_mode("kimi-k2.6")
+        assert not llm_gateway.supports_json_mode("kimi-k3")
+
+    def test_requests_go_to_the_new_endpoint_with_the_new_key(self, monkeypatch, llm_ready):
+        """换供应商后请求必须打到新地址、带新 key、用新模型名"""
+        for key, value in self.KIMI_ENV.items():
+            monkeypatch.setenv(key, value)
+
+        captured = {}
+        monkeypatch.setattr(llm_gateway, "_settings", config.get_runtime_settings)
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["auth"] = req.get_header("Authorization")
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _fake_response('{"score": 80}')
+
+        monkeypatch.setattr(llm_gateway.urllib.request, "urlopen", fake_urlopen)
+        llm_gateway.call_json("sys", "user", node="rights")
+
+        assert captured["url"].startswith("https://api.moonshot.ai/v1")
+        assert captured["auth"] == "Bearer sk-kimi-test"
+        assert captured["payload"]["model"] == "kimi-k2.6"
+
+    def test_legacy_deepseek_env_still_works(self, monkeypatch):
+        """已有 .env 只写了 DEEPSEEK_*，升级后不能要求用户改文件"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-old")
+        monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_BASE_URL", raising=False)
+
+        s = config.get_runtime_settings()
+        assert s["llm_api_key"] == "sk-old"
+        assert s["llm_base_url"] == "https://api.deepseek.com"
+        # 旧别名仍指向同一份值，既有脚本不会拿到 None
+        assert s["deepseek_api_key"] == s["llm_api_key"]
+
+    def test_new_keys_win_over_legacy(self, monkeypatch):
+        """两套都填时以 LLM_* 为准，否则用户改了却没生效，最难排查"""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-old")
+        monkeypatch.setenv("LLM_API_KEY", "sk-new")
+        s = config.get_runtime_settings()
+        assert s["llm_api_key"] == "sk-new"
 
 
 def _raise_http(code: int, body: str = ""):

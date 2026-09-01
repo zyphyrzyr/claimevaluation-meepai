@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("USE_MOCK", "True")
 
-from core import llm_gateway, orchestrator, scoring
+from core import config, llm_gateway, orchestrator, scoring
 from core.case_context import CaseContext
 from core.config import (CAUSE_COPYRIGHT, CAUSE_TRADEMARK, LLM_FAST_MODEL,
                          LLM_STRONG_MODEL, SCORE_THRESHOLD_GO, SCORE_THRESHOLD_PATCH)
@@ -86,9 +86,13 @@ def real_llm(monkeypatch):
     """伪造 LLM 与企查查出口，记录每次调用，让真实模式链路真正跑起来"""
     calls = []
 
+    # 只覆盖 key 与 base_url，模型名 / json 模式白名单沿用真实配置解析结果。
+    # 这样「换供应商只需改 .env」这条路径本身也被测到了，而不是把模型名写死在测试里。
+    base_settings = config.get_runtime_settings()
     monkeypatch.setattr(llm_gateway, "get_runtime_settings", lambda: {
-        "deepseek_api_key": "test-key",
-        "deepseek_base_url": "https://api.example.invalid",
+        **base_settings,
+        "llm_api_key": "test-key",
+        "llm_base_url": "https://api.example.invalid",
     })
 
     def fake_urlopen(req, timeout=None):
@@ -210,23 +214,38 @@ class TestRealModePipeline:
 # ============================================================
 
 class TestModelRoutingOnRealPath:
+    """
+    验的是路由逻辑，不是具体供应商——所以断言对齐运行时解析出的模型名。
+    写死 config 常量的话，通过 .env 换供应商时这组会红，但那是切换生效，不是缺陷。
+    """
+
+    @staticmethod
+    def _model(slot: str) -> str:
+        return config.get_runtime_settings()[slot]
+
     def test_infringement_uses_the_strong_model(self, real_llm):
         ctx = _ctx()
         orchestrator.Orchestrator(ctx).run_all()
         by_node = {c["node"]: c for c in real_llm}
-        assert by_node["infringement"]["model"] == LLM_STRONG_MODEL
-        assert by_node["rights"]["model"] == LLM_FAST_MODEL
+        assert by_node["infringement"]["model"] == self._model("llm_strong_model")
+        assert by_node["rights"]["model"] == self._model("llm_fast_model")
 
     def test_json_mode_only_for_models_that_support_it(self, real_llm):
-        """reasoner 节点不得下发 response_format，否则真实 API 返回 400"""
+        """
+        json 模式严格跟随 LLM_JSON_MODE_MODELS 白名单：
+        白名单外的模型不得下发 response_format（否则真实 API 返回 400），
+        白名单内的必须下发（否则退化成文本解析，输出稳定性下降还不报错）。
+        """
         ctx = _ctx()
         orchestrator.Orchestrator(ctx).run_all()
+        allowed = config.get_runtime_settings()["llm_json_mode_models"]
         for call in real_llm:
-            if call["model"] == LLM_STRONG_MODEL:
-                assert not call["json_mode"], (
-                    f"{call['node']} 用 {LLM_STRONG_MODEL} 却开了 json 模式")
+            if call["model"] in allowed:
+                assert call["json_mode"], (
+                    f"{call['node']} 用的 {call['model']} 在白名单内却没开 json 模式")
             else:
-                assert call["json_mode"], f"{call['node']} 未开启 json 模式"
+                assert not call["json_mode"], (
+                    f"{call['node']} 用的 {call['model']} 不在白名单却开了 json 模式")
 
 
 # ============================================================

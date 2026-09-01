@@ -12,8 +12,8 @@ import urllib.request
 import urllib.error
 from typing import Any, Dict, Generator, Optional
 
-from .config import (get_runtime_settings, LLM_STRONG_MODEL, LLM_FAST_MODEL,
-                     STRONG_MODEL_NODES, LLM_TIMEOUT_SECONDS, JSON_MODE_MODELS)
+from .config import (get_runtime_settings, STRONG_MODEL_NODES,
+                     LLM_TIMEOUT_SECONDS)
 
 
 class LLMError(RuntimeError):
@@ -22,33 +22,50 @@ class LLMError(RuntimeError):
 
 def _settings() -> dict:
     s = get_runtime_settings()
-    if not s["deepseek_api_key"]:
-        raise LLMError("未配置 DEEPSEEK_API_KEY，真实模式无法调用 LLM（可切 USE_MOCK=True）")
+    if not s["llm_api_key"]:
+        # 点名 LLM_API_KEY 并回显当前 base_url：换供应商后最常见的失败就是
+        # 填了新 key 却忘了改 base_url，请求照旧发往上一家，报 401 还查不出原因。
+        raise LLMError(
+            f"未配置 LLM_API_KEY（当前 provider={s['llm_provider']}，"
+            f"base_url={s['llm_base_url']}），真实模式无法调用 LLM（可切 USE_MOCK=True）"
+        )
     return s
 
 
 def pick_model(node: Optional[str] = None) -> str:
-    """模型路由：按节点选择强/普通模型"""
-    return LLM_STRONG_MODEL if node in STRONG_MODEL_NODES else LLM_FAST_MODEL
+    """
+    模型路由：按节点选择强/普通模型。
+
+    模型名从运行时配置取而不是用模块常量，这样换供应商只改 .env 即可。
+    """
+    s = get_runtime_settings()
+    return s["llm_strong_model"] if node in STRONG_MODEL_NODES else s["llm_fast_model"]
 
 
 def supports_json_mode(model: str) -> bool:
     """
     该模型是否接受 response_format=json_object。
 
-    deepseek-reasoner 不支持这个参数，下发会返回 400。而它恰好承担侵权认定与
-    法官归纳两个节点——全局开启 json 模式会让这两个节点直接失败。
+    这是白名单而不是黑名单：不同厂商、不同型号对 json 模式的支持并不一致
+    （deepseek-reasoner、部分推理模型下发该参数会直接返回 400），而它恰好承担
+    侵权认定与法官归纳两个节点——全局开启 json 模式会让这两个节点直接失败。
+    换供应商时必须同步 LLM_JSON_MODE_MODELS，否则等于静默关掉 json 模式。
     """
-    return model in JSON_MODE_MODELS
+    s = get_runtime_settings()
+    return model in s["llm_json_mode_models"]
 
 
 def _post_chat(messages: list, model: str, temperature: float, max_tokens: int,
                stream: bool = False, json_mode: bool = False) -> Dict[str, Any]:
     s = _settings()
-    url = f"{s['deepseek_base_url'].rstrip('/')}/v1/chat/completions"
+    url = f"{s['llm_base_url'].rstrip('/')}/v1/chat/completions"
+    # 长度上限的字段名各厂商不统一：OpenAI/DeepSeek 用 max_tokens，Kimi 已把
+    # 它标为弃用并要求改用 max_completion_tokens。这个差异不能硬编码——
+    # 填错不会报错，只会让 Kimi 回落到默认的 131072，而它的限流是按这个值
+    # 预扣额度的，低额度账号会莫名其妙 429。故做成配置项，换供应商时一并改。
     payload: Dict[str, Any] = {
         "model": model,
-        "max_tokens": max_tokens,
+        s["llm_max_tokens_param"]: max_tokens,
         "temperature": temperature,
         "stream": stream,
         "messages": messages,
@@ -57,7 +74,7 @@ def _post_chat(messages: list, model: str, temperature: float, max_tokens: int,
         payload["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), method="POST")
-    req.add_header("Authorization", f"Bearer {s['deepseek_api_key']}")
+    req.add_header("Authorization", f"Bearer {s['llm_api_key']}")
     req.add_header("Content-Type", "application/json")
     try:
         return urllib.request.urlopen(req, timeout=LLM_TIMEOUT_SECONDS)

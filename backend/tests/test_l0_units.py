@@ -440,3 +440,36 @@ class TestRuntimeSettings:
         for key in ("deepseek_api_key", "qcc_api_token",
                     "pkulaw_api_token", "siliconflow_api_key"):
             assert isinstance(settings[key], str), f"{key} 不是字符串"
+
+
+class TestConfigPrecedence:
+    """
+    配置来源的优先级：默认值 < .env 文件（非空） < 真实环境变量（非空）。
+
+    反过来的话，照 .env.example 复制一份、只填了部分 key 的用户会中招：
+    留空的 LLM_API_KEY= 把真实环境变量顶掉，配了等于没配，而且不报错。
+    """
+
+    # 直接替换 _read_env_file 而不是写临时 .env：测的是合并逻辑，
+    # 落盘会引入与逻辑无关的沙箱/权限不确定性。
+    @staticmethod
+    def _with_dotenv(monkeypatch, entries: dict):
+        monkeypatch.setattr(config, "_read_env_file", lambda: dict(entries))
+
+    def test_real_env_beats_dotenv_file(self, monkeypatch):
+        self._with_dotenv(monkeypatch, {"LLM_API_KEY": "from-file"})
+        monkeypatch.setenv("LLM_API_KEY", "from-env")
+        assert config.get_runtime_settings()["llm_api_key"] == "from-env"
+
+    def test_blank_dotenv_entry_does_not_shadow_real_env(self, monkeypatch):
+        """.env 里留空的条目必须被忽略，否则空值会顶掉真实环境变量"""
+        self._with_dotenv(monkeypatch, {"LLM_API_KEY": "", "QCC_API_TOKEN": "   "})
+        monkeypatch.setenv("LLM_API_KEY", "from-env")
+        settings = config.get_runtime_settings()
+        assert settings["llm_api_key"] == "from-env"
+        assert settings["qcc_api_token"] == ""
+
+    def test_dotenv_file_beats_defaults(self, monkeypatch):
+        self._with_dotenv(monkeypatch, {"LLM_BASE_URL": "https://api.moonshot.ai/v1"})
+        monkeypatch.delenv("LLM_BASE_URL", raising=False)
+        assert config.get_runtime_settings()["llm_base_url"] == "https://api.moonshot.ai/v1"
