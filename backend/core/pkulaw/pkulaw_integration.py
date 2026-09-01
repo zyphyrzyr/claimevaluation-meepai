@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
 
-from ..config import RUNTIME_DIR
+from ..config import (CAUSE_TRADEMARK, SUPPORTED_CAUSE_TYPES,
+                      GOAL_TYPES, RUNTIME_DIR)
+from .pkulaw_api import CAUSE_SEARCH_PROFILE, TOOL_ENDPOINTS
 
-DATA_DIR = RUNTIME_DIR
+DATA_DIR = RUNTIME_DIR  # 挂在 config.DATA_DIR 下，随 SOFT_IP_DATA_DIR 一起被测试隔离
 
 
 def _queries_path(case_id: str) -> Path:
@@ -30,64 +32,93 @@ def _results_path(case_id: str) -> Path:
 # 查询生成
 # ============================================================
 
-def generate_all_queries(case_id: str, case_description: str, deepseek_results: Dict) -> Dict:
+def _require_supported_cause(cause_type: str) -> str:
     """
-    根据各维度评估结果，生成完整的北大法宝检索查询计划
-    deepseek_results = {
-        "rights": {...}, "infringement": {...}, "procedure": {...},
-        "financial": {...}, "precedent": {...}, "evidence": {...}
-    }
-    返回结构化查询计划
+    案由闸。
+
+    旧实现把查询词写死成商标（"商标法 商标注册 撤三"、"驰名商标认定和保护规定"），
+    与 v4 的三案由支持直接冲突：著作权案子会领到一份商标检索计划。这里与
+    core/mock、core/moot_court/prompts、core/evidence_review 保持同一原则——
+    未知案由显式报错，绝不静默回落。
     """
+    if cause_type not in CAUSE_SEARCH_PROFILE:
+        raise ValueError(
+            f"不支持的案由：{cause_type}；当前支持 {SUPPORTED_CAUSE_TYPES}")
+    return cause_type
+
+
+def generate_all_queries(case_id: str, cause_type: str = CAUSE_TRADEMARK,
+                         goal_type: str = "要钱", case_description: str = "") -> Dict:
+    """
+    按案由与业务目标生成北大法宝检索查询计划。
+
+    查询词一律取自 pkulaw_api.CASE_SEARCH_PROFILE，此处不再内联任何案由相关字面量，
+    避免两张表各改各的、改了一处漏了另一处。
+    """
+    _require_supported_cause(cause_type)
+    if goal_type not in GOAL_TYPES:
+        raise ValueError(f"不支持的业务目标：{goal_type}；当前支持 {GOAL_TYPES}")
+
+    prof = CAUSE_SEARCH_PROFILE[cause_type]
     queries = {
         "case_id": case_id,
+        "cause_type": cause_type,
+        "goal_type": goal_type,
         "generated_at": datetime.now().isoformat(),
         "dimensions": {}
     }
 
     # 1.1 权利基础 → 法条检索
-    rights = deepseek_results.get("rights", {})
     queries["dimensions"]["1.1_权利基础"] = {
         "label": "权利基础",
         "searches": [
             {
-                "id": "law_trademark",
+                "id": "law_core",
                 "type": "law_search",
                 "tool": "search_article",
-                "query": "商标法 商标注册 注册商标 有效期 续展 撤三",
+                "query": prof["rights_query"],
                 "lib": "中央",
                 "size": 5,
-                "purpose": "检索商标法核心法条，验证商标权利基础"
+                "purpose": f"检索{cause_type}权利基础核心法条"
             },
             {
-                "id": "law_wellknown",
-                "type": "law_keyword",
-                "tool": "get_law_list",
-                "title": "驰名商标认定和保护规定",
-                "fulltext": "驰名商标 认定 跨类保护",
-                "purpose": "检索驰名商标相关法规"
-            }
+                "id": "law_article",
+                "type": "law_article",
+                "tool": "get_article",
+                "title": prof["rights_law_title"],
+                "number": prof["rights_law_article"],
+                "purpose": f"直接取{cause_type}核心请求权基础条文原文"
+            },
         ]
     }
 
-    # 1.2 侵权认定 → 类案检索
-    infringement = deepseek_results.get("infringement", {})
+    # 1.2 侵权认定 → 法条 + 类案
     queries["dimensions"]["1.2_侵权认定"] = {
         "label": "侵权认定",
         "searches": [
             {
+                "id": "law_infringement",
+                "type": "law_search",
+                "tool": "search_article",
+                "query": prof["infringement_query"],
+                "lib": "中央",
+                "size": 5,
+                "purpose": f"检索{cause_type}侵权认定法条"
+            },
+            {
                 "id": "case_infringement",
                 "type": "case_search",
                 "tool": "search_case",
-                "query": "商标侵权 近似商标 混淆可能性 相同商品 类似商品",
+                "query": prof["infringement_query"],
                 "case_type": "民事案件",
+                "doc_type": "判决书",
                 "size": 5,
-                "purpose": "检索商标侵权类案，验证侵权认定标准"
+                "purpose": f"检索{cause_type}类案，验证侵权认定标准"
             }
         ]
     }
 
-    # 1.3 诉讼程序 → 法条检索
+    # 1.3 诉讼程序 → 法条检索（程序问题三案由通用，无需案由画像）
     queries["dimensions"]["1.3_诉讼程序"] = {
         "label": "诉讼程序",
         "searches": [
@@ -95,7 +126,7 @@ def generate_all_queries(case_id: str, case_description: str, deepseek_results: 
                 "id": "law_limitation",
                 "type": "law_search",
                 "tool": "search_article",
-                "query": "民事诉讼 诉讼时效 管辖 仲裁协议 主体适格",
+                "query": "知识产权 诉讼时效 管辖法院 主体适格 前置程序 民事诉讼法",
                 "lib": "中央",
                 "size": 5,
                 "purpose": "检索诉讼程序相关法条"
@@ -103,28 +134,57 @@ def generate_all_queries(case_id: str, case_description: str, deepseek_results: 
         ]
     }
 
-    # 2.1 财务回报 → 暂不检索（后续用企查查）
-    queries["dimensions"]["2.1_财务回报"] = {
-        "label": "财务回报",
-        "searches": [],
-        "note": "暂不通过北大法宝检索，后续接入企查查"
-    }
-
-    # 2.2 判例价值 → 首案检索
-    queries["dimensions"]["2.2_判例价值"] = {
-        "label": "判例价值",
+    # 1.4 模拟法庭 → 被告抗辩类案
+    queries["dimensions"]["1.4_模拟法庭"] = {
+        "label": "模拟法庭",
         "searches": [
             {
-                "id": "case_precedent",
+                "id": "case_defense",
                 "type": "case_search",
                 "tool": "search_case",
-                "query": "商标侵权 首案 新型侵权 指导性案例",
+                "query": prof["defense_query"],
                 "case_type": "民事案件",
-                "size": 10,
-                "purpose": "检索同类在先判决，判断首案潜力"
+                "size": 5,
+                "purpose": f"检索{cause_type}常见抗辩路径，供模拟法庭被告方参考"
             }
         ]
     }
+
+    # 2.1 业务预期：按目标分流——要钱查判赔类案，要名查首案
+    if goal_type == "要钱":
+        queries["dimensions"]["2.1_判赔规模"] = {
+            "label": "判赔规模",
+            "searches": [
+                {
+                    "id": "case_damages",
+                    "type": "case_search",
+                    "tool": "search_case",
+                    "query": prof["damages_query"],
+                    "case_type": "民事案件",
+                    "doc_type": "判决书",
+                    "decision_date_start": "2020-01-01",
+                    "size": 5,
+                    "purpose": "检索近年判赔类案，校准判赔区间"
+                }
+            ],
+            "note": "回款能力由企查查被告画像支撑，不走北大法宝"
+        }
+    else:
+        queries["dimensions"]["2.1_判例价值"] = {
+            "label": "判例价值",
+            "searches": [
+                {
+                    "id": "case_precedent",
+                    "type": "case_search",
+                    "tool": "search_case",
+                    "query": (case_description[:200] + " " if case_description else "")
+                             + prof["precedent_query"],
+                    "case_type": "民事案件",
+                    "size": 10,
+                    "purpose": "检索同类在先判决，判断首案潜力"
+                }
+            ]
+        }
 
     # 验证步骤（评估后运行）
     queries["validation"] = {

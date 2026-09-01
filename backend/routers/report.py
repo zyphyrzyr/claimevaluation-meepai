@@ -31,22 +31,33 @@ def _load_ctx(case: Case) -> CaseContext:
 
 
 @router.get("/{case_id}/memo")
-def get_memo(case_id: str, db: Session = Depends(get_db)):
-    """生成当前状态的决策备忘录（实时，不落库）"""
+def get_memo(case_id: str, pkulaw: bool = False, db: Session = Depends(get_db)):
+    """
+    生成当前状态的决策备忘录（实时，不落库）
+
+    pkulaw=true 时额外跑北大法宝检索与引用核验，报告多出「法律检索与引用核验」章节。
+    默认关闭：该步骤要打外部 API，会拖慢响应，而绝大多数预览场景并不需要。
+    未配置 PKULAW_API_TOKEN 时即使传 true 也会整段跳过，不留空章节。
+    """
     case = _load_case(db, case_id)
     ctx = _load_ctx(case)
-    return generate_memo(case.name, ctx)
+    return generate_memo(case.name, ctx, pkulaw=pkulaw)
 
 
 @router.post("/{case_id}/snapshot")
-def snapshot(case_id: str, db: Session = Depends(get_db)):
-    """定稿快照：对当前状态拍照存档，版本号自增，历史版本可对比"""
+def snapshot(case_id: str, pkulaw: bool = False, db: Session = Depends(get_db)):
+    """
+    定稿快照：对当前状态拍照存档，版本号自增，历史版本可对比
+
+    pkulaw=true 时先跑法宝核验再存档——定稿是对外输出的版本，引用真实性核验
+    在这个环节价值最大。默认关闭以保持定稿的幂等（同样的输入同样的版本内容）。
+    """
     case = _load_case(db, case_id)
     ctx = _load_ctx(case)
     if ctx.scores.get("final") is None:
         raise HTTPException(400, "案件尚未完成评估，无法定稿")
 
-    memo = generate_memo(case.name, ctx)
+    memo = generate_memo(case.name, ctx, pkulaw=pkulaw)
     latest = (db.query(Report)
               .filter(Report.case_id == case.id, Report.report_type == "memo")
               .order_by(Report.version.desc()).first())

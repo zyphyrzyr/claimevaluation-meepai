@@ -11,7 +11,58 @@ from typing import Dict
 
 from ..config import get_runtime_settings
 
+from ..config import (CAUSE_COPYRIGHT, CAUSE_TRADEMARK,
+                      CAUSE_UNFAIR_COMPETITION, SUPPORTED_CAUSE_TYPES)
+
 API_BASE = "https://apim-gateway.pkulaw.com"
+
+
+# 各案由的检索画像。
+#
+# 为什么不复用 moot_court/prompts.py 的 CAUSE_PROFILES：那张表服务的是庭审剧本
+# （请求权基础、抗辩路径、法官审查要点，都是整段自然语言），而这里要的是检索器
+# 直接吃的查询词、法条标题与条号——二者形态不同，硬塞一张表两边都别扭。
+#
+# 为什么必须有这张表：早期这些查询词全写死成商标（"商标专用权 驰名商标"、
+# get_article 固定取《商标法》第五十七条）。系统已支持三案由，若直接接进主流程，
+# 著作权案子会检索回一堆商标法条——检索增强反而变成噪声注入。
+CAUSE_SEARCH_PROFILE = {
+    CAUSE_TRADEMARK: {
+        "rights_query": "商标专用权 注册商标 有效期 续展 撤销 驰名商标",
+        "rights_law_title": "中华人民共和国商标法",
+        "rights_law_article": "第五十七条",
+        "infringement_query": "商标侵权 近似商标 混淆可能性 商标性使用 类似商品",
+        "defense_query": "商标侵权 合理使用抗辩 正当使用 在先使用 描述性使用",
+        "damages_query": "商标侵权 赔偿数额 实际损失 侵权获利 法定赔偿",
+        "precedent_query": "商标侵权 首案 指导性案例",
+    },
+    CAUSE_COPYRIGHT: {
+        "rights_query": "著作权 作品 独创性 著作权归属 登记 署名权 保护期",
+        "rights_law_title": "中华人民共和国著作权法",
+        "rights_law_article": "第十条",
+        "infringement_query": "著作权侵权 实质性相似 接触 复制 改编 信息网络传播权",
+        "defense_query": "著作权侵权 合理使用 独立创作 思想表达二分 独创性不足",
+        "damages_query": "著作权侵权 赔偿数额 实际损失 违法所得 法定赔偿",
+        "precedent_query": "著作权侵权 首案 指导性案例 新型作品",
+    },
+    CAUSE_UNFAIR_COMPETITION: {
+        "rights_query": "有一定影响的商品名称 包装 装潢 企业名称 混淆 不正当竞争",
+        "rights_law_title": "中华人民共和国反不正当竞争法",
+        "rights_law_article": "第六条",
+        "infringement_query": "不正当竞争 混淆行为 仿冒 擅自使用 有一定影响",
+        "defense_query": "不正当竞争 不具一定影响 描述性使用 功能性 无竞争关系",
+        "damages_query": "不正当竞争 赔偿数额 实际损失 侵权获利 法定赔偿",
+        "precedent_query": "不正当竞争 首案 指导性案例 新型竞争行为",
+    },
+}
+
+
+def _profile(cause_type: str) -> dict:
+    """取案由检索画像；未知案由显式报错，避免静默回落到商标"""
+    if cause_type not in CAUSE_SEARCH_PROFILE:
+        raise ValueError(
+            f"不支持的案由：{cause_type}；当前支持 {SUPPORTED_CAUSE_TYPES}")
+    return CAUSE_SEARCH_PROFILE[cause_type]
 
 # 工具 → 端点
 TOOL_ENDPOINTS = {
@@ -120,16 +171,17 @@ def _extract_items(rpc_result: dict) -> list:
 # 维度检索函数（每个返回 {laws: [], cases: [], _summary: ""}）
 # ==========================================
 
-def search_for_rights_foundation() -> Dict:
-    """1.1 权利基础：search_article + get_article"""
+def search_for_rights_foundation(cause_type: str = CAUSE_TRADEMARK) -> Dict:
+    """1.1 权利基础：search_article + get_article（查询词按案由取）"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
+    prof = _profile(cause_type)
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
     try:
         sa = _rpc_call("search_article", {
-            "text": "商标专用权 注册商标 有效期 续展 撤销 驰名商标",
+            "text": prof["rights_query"],
             "lib": "中央", "timeliness": "现行有效", "size": 5
         })
         for it in _extract_items(sa)[:5]:
@@ -144,13 +196,13 @@ def search_for_rights_foundation() -> Dict:
 
     try:
         ga = _rpc_call("get_article", {
-            "title": "中华人民共和国商标法",
-            "number": "第五十七条"
+            "title": prof["rights_law_title"],
+            "number": prof["rights_law_article"]
         })
         for it in _extract_items(ga)[:1]:
             if isinstance(it, dict):
                 result["laws"].insert(0, {
-                    "title": it.get("title", "商标法(2019修正)"),
+                    "title": it.get("title", prof["rights_law_title"]),
                     "content": it.get("article", "")[:400],
                     "timeliness": "现行有效"
                 })
@@ -162,16 +214,17 @@ def search_for_rights_foundation() -> Dict:
     return result
 
 
-def search_for_infringement() -> Dict:
+def search_for_infringement(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     """1.2 侵权认定：search_case + search_article"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
+    prof = _profile(cause_type)
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
     try:
         sa = _rpc_call("search_article", {
-            "text": "商标侵权 近似商标 混淆可能性 商标性使用 类似商品",
+            "text": prof["infringement_query"],
             "lib": "中央", "timeliness": "现行有效", "size": 5
         })
         for it in _extract_items(sa)[:3]:
@@ -185,7 +238,7 @@ def search_for_infringement() -> Dict:
 
     try:
         sc = _rpc_call("search_case", {
-            "text": "商标侵权 近似商标 消费者混淆 商标性使用",
+            "text": prof["infringement_query"],
             "case_type": "民事案件", "doc_type": "判决书", "size": 5
         })
         for it in _extract_items(sc)[:5]:
@@ -230,16 +283,17 @@ def search_for_procedure() -> Dict:
     return result
 
 
-def search_for_moot_court() -> Dict:
+def search_for_moot_court(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     """1.4 模拟法庭：search_case（被告抗辩模式）"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
+    prof = _profile(cause_type)
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
     try:
         sc = _rpc_call("search_case", {
-            "text": "商标侵权 合理使用抗辩 正当使用 在先使用 描述性使用",
+            "text": prof["defense_query"],
             "case_type": "民事案件", "size": 5
         })
         for it in _extract_items(sc)[:5]:
@@ -258,16 +312,17 @@ def search_for_moot_court() -> Dict:
     return result
 
 
-def search_for_financial() -> Dict:
+def search_for_financial(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     """2.1 财务回报：search_case（判赔数据）"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
+    prof = _profile(cause_type)
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
     try:
         sc = _rpc_call("search_case", {
-            "text": "商标侵权 赔偿数额 实际损失 侵权获利 法定赔偿",
+            "text": prof["damages_query"],
             "case_type": "民事案件", "doc_type": "判决书",
             "decision_date_start": "2020-01-01", "size": 5
         })
@@ -287,14 +342,15 @@ def search_for_financial() -> Dict:
     return result
 
 
-def search_for_precedent(case_desc: str = "") -> Dict:
+def search_for_precedent(case_desc: str = "", cause_type: str = CAUSE_TRADEMARK) -> Dict:
     """2.2 判例价值：search_case（首案判断）"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
+    prof = _profile(cause_type)
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
-    query = (case_desc[:200] if case_desc else "") + " 商标侵权 首案 指导性案例"
+    query = (case_desc[:200] if case_desc else "") + " " + prof["precedent_query"]
     try:
         sc = _rpc_call("search_case", {
             "text": query[:500],

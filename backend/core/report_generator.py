@@ -5,10 +5,10 @@
 输出物形态（§8）：决策备忘录 + 向上汇报一页纸摘要 + 庭审记录
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from .case_context import CaseContext
-from .config import QUADRANT_AXIS_MID
+from .config import CAUSE_TRADEMARK, QUADRANT_AXIS_MID
 
 
 def _fmt(v, suffix: str = "") -> str:
@@ -225,6 +225,10 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
         lines.append("**行动建议**：")
         for a in op["actions"]:
             lines.append(f"- {a}")
+
+    # 北大法宝增强章节（未配置或失败时返回空，不渲染）
+    lines.extend(render_pkulaw_section(data.get("pkulaw") or {}))
+
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -232,8 +236,100 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def generate_memo(case_name: str, ctx: CaseContext) -> Dict[str, Any]:
-    """生成完整备忘录：结构化数据 + markdown"""
+def enrich_with_pkulaw(data: Dict[str, Any], case_id: str,
+                       cause_type: str = CAUSE_TRADEMARK,
+                       goal_type: str = "要钱") -> Dict[str, Any]:
+    """
+    用北大法宝给备忘录做增强：法条/类案参考 + 引用真实性核验（防幻觉）。
+
+    设计约束（三条都不能破）：
+    1. 不进评分链路——只影响报告文本，绝不参与分数计算。v4 的卖点是确定性可复现，
+       评分链路一旦依赖外部 API，同一份输入就可能跑出不同分。
+    2. 不阻塞——任何异常都吞掉并降级成 warning，报告照常产出。检索是加分项，
+       不是必要条件；让它有能力搞挂报告得不偿失。
+    3. 无 token 时整段跳过，不留空章节——没配 PKULAW_API_TOKEN 时 pkulaw_api 各函数
+       返回 status=skipped 且不发起网络请求，此时 data 里不放任何键，渲染层自然省略。
+    """
+    from .pkulaw import pkulaw_api, pkulaw_integration
+
+    data["pkulaw"] = {"status": "skipped"}
+    try:
+        plan = pkulaw_integration.generate_all_queries(
+            case_id, cause_type, goal_type, data.get("case_description", ""))
+        rights = pkulaw_api.search_for_rights_foundation(cause_type)
+        infr = pkulaw_api.search_for_infringement(cause_type)
+
+        if rights.get("status") == "skipped" and infr.get("status") == "skipped":
+            return data  # 未配置 token，保持 skipped，调用方据此省略章节
+
+        reference = {
+            "laws": (rights.get("laws") or []) + (infr.get("laws") or []),
+            "cases": infr.get("cases") or [],
+            "query_plan": plan,
+        }
+        verification = pkulaw_api.run_verification_phase(data.get("markdown", ""))
+
+        data["pkulaw"] = {
+            "status": verification.get("status") or "ok",
+            "reference": reference,
+            "verification": verification,
+            "summary": reference and verification.get("_summary") or "",
+        }
+        pkulaw_integration.save_results(case_id, {
+            "reference": reference, "verification": verification})
+    except Exception as e:  # 检索失败只降级，不让报告挂掉
+        data["pkulaw"] = {"status": "error", "error": str(e)}
+        data.setdefault("warnings", []).append(f"北大法宝增强失败（已跳过）：{e}")
+    return data
+
+
+def render_pkulaw_section(pk: Dict[str, Any]) -> List[str]:
+    """法宝检索与核验结果 → markdown 行。返回空 list 表示这一节不渲染"""
+    if pk.get("status") in (None, "skipped", "error"):
+        return []  # 未配置或失败：不留空章节，报告保持干净
+
+    lines = ["## 六、法律检索与引用核验（北大法宝）", ""]
+    ref = pk.get("reference") or {}
+
+    laws = ref.get("laws") or []
+    if laws:
+        lines += ["### 相关法条", ""]
+        for law in laws[:8]:
+            title = law.get("title", "")
+            content = (law.get("content") or "").strip()
+            lines.append(f"- **{title}**" + (f"：{content[:200]}" if content else ""))
+        lines.append("")
+
+    cases = ref.get("cases") or []
+    if cases:
+        lines += ["### 类案参考", ""]
+        for i, c in enumerate(cases[:5], 1):
+            lines.append(f"{i}. **{c.get('title', '')}**"
+                         + (f"（{c.get('court', '')}）" if c.get("court") else ""))
+            if c.get("summary"):
+                lines.append(f"   - {c['summary'][:160]}")
+        lines.append("")
+
+    ver = pk.get("verification") or {}
+    if ver.get("_summary"):
+        lines += ["### 引用真实性核验", "", ver["_summary"], ""]
+
+    return lines
+
+
+def generate_memo(case_name: str, ctx: CaseContext,
+                  pkulaw: bool = False) -> Dict[str, Any]:
+    """生成完整备忘录：结构化数据 + markdown（pkulaw=True 时附带法宝增强）"""
     data = build_memo_data(case_name, ctx)
+    if not pkulaw:
+        data["markdown"] = render_memo_markdown(data)
+        return data
+
+    # 核验的输入是报告正文，而正文又要把核验结果渲染进去——循环依赖。
+    # 解法是渲染两遍：第一遍产出不含法宝章节的正文供核验，第二遍再带上结果。
+    # 第一遍只是纯文本拼装，成本可忽略。
     data["markdown"] = render_memo_markdown(data)
+    data = enrich_with_pkulaw(data, ctx.case_id, ctx.cause_type, ctx.goal_type)
+    if render_pkulaw_section(data.get("pkulaw") or {}):
+        data["markdown"] = render_memo_markdown(data)
     return data
