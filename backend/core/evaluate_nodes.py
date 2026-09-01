@@ -3,13 +3,18 @@
 权利基础 / 侵权认定 / 诉讼程序 / 判赔规模 / 判例价值
 - 每个节点：单次 LLM 调用 + 强制 JSON 输出，无自主决策
 - 输入统一含：案情 + 证据矩阵/缺口 + 用户观点（§5.5 双通道分层指令）
-- P1 为商标案由完整 prompt；著作权/不正当竞争按案由切换框架描述，完整三案由 prompt 套件在 P3 补齐
+- 三案由在「赔偿 / 时效 / 管辖 / 前置程序 / 抗辩 / 判例价值」上的实质差异由
+  legal_basis 模块提供事实基准，随案由注入对应节点的 prompt。
+- 节点 prompt 里的特征词被 tests/test_l2_real_path.py 用来分派假响应，
+  改措辞前先看那里的 PROMPT_MARKERS。
 """
 
 from typing import Any, Dict
 
 from .case_context import CaseContext
 from .config import CAUSE_TRADEMARK, RIGHTS_RED_LINE
+from .legal_basis import (damages_clause, precedent_clause,
+                          procedure_clause)
 from .llm_gateway import call_json
 
 _SYSTEM = (
@@ -116,8 +121,10 @@ def evaluate_procedure(ctx: CaseContext, use_mock: bool = False) -> Dict[str, An
 
     prompt = f"""{_base(ctx)}
 
+{procedure_clause(ctx.cause_type, ctx.case_description)}
+
 ## 评估任务
-评估诉讼程序可行性：① 诉讼时效（3年，是否临近届满/有无中断中止事由）② 管辖与仲裁（是否存在有效仲裁协议、哪个法院对原告最有利）③ 主体适格（原告是否适格权利人、被告是否明确、是否需追加共同被告）④ 前置程序（行政前置、通知-删除要求）
+评估诉讼程序可行性：① 诉讼时效（是否临近届满、有无中断中止事由、持续侵权下赔偿期间如何起算）② 管辖与仲裁（是否存在有效仲裁协议、结合上述级别管辖判断哪个法院对原告最有利）③ 主体适格（原告是否适格权利人、被告是否明确、是否需追加共同被告）④ 前置程序（行政前置、通知-删除要求）⑤ 上述常见抗辩在本案的成立可能性
 
 ## 返回 JSON
 {{
@@ -136,9 +143,12 @@ def evaluate_damages(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]
 
     prompt = f"""{_base(ctx)}
 
+{damages_clause(ctx.cause_type)}
+
 ## 评估任务
 估算本案判赔规模（0-100 相对评分），综合三方面：
-① 判赔金额量级——估算判赔金额概率分布（P10/P50/P90，单位：万元），结合法定赔偿区间与类案判赔水平
+① 判赔金额量级——估算判赔金额概率分布（P10/P50/P90，单位：万元），严格以本案由的
+   法定赔偿区间为边界、以类案判赔水平为锚，并说明走的是哪个计算顺位
 ② 回报倍数——P50 判赔额 ÷ 预估总成本（律师费+诉讼费+公证费等，按 8-15 万估）
 ③ 侵权规模支撑度——案情中的销量/店铺规模等能否支撑高判赔
 
@@ -161,12 +171,14 @@ def evaluate_precedent(ctx: CaseContext, use_mock: bool = False) -> Dict[str, An
 
     prompt = f"""{_base(ctx)}
 
+{precedent_clause(ctx.cause_type)}
+
 ## 评估任务
 评估本案的判例价值（0-100），综合四方面：
 ① 首案潜力——是否无同类在先判例
 ② 指导性案例潜力——比对最高法指导性案例/典型案例遴选标准
 ③ 行业震慑效应——胜诉后对行业其他侵权者的威慑力
-④ 规则明晰价值——能否推动模糊法律规则的明确化
+④ 规则明晰价值——能否推动模糊法律规则的明确化（结合上述本案由的判断重点）
 
 ## 返回 JSON
 {{
