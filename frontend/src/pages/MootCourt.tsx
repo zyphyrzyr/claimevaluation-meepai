@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { api, mootApi } from '../api'
+import { api, mootApi, exportUrls } from '../api'
 import type { MootRound } from '../api'
 import CourtRoom from '../components/CourtRoom'
 import { Card } from '../components/ui/Card'
@@ -99,6 +99,22 @@ export default function MootCourt() {
           >
             {running ? '庭审进行中…' : rounds.length ? '重新开庭' : '开庭'}
           </button>
+          {rounds.length > 0 && (
+            <>
+              <a
+                href={exportUrls.transcriptDocx(id!)}
+                className="border border-line text-fg px-4 py-2 rounded-lg text-sm hover:bg-surface transition-colors"
+              >
+                下载庭审记录 Word
+              </a>
+              <a
+                href={exportUrls.transcriptPdf(id!)}
+                className="border border-line text-fg px-4 py-2 rounded-lg text-sm hover:bg-surface transition-colors"
+              >
+                下载 PDF
+              </a>
+            </>
+          )}
         </div>
       </div>
 

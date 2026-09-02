@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from core.case_context import CaseContext
 from core.database import Case, Report, get_db
 from core.docx_export import DOCX_MIME, markdown_to_docx_bytes
+from core.pdf_export import PDF_MIME, markdown_to_pdf_bytes
 from core.report_generator import generate_memo
 
 router = APIRouter()
@@ -138,6 +139,29 @@ def download_transcript_docx(case_id: str, db: Session = Depends(get_db)):
         "\n".join(lines),
         meta=_meta_lines(case, ctx, suffix=f"修正系数 {ctx.correction_coeff}"))
     return _docx_response(content, f"{case.name}-庭审记录.docx")
+
+
+@router.get("/{case_id}/transcript.pdf")
+def download_transcript_pdf(case_id: str, db: Session = Depends(get_db)):
+    """庭审记录 PDF 导出（独立成册，与 Word 导出同源：同一份 markdown 内容）"""
+    case = _load_case(db, case_id)
+    ctx = _load_ctx(case)
+    if not ctx.moot_transcript:
+        raise HTTPException(404, "尚未进行模拟法庭")
+
+    lines = [f"# 模拟法庭庭审记录：{case.name}", ""]
+    for r in ctx.moot_transcript:
+        lines += [f"## 【{r['step_name']}】{r['role_name']}", "", r["content"], ""]
+    lines += ["---", f"修正系数：{ctx.correction_coeff}"]
+
+    content = markdown_to_pdf_bytes(
+        "\n".join(lines),
+        meta=_meta_lines(case, ctx, suffix=f"修正系数 {ctx.correction_coeff}"))
+    return Response(
+        content=content,
+        media_type=PDF_MIME,
+        headers={"Content-Disposition": _content_disposition(f"{case.name}-庭审记录.pdf")},
+    )
 
 
 @router.post("/{case_id}/snapshot")

@@ -73,6 +73,7 @@ export const exportUrls = {
   memoDocx: (id: string, version?: number) =>
     `${BASE}/report/${id}/memo.docx${version ? `?version=${version}` : ''}`,
   transcriptDocx: (id: string) => `${BASE}/report/${id}/transcript.docx`,
+  transcriptPdf: (id: string) => `${BASE}/report/${id}/transcript.pdf`,
 }
 
 /** 通用 SSE POST：逐事件回调 */
