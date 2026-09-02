@@ -146,23 +146,25 @@ class StandaloneMootRequest(BaseModel):
     cause_type: str = CAUSE_TRADEMARK
     viewpoints: List[str] = []
     plaintiff_points: str = ""    # 我方主张要点（可选，替代权利基础评估结论）
+    case_id: Optional[str] = None  # 传了则庭审记录挂到本案并从本案材料库召回；不传为纯独立演练
 
 
 @router.post("/standalone")
 def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(get_db)):
-    """独立演练：不建案、不评估、不回写评分，输出演练报告"""
+    """独立演练：不评估、不回写评分，输出演练报告。传 case_id 时记录挂到本案并从本案材料库召回。"""
     if not payload.case_description.strip():
         raise HTTPException(400, "案情描述不能为空")
     if payload.cause_type not in SUPPORTED_CAUSE_TYPES:
         raise HTTPException(400, f"不支持的案由: {payload.cause_type}")
 
     events: queue.Queue = queue.Queue()
+    cid = payload.case_id
 
-    # RAG 自动召回：独立演练仅全局经验库
+    # RAG 自动召回：传了 case_id 则含本案材料库；否则仅全局经验库
     recall = {"context": "", "refs": []}
     try:
         from core.knowledge import recall_for_context
-        recall = recall_for_context(db, None, payload.case_description[:300], top_k=3)
+        recall = recall_for_context(db, cid, payload.case_description[:300], top_k=3)
     except Exception:
         pass
 
@@ -186,9 +188,9 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
                 if event.get("event") == "moot_finished":
                     final = event
                 events.put(event)
-            # 庭审记录持久化（case_id 为空 = 独立演练，不挂在任何案件下）
+            # 庭审记录持久化（case_id 为空 = 纯独立演练，不挂任何案件）
             if final:
-                _save_rounds(db, None, final.get("rounds", []), "standalone")
+                _save_rounds(db, cid, final.get("rounds", []), "standalone")
         except Exception as e:
             events.put({"event": "moot_error", "error": str(e)})
         finally:
