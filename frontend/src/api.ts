@@ -71,6 +71,8 @@ export const api = {
   startEvaluation: (id: string) => request<CaseItem>(`/cases/${id}/start-evaluation`, { method: 'POST' }),
   deleteEvidenceFile: (id: string, fileId: string) =>
     request<{ ok: boolean }>(`/cases/${id}/evidence-files/${fileId}`, { method: 'DELETE' }),
+  deleteCase: (id: string) =>
+    request<{ ok: boolean }>(`/cases/${id}`, { method: 'DELETE' }),
   result: (id: string) => request<any>(`/evaluation/${id}/result`),
   rerun: (id: string, node: string, guidance: string) =>
     request<any>(`/evaluation/${id}/rerun`, {
@@ -142,6 +144,7 @@ export interface StandaloneMootPayload {
   cause_type?: string
   viewpoints?: string[]
   plaintiff_points?: string
+  case_id?: string
 }
 
 export const mootApi = {

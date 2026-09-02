@@ -326,8 +326,8 @@ export default function Report() {
         >
           {showMarkdown ? '收起' : '展开'} Markdown 源码（Word 导出内容源）
         </button>
-        <Link to={`/cases/${id}/dashboard`} className="text-muted hover:underline">
-          返回仪表盘
+        <Link to={`/cases/${id}`} className="text-muted hover:underline">
+          返回个案工作台
         </Link>
       </div>
 

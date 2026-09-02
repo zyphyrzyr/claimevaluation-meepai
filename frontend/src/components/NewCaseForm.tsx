@@ -23,10 +23,12 @@ export interface CaseFormInitial {
 
 export default function NewCaseForm({
   onCreated,
+  onStartMoot,
   caseId,
   initial,
 }: {
   onCreated: (caseId: string, status: string) => void
+  onStartMoot?: (caseId: string) => void
   caseId?: string
   initial?: CaseFormInitial
 }) {
@@ -156,6 +158,7 @@ export default function NewCaseForm({
         const created = await api.createCase(payload)
         onCreated(created.id, 'draft')
       }
+      setSubmitting(false)
     } catch (e) {
       setError(String(e))
       setSubmitting(false)
@@ -176,6 +179,29 @@ export default function NewCaseForm({
         const created = await api.createCase(buildPayload(false))
         onCreated(created.id, 'pending')
       }
+    } catch (e) {
+      setError(String(e))
+      setSubmitting(false)
+    }
+  }
+
+  /** 仅开始模拟法庭：不要求必填全，仅确保最新改动已落库，再交由父级进入模拟法庭步骤 */
+  async function startMoot() {
+    setError('')
+    if (!form.name.trim()) {
+      setError('请至少填写案件名称')
+      return
+    }
+    setSubmitting(true)
+    try {
+      let cid = caseId
+      if (!cid) {
+        const created = await api.createCase(buildPayload(true))
+        cid = created.id
+      } else {
+        await api.updateDraft(cid, buildPayload(true))
+      }
+      onStartMoot?.(cid)
     } catch (e) {
       setError(String(e))
       setSubmitting(false)
@@ -416,6 +442,14 @@ export default function NewCaseForm({
           className="flex-[2] bg-fg text-canvas hover:opacity-90 disabled:opacity-50 py-3 rounded-lg text-sm font-medium transition-colors"
         >
           {submitting ? '处理中…' : caseId ? '保存并启动评估' : '创建案件并开始评估'}
+        </button>
+        <button
+          type="button"
+          onClick={startMoot}
+          disabled={submitting}
+          className="flex-1 border border-brand/40 text-brand hover:bg-brand/5 disabled:opacity-50 py-3 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+        >
+          {submitting ? '处理中…' : '仅开始模拟法庭'}
         </button>
       </div>
     </div>

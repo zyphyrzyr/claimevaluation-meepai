@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useEffect, useState, useRef } from 'react'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { api, mootApi, exportUrls } from '../api'
 import type { MootRound } from '../api'
@@ -17,6 +17,8 @@ interface JudgeInfo {
 
 export default function MootCourt() {
   const { id } = useParams<{ id: string }>()
+  const [mode] = useSearchParams()
+  const isStandalone = mode.get('mode') === 'standalone'
   const { setTheme } = useTheme()
 
   // 模拟法庭 = 暗色剧场例外：进入切 theater，离开恢复 light（P2 双主题机制）
@@ -31,12 +33,14 @@ export default function MootCourt() {
   const [scoresUpdated, setScoresUpdated] = useState<any>(null)
   const [error, setError] = useState('')
   const [result, setResult] = useState<any>(null)
+  const [detail, setDetail] = useState<any>(null)
 
   useEffect(() => {
     if (!id) return
-    Promise.all([api.result(id), api.mootHistory(id)])
-      .then(([res, hist]) => {
+    Promise.all([api.result(id), api.mootHistory(id), api.caseDetail(id)])
+      .then(([res, hist, det]) => {
         setResult(res)
+        setDetail(det)
         if (hist?.transcript?.length) {
           setRounds(hist.transcript)
           setJudge({
@@ -59,6 +63,27 @@ export default function MootCourt() {
     setJudge(null)
     setScoresUpdated(null)
     try {
+      if (isStandalone) {
+        const d = detail ?? (await api.caseDetail(id))
+        await mootApi.runStandalone(
+          {
+            case_description: d.case_description ?? '',
+            cause_type: d.cause_type ?? '商标侵权',
+            viewpoints: d.context?.user_viewpoints ?? [],
+            case_id: id,
+          },
+          (ev) => {
+            if (ev.event === 'round') {
+              setRounds((prev) => [...prev, ev])
+            } else if (ev.event === 'moot_finished') {
+              setJudge(ev)
+            } else if (ev.event === 'moot_error') {
+              setError(ev.error)
+            }
+          },
+        )
+        return
+      }
       await mootApi.runEmbedded(id, (ev) => {
         if (ev.event === 'round') {
           setRounds((prev) => [...prev, ev])
@@ -77,13 +102,32 @@ export default function MootCourt() {
     }
   }
 
+  // 从「案件详情-仅开始模拟法庭」进入：自动开庭（不跑全案评估、不回写评分）
+  const autoStartedRef = useRef(false)
+  useEffect(() => {
+    if (isStandalone && id && !autoStartedRef.current) {
+      autoStartedRef.current = true
+      start()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStandalone, id])
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-xl font-medium text-fg">模拟法庭 · 对抗压力测试</h1>
+          <h1 className="text-xl font-medium text-fg flex items-center gap-2">
+            模拟法庭 · 对抗压力测试
+            {isStandalone && (
+              <span className="text-xs font-normal text-brand bg-brand/10 border border-brand/30 px-2 py-0.5 rounded-full">
+                独立演练 · 本案
+              </span>
+            )}
+          </h1>
           <p className="text-sm text-muted mt-1">
-            原告 / 被告 / 法官三 Agent 五步庭审；法官归纳产出修正系数，回写评分
+            {isStandalone
+              ? '不跑全案评估、不回写评分，直接以本案案情开庭演练'
+              : '原告 / 被告 / 法官三 Agent 五步庭审；法官归纳产出修正系数，回写评分'}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -94,7 +138,7 @@ export default function MootCourt() {
           )}
           <button
             onClick={start}
-            disabled={running || result?.scores?.final == null}
+            disabled={running || (!isStandalone && result?.scores?.final == null)}
             className="bg-brand text-canvas px-5 py-2 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {running ? '庭审进行中…' : rounds.length ? '重新开庭' : '开庭'}
@@ -118,10 +162,10 @@ export default function MootCourt() {
         </div>
       </div>
 
-      {result?.scores?.final == null && !running && (
+      {result?.scores?.final == null && !running && !isStandalone && (
         <div className="bg-[var(--warning-soft)] text-[var(--warning)] border border-[var(--warning-soft)] rounded-lg p-4 text-sm">
           该案件尚未完成主诉评估。模拟法庭（内嵌模式）需要先完成评估，
-          <Link to={`/cases/${id}/evaluation`} className="underline font-medium">去评估</Link>
+          <Link to={`/cases/${id}`} className="underline font-medium">去评估</Link>
           ；或使用
           <Link to="/moot" className="underline font-medium">独立演练模式</Link>
           直接开庭。
@@ -206,10 +250,10 @@ export default function MootCourt() {
       {rounds.length > 0 && !running && (
         <div className="flex gap-3 text-sm">
           <Link
-            to={`/cases/${id}/dashboard`}
+            to={`/cases/${id}`}
             className="text-brand hover:underline font-medium"
           >
-            返回决策仪表盘 →
+            返回个案工作台 →
           </Link>
           <Link to={`/cases/${id}/report`} className="text-muted hover:underline">
             查看决策备忘录

@@ -1,11 +1,8 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, EvalEvent, KnowledgeEntryItem, knowledgeApi, runEvaluation } from '../api'
+import { useState, type ReactNode } from 'react'
 import { cn } from '../lib/utils'
-import { tierOf, type Thresholds, type NodeState } from '../lib/tiers'
+import { type Thresholds, type NodeState } from '../lib/tiers'
 import { Card } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
-import { StatusDot } from '../components/ui/StatusDot'
 import { ScoreBadge } from '../components/ui/ScoreBadge'
 import { StepperNode } from '../components/ui/StepperNode'
 import { ConclusionCard } from '../components/ui/ConclusionCard'
@@ -22,7 +19,6 @@ const NODE_LABELS: Record<string, string> = {
   procedure: '诉讼程序',
   business: '业务预期',
   synthesize: '决策合成',
-  // 业务子维度（仅存在于 dimension_results，不在 NODE_ORDER）
   damages: '判赔规模',
   recovery: '回款能力',
   precedent: '判例价值',
@@ -30,14 +26,12 @@ const NODE_LABELS: Record<string, string> = {
 const RERUNNABLE = new Set(['evidence_review', 'rights', 'infringement', 'procedure', 'business'])
 
 // 分轴呈现：让「每个环节的信息与结论」沿横轴分组清晰铺开
-const AXES: { axis: string; nodes: string[] }[] = [
-  { axis: '前置盘点', nodes: ['evidence_review', 'red_gate'] },
-  { axis: '法律可行性轴', nodes: ['rights', 'infringement', 'procedure'] },
-  { axis: '业务预期轴', nodes: ['business'] },
-  { axis: '决策合成', nodes: ['synthesize'] },
+const AXES: { axis: string; nodes: string[]; cols: string }[] = [
+  { axis: '前置盘点', nodes: ['evidence_review', 'red_gate'], cols: 'sm:grid-cols-2' },
+  { axis: '法律可行性轴', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
+  { axis: '业务预期轴', nodes: ['business'], cols: '' },
+  { axis: '决策合成', nodes: ['synthesize'], cols: '' },
 ]
-
-type Phase = 'prep' | 'running' | 'done'
 
 const SEV_LABEL: Record<string, string> = { pass: '通过', warning: '警示', block: '拦截' }
 const RISK_LABEL: Record<string, string> = { high: '高', medium: '中', low: '低', none: '无' }
@@ -57,28 +51,29 @@ function scaleLabel(s?: string) {
   return s === 'high' ? '高' : s === 'medium' ? '中' : s === 'low' ? '低' : (s ?? '—')
 }
 
-export default function Evaluation() {
-  const { id } = useParams<{ id: string }>()
-  const navigate = useNavigate()
-  const [phase, setPhase] = useState<Phase>('prep')
-  const [states, setStates] = useState<Record<string, NodeState>>({})
-  const [finished, setFinished] = useState<string>('')
-  const [error, setError] = useState('')
-
-  // 准备阶段：知识注入
-  const [caseEntries, setCaseEntries] = useState<KnowledgeEntryItem[]>([])
-  const [globalEntries, setGlobalEntries] = useState<KnowledgeEntryItem[]>([])
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [injectedInfo, setInjectedInfo] = useState('')
-  const [evaluated, setEvaluated] = useState(false)
-  const [caseStatus, setCaseStatus] = useState('')
-  const [caseDetail, setCaseDetail] = useState<any>(null)
-  const [descExpanded, setDescExpanded] = useState(false)
-
-  // 运行/完成阶段：逐节点拉取的完整结果
-  const [result, setResult] = useState<any>(null)
-
-  // 节点级重跑
+/**
+ * 评估详情（运行/完成时间线）。运行时状态由父级 CaseWorkbench 持有并下发，
+ * 本组件只负责渲染；节点级重跑与「查看决策仪表盘」通过回调上抛。
+ */
+export default function EvalRun({
+  caseId,
+  result,
+  states,
+  phase,
+  finished,
+  error,
+  onViewResult,
+  onRerun,
+}: {
+  caseId: string
+  result: any
+  states: Record<string, NodeState>
+  phase: 'prep' | 'running' | 'done'
+  finished: string
+  error: string
+  onViewResult: () => void
+  onRerun: (node: string, guidance: string) => Promise<void>
+}) {
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
   const [rerunBusy, setRerunBusy] = useState(false)
@@ -88,78 +83,10 @@ export default function Evaluation() {
   const goalType: string = result?.goal_type ?? '要钱'
   const blocked = Boolean(result?.dimension_results?.red_gate?.result?.blocked)
 
-  useEffect(() => {
-    if (!id) return
-    knowledgeApi.caseEntries(id).then(setCaseEntries).catch(() => {})
-    knowledgeApi.entries({ scope: 'global' }).then(setGlobalEntries).catch(() => {})
-    api.caseDetail(id).then((d) => {
-      setCaseDetail(d)
-      setEvaluated(Boolean(d.context?.scores?.final != null))
-      setCaseStatus(d.status ?? '')
-    }).catch(() => {})
-  }, [id])
-
-  // 进入运行态即拉一次结果（断线重连/重看时也能先有数据）
-  const refreshResult = () => {
-    if (!id) return
-    api.result(id).then(setResult).catch(() => {})
-  }
-
-  const toggle = (entryId: string) => {
-    setSelected((s) => {
-      const copy = new Set(s)
-      copy.has(entryId) ? copy.delete(entryId) : copy.add(entryId)
-      return copy
-    })
-  }
-
-  const start = async () => {
-    if (!id) return
-    setError('')
-    setInjectedInfo('')
-    try {
-      if (selected.size > 0) {
-        const r = await knowledgeApi.inject(id, Array.from(selected))
-        setInjectedInfo(`已注入 ${r.injected} 条参考材料到全部评估节点`)
-      } else {
-        await knowledgeApi.inject(id, [])
-      }
-    } catch (e) {
-      setError(`材料注入失败：${e}`)
-      return
-    }
-    setStates({})
-    setPhase('running')
-    refreshResult()
-    runEvaluation(id, onEvent).catch((e) => setError(String(e)))
-  }
-
-  const onEvent = (e: EvalEvent) => {
-    if (e.event === 'node_started') {
-      setStates((s) => ({ ...s, [e.node]: 'running' }))
-    } else if (e.event === 'node_finished') {
-      setStates((s) => ({ ...s, [e.node]: (e.status as NodeState) ?? 'ok' }))
-      refreshResult() // 每个节点完成即回填详情（P1-3）
-    } else if (e.event === 'flow_blocked') {
-      refreshResult()
-    } else if (e.event === 'flow_finished') {
-      setFinished(e.status ?? '')
-      setPhase('done')
-      refreshResult()
-    } else if (e.event === 'flow_error') {
-      setError(e.error ?? '未知错误')
-    }
-  }
-
   const doRerun = async (node: string) => {
-    if (!id) return
     setRerunBusy(true)
-    setError('')
     try {
-      await api.rerun(id, node, rerunGuidance)
-      await refreshResult()
-    } catch (e) {
-      setError(String(e))
+      await onRerun(node, rerunGuidance)
     } finally {
       setRerunBusy(false)
       setRerunTarget(null)
@@ -167,186 +94,18 @@ export default function Evaluation() {
     }
   }
 
-  // 返回工作台按钮（准备/运行/完成阶段通用）
-  const BackButton = () => (
-    <button
-      onClick={() => navigate('/workbench')}
-      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg border border-line hover:bg-surface transition-colors"
-    >
-      🔙 返回工作台
-    </button>
-  )
-
-  // 案件信息卡：建案时录入的全部字段，供评估准备阶段回看
-  const CaseInfoCard = () => {
-    if (!caseDetail) return null
-    const di = caseDetail.context?.defendant_info ?? {}
-    const views: string[] = caseDetail.context?.user_viewpoints ?? []
-    const files: { id: string; file_name: string; parse_status: string }[] = caseDetail.evidence_files ?? []
-    const desc = caseDetail.case_description ?? ''
-    const evText = di.evidence_texts ?? ''
+  // 尚未开始评估（本会话未运行且后端也无历史结果）
+  if (!result && phase === 'prep') {
     return (
-      <Card className="p-5 mb-4">
-        <h2 className="text-sm font-medium mb-3">案件信息</h2>
-        <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-          <div>
-            <div className="text-xs text-muted mb-0.5">案件名称</div>
-            <div className="text-fg">{caseDetail.name || '—'}</div>
-          </div>
-          <div>
-            <div className="text-xs text-muted mb-0.5">业务目标</div>
-            <div className="text-fg">{caseDetail.goal_type || '—'}</div>
-          </div>
-          <div>
-            <div className="text-xs text-muted mb-0.5">案由</div>
-            <div className="text-fg">{caseDetail.cause_type || '—'}</div>
-          </div>
-          <div>
-            <div className="text-xs text-muted mb-0.5">原告 / 客户主体</div>
-            <div className="text-fg">{caseDetail.client_org || '—'}</div>
-          </div>
-          <div className="sm:col-span-2">
-            <div className="text-xs text-muted mb-0.5">被告</div>
-            <div className="text-fg">
-              {di.name || '—'}
-              {di.type ? `（${di.type === 'company' ? '企业' : di.type === 'individual' ? '个人' : di.type}）` : ''}
-            </div>
-          </div>
-          <div className="sm:col-span-2">
-            <div className="text-xs text-muted mb-0.5">案情描述</div>
-            <div className={cn('text-fg whitespace-pre-wrap', !descExpanded && 'line-clamp-3')}>
-              {desc || '—'}
-            </div>
-            {desc.length > 120 && (
-              <button
-                onClick={() => setDescExpanded((v) => !v)}
-                className="text-xs text-brand hover:underline mt-1"
-              >
-                {descExpanded ? '收起' : '展开全文'}
-              </button>
-            )}
-          </div>
+      <>
+        <h1 className="text-xl font-medium mb-1">评估分析</h1>
+        <div className="bg-surface border border-line rounded-xl p-8 text-center text-muted text-sm">
+          本案尚未开始评估，请到「评估准备」勾选参考材料并点击「开始评估」。
         </div>
-
-        {evText && (
-          <div className="mt-3">
-            <div className="text-xs text-muted mb-1">证据材料文本</div>
-            <div className="text-xs text-fg whitespace-pre-wrap bg-surface border border-line rounded-lg p-3 max-h-40 overflow-auto">
-              {evText}
-            </div>
-          </div>
-        )}
-
-        {files.length > 0 && (
-          <div className="mt-3">
-            <div className="text-xs text-muted mb-1">已上传证据文件（{files.length}）</div>
-            <div className="flex flex-wrap gap-2">
-              {files.map((f) => (
-                <span key={f.id} className="text-xs bg-surface border border-line rounded px-2 py-1 text-fg">
-                  {f.file_name}
-                  {f.parse_status === 'ok' ? ' · 已解析' : f.parse_status === 'failed' ? ' · 解析失败' : ''}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {views.length > 0 && (
-          <div className="mt-3">
-            <div className="text-xs text-muted mb-1">已注入观点</div>
-            {views.map((v: string, i: number) => (
-              <div key={i} className="text-sm text-muted">· {v}</div>
-            ))}
-          </div>
-        )}
-      </Card>
+      </>
     )
   }
 
-  // ---------------------------------------------------------------- 草稿兜底：必填项未完成不可评估
-  if (caseStatus === 'draft') {
-    return (
-      <div className="max-w-3xl">
-        <h1 className="text-xl font-medium mb-1">案件尚未就绪</h1>
-        <p className="text-sm text-muted mb-6">
-          本案仍为草稿，必填项尚未补全，无法进入评估环节。
-        </p>
-        <div className="bg-surface border border-line rounded-xl p-5 text-sm text-muted mb-4">
-          请返回工作台，点击该草稿补全「我司主体（原告）、被告名称、案情描述、证据材料」后，
-          在草稿中点击「保存并启动评估」即可开始。
-        </div>
-        <button
-          onClick={() => navigate('/workbench')}
-          className="w-full bg-fg hover:opacity-90 text-canvas py-3 rounded-lg text-sm font-medium transition-colors"
-        >
-          返回工作台
-        </button>
-      </div>
-    )
-  }
-
-  // ---------------------------------------------------------------- 准备阶段：知识注入
-  if (phase === 'prep') {
-    const entryRow = (e: KnowledgeEntryItem, tag: string) => (
-      <label key={e.id} className="flex items-start gap-2.5 py-1.5 cursor-pointer group">
-        <input
-          type="checkbox"
-          checked={selected.has(e.id)}
-          onChange={() => toggle(e.id)}
-          className="mt-0.5 accent-brand"
-        />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm text-fg truncate">{e.title}</div>
-          <div className="text-[11px] text-muted">
-            {tag} · {e.source_type_label} · {e.chunk_count} 块
-          </div>
-        </div>
-      </label>
-    )
-    return (
-      <div className="max-w-3xl">
-        <div className="flex items-center gap-3 mb-1">
-          <BackButton />
-          <h1 className="text-xl font-medium">评估准备 · 参考材料注入</h1>
-        </div>
-        <p className="text-sm text-muted mb-6">
-          勾选的知识库条目将注入全部 LLM 评估节点（评分链路手动勾选，保证结果可复现）；
-          右下角追问顾问与模拟法庭则会按需自动召回
-          {evaluated && <span className="text-[var(--warning)]">（本案已有评估结果，重新评估将覆盖）</span>}
-        </p>
-
-        <CaseInfoCard />
-
-        <div className="grid md:grid-cols-2 gap-4">
-          <Card className="p-5">
-            <h2 className="text-sm font-medium mb-1">本案材料库（case 隔离）</h2>
-            <p className="text-[11px] text-muted mb-2">建案时证据文本已自动入库</p>
-            {caseEntries.length ? caseEntries.map((e) => entryRow(e, '案件材料'))
-              : <p className="text-sm text-muted py-2">暂无（可在建案时粘贴证据文本）</p>}
-          </Card>
-          <Card className="p-5">
-            <h2 className="text-sm font-medium mb-1">全局经验库（跨案共享）</h2>
-            <p className="text-[11px] text-muted mb-2">
-              <Link to="/knowledge" className="text-brand hover:underline">去经验库管理 →</Link>
-            </p>
-            {globalEntries.length ? globalEntries.map((e) => entryRow(e, '经验库'))
-              : <p className="text-sm text-muted py-2">暂无经验条目</p>}
-          </Card>
-        </div>
-
-        {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm mt-4">{error}</div>}
-
-        <button
-          onClick={start}
-          className="mt-6 w-full bg-fg hover:opacity-90 text-canvas py-3 rounded-lg text-sm font-medium transition-colors"
-        >
-          开始评估（已勾选 {selected.size} 条参考材料）→
-        </button>
-      </div>
-    )
-  }
-
-  // ---------------------------------------------------------------- 运行/完成阶段：分轴时间线
   const detailOf = (node: string) => result?.dimension_results?.[node]
   const statusOf = (node: string): NodeState => {
     const d = detailOf(node)
@@ -568,18 +327,12 @@ export default function Evaluation() {
   }
 
   return (
-    <div className="max-w-3xl">
-      <div className="flex items-center gap-3 mb-1">
-        <BackButton />
-        <h1 className="text-xl font-medium">评估分析</h1>
-      </div>
+    <>
+      <h1 className="text-xl font-medium mb-1">评估分析</h1>
       <p className="text-sm text-muted mb-6">
         前置盘点 → 硬门禁 → 法律可行性（权利/侵权/程序）→ 业务预期 → 决策合成，
         每个环节均展示状态、分数（档位色）、结论与依据
       </p>
-      {injectedInfo && (
-        <div className="bg-[var(--info-soft)] text-[var(--info)] rounded-lg px-4 py-2 text-xs mb-4">{injectedInfo}</div>
-      )}
 
       {AXES.map((group) => (
         <section key={group.axis} className="mb-6">
@@ -587,7 +340,7 @@ export default function Evaluation() {
             <span className="text-xs font-medium text-muted tracking-wide">{group.axis}</span>
             <span className="flex-1 h-px bg-line" />
           </div>
-          <div className="space-y-3">
+          <div className={cn('grid gap-3', group.cols)}>
             {group.nodes.map((node) => {
               if (node === 'business') {
                 const b = detailOf('business')?.result ?? {}
@@ -624,14 +377,14 @@ export default function Evaluation() {
 
       {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm mt-4">{error}</div>}
 
-      {finished && (
+      {result?.scores?.final != null && (
         <button
-          onClick={() => navigate(`/cases/${id}/dashboard`)}
+          onClick={onViewResult}
           className="mt-6 w-full bg-fg hover:opacity-90 text-canvas py-3 rounded-lg text-sm font-medium transition-colors"
         >
           查看决策仪表盘 →
         </button>
       )}
-    </div>
+    </>
   )
 }

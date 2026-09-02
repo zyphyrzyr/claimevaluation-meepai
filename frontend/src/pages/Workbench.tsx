@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, CaseItem } from '../api'
 import SlideOver from '../components/SlideOver'
-import NewCaseForm, { CaseFormInitial } from '../components/NewCaseForm'
+import NewCaseForm from '../components/NewCaseForm'
 
 const STATUS_LABELS: Record<string, { text: string; dot: string }> = {
   draft: { text: '草稿', dot: 'bg-muted' },
@@ -27,8 +27,6 @@ export default function Workbench() {
   const [cases, setCases] = useState<CaseItem[]>([])
   const [error, setError] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [editCaseId, setEditCaseId] = useState<string | null>(null)
-  const [editInitial, setEditInitial] = useState<CaseFormInitial | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -36,47 +34,32 @@ export default function Workbench() {
   }, [])
 
   const openNew = () => {
-    setEditCaseId(null)
-    setEditInitial(null)
     setDrawerOpen(true)
-  }
-
-  const openDraftEdit = (c: CaseItem) => {
-    api
-      .caseDetail(c.id)
-      .then((d: any) => {
-        const di = d.context?.defendant_info ?? {}
-        setEditInitial({
-          name: d.name ?? c.name,
-          cause_type: d.cause_type ?? c.cause_type,
-          goal_type: d.goal_type ?? c.goal_type,
-          client_org: d.client_org ?? '',
-          defendant_name: di.name ?? '',
-          defendant_type: di.type ?? 'company',
-          case_description: d.case_description ?? '',
-          evidence_texts: di.evidence_texts ?? '',
-          viewpoints: d.context?.user_viewpoints ?? [],
-          evidence_files: d.evidence_files ?? [],
-        })
-        setEditCaseId(c.id)
-        setDrawerOpen(true)
-      })
-      .catch((e) => setError(String(e)))
   }
 
   const handleCreated = (id: string, status: string) => {
     setDrawerOpen(false)
-    setEditCaseId(null)
-    setEditInitial(null)
     api.listCases().then(setCases)
-    // 草稿只回工作台；正式建案 / 启动评估跳转到评估页
-    if (status !== 'draft') navigate(`/cases/${id}/evaluation`)
+    // 统一进入个案工作台：草稿在「案件详情」标签补全，其余标签按状态智能选
+    navigate(`/cases/${id}`)
+  }
+
+  const handleDelete = async (c: CaseItem) => {
+    if (!window.confirm(`确认删除案件「${c.name}」？此操作不可恢复，相关评估记录与案件材料库一并清除。`)) {
+      return
+    }
+    try {
+      await api.deleteCase(c.id)
+      setCases((list) => list.filter((x) => x.id !== c.id))
+    } catch (e) {
+      setError(String(e))
+    }
   }
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-medium">工作台</h1>
+        <h1 className="text-xl font-medium">案件列表</h1>
         <button
           onClick={openNew}
           className="bg-fg text-canvas hover:opacity-90 text-sm px-4 py-2 rounded-lg transition-colors"
@@ -97,54 +80,54 @@ export default function Workbench() {
         </div>
       ) : (
         <div className="border border-line rounded-xl overflow-hidden">
-          <div className="grid grid-cols-12 gap-4 px-5 py-3 bg-surface text-sm text-muted border-b border-line">
+          <div className="grid grid-cols-12 gap-3 px-5 py-3 bg-surface text-sm text-muted border-b border-line items-center">
             <div className="col-span-5">案件名称</div>
-            <div className="col-span-2">状态</div>
-            <div className="col-span-3">案由 / 业务目标</div>
-            <div className="col-span-2 text-right">创建时间</div>
+            <div className="col-span-1">状态</div>
+            <div className="col-span-2">案由</div>
+            <div className="col-span-1">业务目标</div>
+            <div className="col-span-1 text-right">创建时间</div>
+            <div className="col-span-2 text-right">操作</div>
           </div>
           {cases.map((c) => {
-            const isDraft = c.status === 'draft'
             const className =
-              'grid grid-cols-12 gap-4 px-5 py-4 border-b border-line last:border-b-0 hover:bg-surface transition-colors items-center'
-            const inner = (
-              <>
-                <div className="col-span-5 font-medium text-fg">{c.name}</div>
-                <div className="col-span-2">
+              'grid grid-cols-12 gap-3 px-5 py-4 border-b border-line last:border-b-0 hover:bg-surface transition-colors items-center'
+            return (
+              <div key={c.id} className={className}>
+                <div className="col-span-5 font-medium text-fg min-w-0">
+                  <Link to={`/cases/${c.id}`} className="hover:underline line-clamp-2" title={c.name}>{c.name}</Link>
+                </div>
+                <div className="col-span-1">
                   <StatusBadge status={c.status} />
                 </div>
-                <div className="col-span-3 flex gap-2">
+                <div className="col-span-2">
                   <span className="text-xs bg-surface text-muted px-2 py-0.5 rounded border border-line">
                     {c.cause_type}
                   </span>
+                </div>
+                <div className="col-span-1">
                   <span className="text-xs bg-surface text-muted px-2 py-0.5 rounded border border-line">
                     {c.goal_type}
                   </span>
                 </div>
-                <div className="col-span-2 text-right text-xs text-muted">
-                  {new Date(c.created_at).toLocaleString('zh-CN')}
+                <div className="col-span-1 text-right text-xs text-muted">
+                  {new Date(c.created_at).toLocaleDateString('zh-CN')}
                 </div>
-              </>
-            )
-            if (isDraft) {
-              return (
-                <div
-                  key={c.id}
-                  onClick={() => openDraftEdit(c)}
-                  className={`${className} cursor-pointer`}
-                >
-                  {inner}
+                <div className="col-span-2 flex items-center justify-end gap-2">
+                  <Link
+                    to={`/cases/${c.id}`}
+                    className="text-xs text-brand whitespace-nowrap px-2 py-1 rounded border border-brand/30 bg-brand/5 hover:bg-brand/10 transition-colors"
+                    title="进入个案工作台"
+                  >
+                    进入个案工作台
+                  </Link>
+                  <button
+                    onClick={() => handleDelete(c)}
+                    className="text-xs text-danger hover:underline whitespace-nowrap"
+                  >
+                    删除
+                  </button>
                 </div>
-              )
-            }
-            return (
-              <Link
-                key={c.id}
-                to={c.status === 'pending' ? `/cases/${c.id}/evaluation` : `/cases/${c.id}/dashboard`}
-                className={className}
-              >
-                {inner}
-              </Link>
+              </div>
             )
           })}
         </div>
@@ -167,13 +150,9 @@ export default function Workbench() {
       <SlideOver
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        title={editCaseId ? '编辑草稿' : '新建案件'}
+        title="新建案件"
       >
-        <NewCaseForm
-          caseId={editCaseId ?? undefined}
-          initial={editInitial ?? undefined}
-          onCreated={handleCreated}
-        />
+        <NewCaseForm onCreated={handleCreated} />
       </SlideOver>
     </div>
   )

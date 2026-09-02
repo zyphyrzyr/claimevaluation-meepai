@@ -1,7 +1,6 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import Workbench from './pages/Workbench'
-import Evaluation from './pages/Evaluation'
-import DecisionDashboard from './pages/DecisionDashboard'
+import CaseWorkbench from './pages/CaseWorkbench'
 import MootCourt from './pages/MootCourt'
 import MootStandalone from './pages/MootStandalone'
 import Report from './pages/Report'
@@ -11,7 +10,7 @@ import OnePager from './pages/OnePager'
 import AdvisorPanel from './components/AdvisorPanel'
 
 const navItems = [
-  { to: '/workbench', label: '工作台' },
+  { to: '/workbench', label: '案件列表' },
   { to: '/moot', label: '模拟法庭' },
   { to: '/knowledge', label: '经验库' },
   { to: '/settings', label: '高级设置' },
@@ -21,7 +20,7 @@ export default function App() {
   return (
     <div className="min-h-screen flex">
       {/* 左侧边栏：与页面同底色，print:hidden 避免打印时带出导航 */}
-      <aside className="w-[19.5rem] flex-shrink-0 bg-canvas text-fg border-r border-line print:hidden flex flex-col sticky top-0 h-screen">
+      <aside className="w-[15.5rem] flex-shrink-0 bg-canvas text-fg print:hidden flex flex-col sticky top-0 h-screen">
         <div className="px-6 py-5">
           <span className="text-xl font-medium text-fg">
             诉算·主诉评估
@@ -50,8 +49,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/workbench" replace />} />
             <Route path="/workbench" element={<Workbench />} />
-            <Route path="/cases/:id/evaluation" element={<Evaluation />} />
-            <Route path="/cases/:id/dashboard" element={<DecisionDashboard />} />
+            <Route path="/cases/:id" element={<CaseWorkbench />} />
             <Route path="/cases/:id/moot" element={<MootCourt />} />
             <Route path="/cases/:id/report" element={<Report />} />
             <Route path="/cases/:id/onepager" element={<OnePager />} />
