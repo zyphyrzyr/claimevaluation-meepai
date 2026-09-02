@@ -58,7 +58,12 @@ def supports_json_mode(model: str) -> bool:
 def _post_chat(messages: list, model: str, temperature: float, max_tokens: int,
                stream: bool = False, json_mode: bool = False) -> Dict[str, Any]:
     s = _settings()
-    url = f"{s['llm_base_url'].rstrip('/')}/v1/chat/completions"
+    # 供应商预设的 base_url 约定不一致：deepseek 不带 /v1，moonshot/openai 已带 /v1。
+    # 这里先归一化掉末尾的 /v1 再统一拼接 /v1/chat/completions，避免拼成 …/v1/v1/… 报 404。
+    base = s['llm_base_url'].rstrip('/')
+    if base.endswith('/v1'):
+        base = base[:-3]
+    url = f"{base}/v1/chat/completions"
     # 长度上限的字段名各厂商不统一：OpenAI/DeepSeek 用 max_tokens，Kimi 已把
     # 它标为弃用并要求改用 max_completion_tokens。这个差异不能硬编码——
     # 填错不会报错，只会让 Kimi 回落到默认的 131072，而它的限流是按这个值
