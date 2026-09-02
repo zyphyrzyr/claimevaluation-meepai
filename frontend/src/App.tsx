@@ -21,13 +21,13 @@ export default function App() {
   return (
     <div className="min-h-screen flex">
       {/* 左侧边栏：与页面同底色，print:hidden 避免打印时带出导航 */}
-      <aside className="w-52 flex-shrink-0 bg-canvas text-fg border-r border-line print:hidden">
+      <aside className="w-[19.5rem] flex-shrink-0 bg-canvas text-fg border-r border-line print:hidden flex flex-col sticky top-0 h-screen">
         <div className="px-6 py-5">
-          <span className="font-medium tracking-wide text-fg">
-            Soft IP 主诉评估
+          <span className="text-xl font-medium text-fg">
+            诉算·主诉评估
           </span>
         </div>
-        <nav className="flex flex-col gap-1 px-4">
+        <nav className="mt-[25vh] flex flex-col gap-1 px-4">
           {navItems.map((item) => (
             <NavLink
               key={item.to}

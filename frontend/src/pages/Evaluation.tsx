@@ -69,10 +69,11 @@ export default function Evaluation() {
   const [caseEntries, setCaseEntries] = useState<KnowledgeEntryItem[]>([])
   const [globalEntries, setGlobalEntries] = useState<KnowledgeEntryItem[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [viewpoints, setViewpoints] = useState<string[]>([])
   const [injectedInfo, setInjectedInfo] = useState('')
   const [evaluated, setEvaluated] = useState(false)
   const [caseStatus, setCaseStatus] = useState('')
+  const [caseDetail, setCaseDetail] = useState<any>(null)
+  const [descExpanded, setDescExpanded] = useState(false)
 
   // 运行/完成阶段：逐节点拉取的完整结果
   const [result, setResult] = useState<any>(null)
@@ -92,7 +93,7 @@ export default function Evaluation() {
     knowledgeApi.caseEntries(id).then(setCaseEntries).catch(() => {})
     knowledgeApi.entries({ scope: 'global' }).then(setGlobalEntries).catch(() => {})
     api.caseDetail(id).then((d) => {
-      setViewpoints(d.context?.user_viewpoints ?? [])
+      setCaseDetail(d)
       setEvaluated(Boolean(d.context?.scores?.final != null))
       setCaseStatus(d.status ?? '')
     }).catch(() => {})
@@ -166,6 +167,102 @@ export default function Evaluation() {
     }
   }
 
+  // 返回工作台按钮（准备/运行/完成阶段通用）
+  const BackButton = () => (
+    <button
+      onClick={() => navigate('/workbench')}
+      className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg border border-line hover:bg-surface transition-colors"
+    >
+      🔙 返回工作台
+    </button>
+  )
+
+  // 案件信息卡：建案时录入的全部字段，供评估准备阶段回看
+  const CaseInfoCard = () => {
+    if (!caseDetail) return null
+    const di = caseDetail.context?.defendant_info ?? {}
+    const views: string[] = caseDetail.context?.user_viewpoints ?? []
+    const files: { id: string; file_name: string; parse_status: string }[] = caseDetail.evidence_files ?? []
+    const desc = caseDetail.case_description ?? ''
+    const evText = di.evidence_texts ?? ''
+    return (
+      <Card className="p-5 mb-4">
+        <h2 className="text-sm font-medium mb-3">案件信息</h2>
+        <div className="grid sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+          <div>
+            <div className="text-xs text-muted mb-0.5">案件名称</div>
+            <div className="text-fg">{caseDetail.name || '—'}</div>
+          </div>
+          <div>
+            <div className="text-xs text-muted mb-0.5">业务目标</div>
+            <div className="text-fg">{caseDetail.goal_type || '—'}</div>
+          </div>
+          <div>
+            <div className="text-xs text-muted mb-0.5">案由</div>
+            <div className="text-fg">{caseDetail.cause_type || '—'}</div>
+          </div>
+          <div>
+            <div className="text-xs text-muted mb-0.5">原告 / 客户主体</div>
+            <div className="text-fg">{caseDetail.client_org || '—'}</div>
+          </div>
+          <div className="sm:col-span-2">
+            <div className="text-xs text-muted mb-0.5">被告</div>
+            <div className="text-fg">
+              {di.name || '—'}
+              {di.type ? `（${di.type === 'company' ? '企业' : di.type === 'individual' ? '个人' : di.type}）` : ''}
+            </div>
+          </div>
+          <div className="sm:col-span-2">
+            <div className="text-xs text-muted mb-0.5">案情描述</div>
+            <div className={cn('text-fg whitespace-pre-wrap', !descExpanded && 'line-clamp-3')}>
+              {desc || '—'}
+            </div>
+            {desc.length > 120 && (
+              <button
+                onClick={() => setDescExpanded((v) => !v)}
+                className="text-xs text-brand hover:underline mt-1"
+              >
+                {descExpanded ? '收起' : '展开全文'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {evText && (
+          <div className="mt-3">
+            <div className="text-xs text-muted mb-1">证据材料文本</div>
+            <div className="text-xs text-fg whitespace-pre-wrap bg-surface border border-line rounded-lg p-3 max-h-40 overflow-auto">
+              {evText}
+            </div>
+          </div>
+        )}
+
+        {files.length > 0 && (
+          <div className="mt-3">
+            <div className="text-xs text-muted mb-1">已上传证据文件（{files.length}）</div>
+            <div className="flex flex-wrap gap-2">
+              {files.map((f) => (
+                <span key={f.id} className="text-xs bg-surface border border-line rounded px-2 py-1 text-fg">
+                  {f.file_name}
+                  {f.parse_status === 'ok' ? ' · 已解析' : f.parse_status === 'failed' ? ' · 解析失败' : ''}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {views.length > 0 && (
+          <div className="mt-3">
+            <div className="text-xs text-muted mb-1">已注入观点</div>
+            {views.map((v: string, i: number) => (
+              <div key={i} className="text-sm text-muted">· {v}</div>
+            ))}
+          </div>
+        )}
+      </Card>
+    )
+  }
+
   // ---------------------------------------------------------------- 草稿兜底：必填项未完成不可评估
   if (caseStatus === 'draft') {
     return (
@@ -208,21 +305,17 @@ export default function Evaluation() {
     )
     return (
       <div className="max-w-3xl">
-        <h1 className="text-xl font-medium mb-1">评估准备 · 参考材料注入</h1>
+        <div className="flex items-center gap-3 mb-1">
+          <BackButton />
+          <h1 className="text-xl font-medium">评估准备 · 参考材料注入</h1>
+        </div>
         <p className="text-sm text-muted mb-6">
           勾选的知识库条目将注入全部 LLM 评估节点（评分链路手动勾选，保证结果可复现）；
           右下角追问顾问与模拟法庭则会按需自动召回
           {evaluated && <span className="text-[var(--warning)]">（本案已有评估结果，重新评估将覆盖）</span>}
         </p>
 
-        {viewpoints.length > 0 && (
-          <Card className="p-5 mb-4">
-            <h2 className="text-sm font-medium mb-2">已注入观点（建案时录入）</h2>
-            {viewpoints.map((v, i) => (
-              <div key={i} className="text-sm text-muted">· {v}</div>
-            ))}
-          </Card>
-        )}
+        <CaseInfoCard />
 
         <div className="grid md:grid-cols-2 gap-4">
           <Card className="p-5">
@@ -476,7 +569,10 @@ export default function Evaluation() {
 
   return (
     <div className="max-w-3xl">
-      <h1 className="text-xl font-medium mb-1">评估分析</h1>
+      <div className="flex items-center gap-3 mb-1">
+        <BackButton />
+        <h1 className="text-xl font-medium">评估分析</h1>
+      </div>
       <p className="text-sm text-muted mb-6">
         前置盘点 → 硬门禁 → 法律可行性（权利/侵权/程序）→ 业务预期 → 决策合成，
         每个环节均展示状态、分数（档位色）、结论与依据
