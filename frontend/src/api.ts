@@ -51,13 +51,26 @@ export const api = {
       method: 'POST',
       body: payload instanceof FormData ? payload : JSON.stringify(payload),
     }),
-  caseDetail: (id: string) => request<any>(`/cases/${id}`),
+  caseDetail: (id: string) =>
+    request<{
+      id: string
+      name: string
+      cause_type: string
+      goal_type: string
+      status: string
+      case_description: string
+      client_org: string
+      evidence_files: { id: string; file_name: string; parse_status: string }[]
+      context: any
+    }>(`/cases/${id}`),
   updateDraft: (id: string, payload: CaseCreatePayload | FormData) =>
     request<CaseItem>(`/cases/${id}`, {
       method: 'PUT',
       body: payload instanceof FormData ? payload : JSON.stringify(payload),
     }),
   startEvaluation: (id: string) => request<CaseItem>(`/cases/${id}/start-evaluation`, { method: 'POST' }),
+  deleteEvidenceFile: (id: string, fileId: string) =>
+    request<{ ok: boolean }>(`/cases/${id}/evidence-files/${fileId}`, { method: 'DELETE' }),
   result: (id: string) => request<any>(`/evaluation/${id}/result`),
   rerun: (id: string, node: string, guidance: string) =>
     request<any>(`/evaluation/${id}/rerun`, {

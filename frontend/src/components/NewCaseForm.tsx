@@ -18,6 +18,7 @@ export interface CaseFormInitial {
   case_description: string
   evidence_texts: string
   viewpoints: string[]
+  evidence_files: { id: string; file_name: string; parse_status: string }[]
 }
 
 export default function NewCaseForm({
@@ -59,10 +60,15 @@ export default function NewCaseForm({
   const [viewpoints, setViewpoints] = useState<string[]>(() =>
     initial?.viewpoints?.length ? initial.viewpoints : [''],
   )
+  // 历史上传的文件（编辑草稿时从后端拉取，只读展示 + 可删除）
+  const [savedFiles, setSavedFiles] = useState<CaseFormInitial['evidence_files']>(() =>
+    initial?.evidence_files ?? [],
+  )
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [dragOver, setDragOver] = useState(false)
+  const [busyDelFile, setBusyDelFile] = useState<string | null>(null)
 
   useEffect(() => {
     api.meta().then(setMeta).catch(() => {})
@@ -85,6 +91,19 @@ export default function NewCaseForm({
   }
   const removeFile = (idx: number) => setFiles((prev) => prev.filter((_, i) => i !== idx))
   const removeViewpoint = (idx: number) => setViewpoints((prev) => prev.filter((_, i) => i !== idx))
+
+  const removeSavedFile = async (fileId: string) => {
+    if (!caseId) return
+    setBusyDelFile(fileId)
+    try {
+      await api.deleteEvidenceFile(caseId, fileId)
+      setSavedFiles((prev) => prev.filter((f) => f.id !== fileId))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusyDelFile(null)
+    }
+  }
 
   /** 组装提交体：有文件走 multipart（evidence_files），否则 JSON；draft 控制后端存草稿还是正式建案。 */
   function buildPayload(draft: boolean): CaseCreatePayload | FormData {
@@ -248,6 +267,41 @@ export default function NewCaseForm({
           onChange={set('evidence_texts')}
           placeholder="粘贴证据清单或关键证据文本；也可点击下方上传 PDF/图片，解析后的文本会自动追加到此处"
         />
+
+        {savedFiles.length > 0 && (
+          <div className="mt-3">
+            <p className="text-xs text-muted mb-2">已上传文件（保存草稿时解析入库，可直接删除）</p>
+            <ul className="space-y-2">
+              {savedFiles.map((f) => (
+                <li
+                  key={f.id}
+                  className="flex items-center justify-between bg-surface border border-line rounded-lg px-3 py-2"
+                >
+                  <div className="min-w-0 flex items-center gap-2">
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
+                        f.parse_status === 'ok'
+                          ? 'bg-[var(--success-soft)] text-[var(--success)]'
+                          : 'bg-[var(--danger-soft)] text-[var(--danger)]'
+                      }`}
+                    >
+                      {f.parse_status === 'ok' ? '已解析' : '解析失败'}
+                    </span>
+                    <p className="text-sm text-fg truncate">{f.file_name}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeSavedFile(f.id)}
+                    disabled={busyDelFile === f.id}
+                    className="text-xs text-muted hover:text-danger ml-3 shrink-0"
+                  >
+                    {busyDelFile === f.id ? '删除中…' : '删除'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="mt-3">
           <label

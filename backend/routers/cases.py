@@ -3,6 +3,7 @@
 """
 
 from typing import List, Optional
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from core.case_context import CaseContext
 from core.config import SUPPORTED_CAUSE_TYPES, GOAL_TYPES
-from core.database import Case, EvidenceFile, Party, get_db
+from core.database import Case, EvidenceFile, Party, KnowledgeEntry, get_db
 from core.evidence_parser import is_image_file, is_pdf_file, ocr_image, parse_pdf
 
 router = APIRouter()
@@ -145,9 +146,14 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
     if payload.goal_type not in GOAL_TYPES:
         raise HTTPException(400, f"不支持的业务目标: {payload.goal_type}")
 
-    # ---- 草稿模式：名称已在校验通过，其余字段留空也可存 ----
+    # ---- 草稿模式：名称已在校验通过，其余字段留空也可存；上传文件一并解析落库 ----
     if payload.draft:
         parties = _build_parties(payload)
+        file_records = await _parse_evidence(files) if files else []
+        parsed_text = _evidence_snippets(file_records)
+        if parsed_text:
+            base = payload.evidence_texts.strip()
+            payload.evidence_texts = (base + "\n\n" if base else "") + parsed_text
         ctx = _build_context(payload, parties)
         case = Case(
             name=payload.name,
@@ -157,9 +163,18 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
             case_description=payload.case_description,
             status="draft",
         )
-        case.context_json = ctx.to_dict()
         db.add(case)
+        db.flush()
+        _write_evidence_files(file_records, case.id, db)
+        ctx.case_id = case.id
+        case.context_json = ctx.to_dict()
         db.commit()
+        if payload.evidence_texts.strip():
+            from core.knowledge import ingest_case_materials
+            try:
+                ingest_case_materials(db, case.id, payload.evidence_texts)
+            except Exception:
+                pass
         return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                        goal_type=case.goal_type, status=case.status,
                        created_at=case.created_at.isoformat())
@@ -230,6 +245,10 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(404, "案件不存在")
+    evidence_files = [
+        {"id": ef.id, "file_name": ef.file_name, "parse_status": ef.parse_status}
+        for ef in db.query(EvidenceFile).filter(EvidenceFile.case_id == case_id).all()
+    ]
     return {
         "id": case.id,
         "name": case.name,
@@ -238,6 +257,7 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
         "status": case.status,
         "case_description": case.case_description,
         "client_org": case.client_org,
+        "evidence_files": evidence_files,
         "context": case.context_json,
     }
 
@@ -350,3 +370,53 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
     return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                    goal_type=case.goal_type, status=case.status,
                    created_at=case.created_at.isoformat())
+
+
+@router.delete("/{case_id}/evidence-files/{file_id}")
+def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_db)):
+    """仅草稿可删除已上传的证据文件：移除 EvidenceFile 记录、从 evidence_texts 剥离其解析片段、重建本案材料库。"""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(404, "案件不存在")
+    if case.status != "draft":
+        raise HTTPException(400, "仅草稿可删除已上传文件")
+    ef = db.query(EvidenceFile).filter(
+        EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
+    ).first()
+    if not ef:
+        raise HTTPException(404, "文件记录不存在")
+
+    # 从 evidence_texts 剥离该文件的解析片段（按「【证据文件: 文件名】」整段移除，含其内部换行与分页行）
+    ctx = CaseContext.from_dict(case.context_json or {})
+    # 注意：必须深拷贝一份，否则 di 会别名到 session 里 case.context_json 的同一对象，
+    # 就地修改会污染 JSON 列的变更快照、导致 SQLAlchemy 在 commit 时不发 UPDATE（现象：内存已改、落库没改）。
+    di = dict(ctx.defendant_info or {})
+    text = di.get("evidence_texts", "") or ""
+    marker = f"【证据文件: {ef.file_name}】"
+    # 以 marker 起、到下一个 marker（或文末）之间的整段都删掉；包括 PDF 解析产生的「--- 第 N 页 ---」分页行
+    pattern = re.escape(marker) + r".*?(?=\n*【证据文件: |\Z)"
+    remaining = re.sub(pattern, "", text, flags=re.DOTALL)
+    remaining = re.sub(r"(\n\s*)+", "\n", remaining).strip()
+    di["evidence_texts"] = remaining
+    ctx.defendant_info = di
+    # 强制生成全新的 dict 并显式标记 JSON 列已脏，确保 commit 一定落库
+    case.context_json = dict(ctx.to_dict())
+    from sqlalchemy.orm import attributes
+    attributes.flag_modified(case, "context_json")
+
+    db.delete(ef)
+    db.commit()
+
+    # 重建本案材料库（add_knowledge 不去重，故先清后增，保证删后一致）
+    from core.knowledge.service import delete_knowledge, ingest_case_materials
+    try:
+        for e in db.query(KnowledgeEntry).filter(
+            KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case_id,
+        ).all():
+            delete_knowledge(db, e.id)
+        if remaining.strip():
+            ingest_case_materials(db, case_id, remaining)
+    except Exception:
+        pass
+
+    return {"ok": True}

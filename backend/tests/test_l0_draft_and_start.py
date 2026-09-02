@@ -9,6 +9,8 @@ L0 草稿功能（P4 中途保存）
 5. 启动评估时必填项缺失 → 400 并列出缺项；
 6. 必填齐全后启动评估 → status=pending，当事人写入 context 与 Party 表。
 """
+import io
+import json
 import os
 import sys
 
@@ -17,7 +19,17 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("USE_MOCK", "True")
 
+import fitz
 from fastapi.testclient import TestClient
+
+
+def _pdf_bytes(text: str) -> bytes:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text, fontname="china-ss", fontsize=12)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 @pytest.fixture
@@ -118,5 +130,50 @@ class TestDraftLifecycle:
         created = client.post("/api/cases", json=_full_payload()).json()
         case_id = created["id"]
         resp = client.post(f"/api/cases/{case_id}/start-evaluation")
+        assert resp.status_code == 400
+        assert "仅草稿" in resp.text
+
+    def test_draft_with_uploaded_file_persists_and_lists_in_detail(self, client):
+        """草稿上传 PDF 后解析落库，重开草稿时 evidence_texts 含解析文本且详情列出文件。"""
+        pdf = _pdf_bytes("商标注册证第9988776号，核定使用商品第25类。")
+        resp = client.post(
+            "/api/cases",
+            data={"payload": json.dumps({"name": "带文件草稿", "draft": True}, ensure_ascii=False)},
+            files=[("evidence_files", ("cert.pdf", pdf, "application/pdf"))],
+        )
+        assert resp.status_code == 200, resp.text
+        case_id = resp.json()["id"]
+
+        detail = client.get(f"/api/cases/{case_id}").json()
+        ctx = detail["context"]
+        assert "商标注册证第9988776号" in ctx["defendant_info"]["evidence_texts"]
+        assert len(detail["evidence_files"]) == 1
+        assert detail["evidence_files"][0]["file_name"] == "cert.pdf"
+        assert detail["evidence_files"][0]["parse_status"] == "ok"
+
+    def test_delete_evidence_file_removes_snippet_and_record(self, client):
+        """删除已上传文件：EvidenceFile 记录消失，evidence_texts 剥离其解析片段，详情不再列出。"""
+        pdf = _pdf_bytes("待删除的证据内容第112233号。")
+        created = client.post(
+            "/api/cases",
+            data={"payload": json.dumps({"name": "可删文件草稿", "draft": True}, ensure_ascii=False)},
+            files=[("evidence_files", ("todelete.pdf", pdf, "application/pdf"))],
+        ).json()
+        case_id = created["id"]
+
+        file_id = client.get(f"/api/cases/{case_id}").json()["evidence_files"][0]["id"]
+        del_resp = client.delete(f"/api/cases/{case_id}/evidence-files/{file_id}")
+        assert del_resp.status_code == 200, del_resp.text
+        assert del_resp.json()["ok"] is True
+
+        detail = client.get(f"/api/cases/{case_id}").json()
+        assert detail["evidence_files"] == []
+        assert "待删除的证据内容" not in detail["context"]["defendant_info"]["evidence_texts"]
+
+    def test_delete_evidence_file_rejected_when_not_draft(self, client):
+        created = client.post("/api/cases", json=_full_payload()).json()
+        case_id = created["id"]
+        # 非草稿无 evidence_files，但仍应被 400 拦截
+        resp = client.delete(f"/api/cases/{case_id}/evidence-files/whatever")
         assert resp.status_code == 400
         assert "仅草稿" in resp.text

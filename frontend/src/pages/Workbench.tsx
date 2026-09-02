@@ -56,6 +56,7 @@ export default function Workbench() {
           case_description: d.case_description ?? '',
           evidence_texts: di.evidence_texts ?? '',
           viewpoints: d.context?.user_viewpoints ?? [],
+          evidence_files: d.evidence_files ?? [],
         })
         setEditCaseId(c.id)
         setDrawerOpen(true)
