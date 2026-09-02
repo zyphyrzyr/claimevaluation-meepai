@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from core.case_context import CaseContext
 from core.config import SUPPORTED_CAUSE_TYPES, GOAL_TYPES
-from core.database import Case, EvidenceFile, Party, KnowledgeEntry, get_db
+from core.database import Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, get_db
 from core.evidence_parser import is_image_file, is_pdf_file, ocr_image, parse_pdf
 
 router = APIRouter()
@@ -264,12 +264,12 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
 
 @router.put("/{case_id}", response_model=CaseOut)
 async def update_draft(case_id: str, request: Request, db: Session = Depends(get_db)):
-    """仅草稿可编辑：覆盖文本字段、重新解析上传文件、重建当事人与 context。状态保持 draft。"""
+    """编辑案件：覆盖文本字段、重新解析上传文件、重建当事人与 context。草稿/已评估案件均可改，状态保持原值；评估运行中禁止。"""
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(404, "案件不存在")
-    if case.status != "draft":
-        raise HTTPException(400, "仅草稿状态可编辑，已启动评估的案件不可再改")
+    if case.status == "evaluating":
+        raise HTTPException(400, "评估运行中，请等待本次评估完成后再编辑")
 
     payload, files = await _parse_create_request(request)
     if payload.cause_type not in SUPPORTED_CAUSE_TYPES:
@@ -322,12 +322,12 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
 
 @router.post("/{case_id}/start-evaluation", response_model=CaseOut)
 def start_evaluation(case_id: str, db: Session = Depends(get_db)):
-    """草稿启动评估：校验带 * 的必填项，补全当事人与 context，置 pending。"""
+    """启动评估：校验带 * 的必填项，补全当事人与 context，置 pending。草稿/已评估案件均可重新评估；评估进行中禁止。"""
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(404, "案件不存在")
-    if case.status != "draft":
-        raise HTTPException(400, "仅草稿状态可启动评估")
+    if case.status == "evaluating":
+        raise HTTPException(400, "评估运行中，请等待本次评估完成后再启动评估")
 
     ctx = CaseContext.from_dict(case.context_json or {})
     ctx.case_id = case.id
@@ -374,12 +374,12 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
 
 @router.delete("/{case_id}/evidence-files/{file_id}")
 def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_db)):
-    """仅草稿可删除已上传的证据文件：移除 EvidenceFile 记录、从 evidence_texts 剥离其解析片段、重建本案材料库。"""
+    """删除已上传的证据文件：移除 EvidenceFile 记录、从 evidence_texts 剥离其解析片段、重建本案材料库。草稿/已评估案件均可；评估进行中禁止。"""
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(404, "案件不存在")
-    if case.status != "draft":
-        raise HTTPException(400, "仅草稿可删除已上传文件")
+    if case.status == "evaluating":
+        raise HTTPException(400, "评估运行中，请等待本次评估完成后再删除文件")
     ef = db.query(EvidenceFile).filter(
         EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
     ).first()
@@ -419,4 +419,43 @@ def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_d
     except Exception:
         pass
 
+    return {"ok": True}
+
+
+@router.delete("/{case_id}")
+def delete_case(case_id: str, db: Session = Depends(get_db)):
+    """删除案件：清案件材料库（向量 + DB）、检索记录，再删案件本体；
+    SQLAlchemy cascade 自动带走 Party/EvidenceFile/RuleHit/ScoreSnapshot/MootRound/Report/AuditEvent。"""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(404, "案件不存在")
+
+    # 1. 案件材料库（scope=case）先清 DB 行，与向量清理解耦（保证一致性）
+    #    delete_knowledge 内部先删向量后删 DB 行，向量库一旦异常会把 DB 行删除吞掉，
+    #    导致材料库残留。这里改为：先算好各条目向量块 id → 删并提交 DB 行 → 再 best-effort 清向量。
+    from core.knowledge.service import chunk_text, get_store
+    case_entries = db.query(KnowledgeEntry).filter(
+        KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case_id,
+    ).all()
+    # 删除前按各条目内容算出向量块 id（content 随后随 DB 行消失）
+    entry_chunk_ids: list = []
+    for e in case_entries:
+        n = len(chunk_text(e.content))
+        entry_chunk_ids.append([f"{e.id}:{i}" for i in range(n)])
+    for e in case_entries:
+        db.delete(e)
+    db.commit()  # DB 行先落定：即便向量清理抛错，材料库也不残留
+    # 2. 清理向量块（best-effort，失败不阻断）
+    for ids in entry_chunk_ids:
+        try:
+            get_store().delete(ids)
+        except Exception:
+            pass
+
+    # 3. 检索记录无外键级联，手动清
+    db.query(RetrievalRecord).filter(RetrievalRecord.case_id == case_id).delete()
+
+    # 4. 删案件本体（级联带走其余子表）
+    db.delete(case)
+    db.commit()
     return {"ok": True}
