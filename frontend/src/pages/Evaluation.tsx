@@ -72,6 +72,7 @@ export default function Evaluation() {
   const [viewpoints, setViewpoints] = useState<string[]>([])
   const [injectedInfo, setInjectedInfo] = useState('')
   const [evaluated, setEvaluated] = useState(false)
+  const [caseStatus, setCaseStatus] = useState('')
 
   // 运行/完成阶段：逐节点拉取的完整结果
   const [result, setResult] = useState<any>(null)
@@ -93,6 +94,7 @@ export default function Evaluation() {
     api.caseDetail(id).then((d) => {
       setViewpoints(d.context?.user_viewpoints ?? [])
       setEvaluated(Boolean(d.context?.scores?.final != null))
+      setCaseStatus(d.status ?? '')
     }).catch(() => {})
   }, [id])
 
@@ -162,6 +164,28 @@ export default function Evaluation() {
       setRerunTarget(null)
       setRerunGuidance('')
     }
+  }
+
+  // ---------------------------------------------------------------- 草稿兜底：必填项未完成不可评估
+  if (caseStatus === 'draft') {
+    return (
+      <div className="max-w-3xl">
+        <h1 className="text-xl font-medium mb-1">案件尚未就绪</h1>
+        <p className="text-sm text-muted mb-6">
+          本案仍为草稿，必填项尚未补全，无法进入评估环节。
+        </p>
+        <div className="bg-surface border border-line rounded-xl p-5 text-sm text-muted mb-4">
+          请返回工作台，点击该草稿补全「我司主体（原告）、被告名称、案情描述、证据材料」后，
+          在草稿中点击「保存并启动评估」即可开始。
+        </div>
+        <button
+          onClick={() => navigate('/workbench')}
+          className="w-full bg-fg hover:opacity-90 text-canvas py-3 rounded-lg text-sm font-medium transition-colors"
+        >
+          返回工作台
+        </button>
+      </div>
+    )
   }
 
   // ---------------------------------------------------------------- 准备阶段：知识注入

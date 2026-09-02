@@ -19,6 +19,7 @@ export interface CaseCreatePayload {
   defendant_type?: string
   evidence_texts?: string
   viewpoints?: string[]
+  draft?: boolean
 }
 
 export interface EvalEvent {
@@ -30,8 +31,9 @@ export interface EvalEvent {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const isFormData = init?.body instanceof FormData
   const resp = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
     ...init,
   })
   if (!resp.ok) {
@@ -44,9 +46,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   meta: () => request<{ cause_types: string[]; goal_types: string[] }>('/cases/meta'),
   listCases: () => request<CaseItem[]>('/cases'),
-  createCase: (payload: CaseCreatePayload) =>
-    request<CaseItem>('/cases', { method: 'POST', body: JSON.stringify(payload) }),
+  createCase: (payload: CaseCreatePayload | FormData) =>
+    request<CaseItem>('/cases', {
+      method: 'POST',
+      body: payload instanceof FormData ? payload : JSON.stringify(payload),
+    }),
   caseDetail: (id: string) => request<any>(`/cases/${id}`),
+  updateDraft: (id: string, payload: CaseCreatePayload | FormData) =>
+    request<CaseItem>(`/cases/${id}`, {
+      method: 'PUT',
+      body: payload instanceof FormData ? payload : JSON.stringify(payload),
+    }),
+  startEvaluation: (id: string) => request<CaseItem>(`/cases/${id}/start-evaluation`, { method: 'POST' }),
   result: (id: string) => request<any>(`/evaluation/${id}/result`),
   rerun: (id: string, node: string, guidance: string) =>
     request<any>(`/evaluation/${id}/rerun`, {
