@@ -2,6 +2,84 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   P2 Token 基座（双主题，A 白底 / 剧场暗色）
+   颜色层全部走 CSS 变量；明场 = A 白底极简，暗场 = 模拟法庭剧场例外。
+   TDesign 语义色映射见 src/theme/tokens.ts。
+   ============================================================ */
+:root {
+  --bg: #ffffff;
+  --surface: #f7f8fa;
+  --text: #0d0d0d;
+  --text-muted: #6b7280;
+  --border: #e5e7eb;
+  /* 强调色：A 主题取近黑（画廊黑按钮/黑字），极简单色 */
+  --brand: #0d0d0d;
+  --brand-2: #5dd6ff;
+  /* 语义色（TDesign 亮底标准） */
+  --success: #2ba471;
+  --warning: #e37318;
+  --danger: #d54941;
+  --info: #0594fa;
+  /* 语义浅底（档位/红线 badge 背景） */
+  --success-soft: #e8f6ef;
+  --warning-soft: #fdf0e6;
+  --danger-soft: #fbeceb;
+  --info-soft: #e6f4fe;
+  /* 强调色浅底（来源徽章 / 选中态） */
+  --brand-soft: rgba(13, 13, 13, 0.06);
+  --brand-2-soft: rgba(93, 214, 255, 0.16);
+}
+
+[data-theme="theater"] {
+  --bg: #0b0b0b;
+  --surface: #14141a;
+  --text: #ffffff;
+  --text-muted: rgba(255, 255, 255, 0.62);
+  --border: rgba(255, 255, 255, 0.10);
+  /* 强调色：电光紫 + 青（辉光） */
+  --brand: #be7cff;
+  --brand-2: #5dd6ff;
+  --success-soft: rgba(43, 164, 113, 0.16);
+  --warning-soft: rgba(227, 115, 24, 0.18);
+  --danger-soft: rgba(213, 73, 65, 0.18);
+  --info-soft: rgba(5, 148, 250, 0.16);
+  --brand-soft: rgba(190, 124, 255, 0.14);
+  --brand-2-soft: rgba(93, 214, 255, 0.16);
+}
+
 body {
-  @apply bg-ink-pale text-ink antialiased;
+  background-color: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ============================================================
+   评估状态 / 档位 / 红线严重度 —— 统一语义色（P1-4 / P2 复写 token）
+   ============================================================ */
+@layer components {
+  /* 节点状态点 */
+  .status-dot { @apply w-2.5 h-2.5 rounded-full shrink-0; }
+  .status-running { @apply bg-[var(--info)] animate-pulse; }
+  .status-ok { @apply bg-[var(--success)]; }
+  .status-failed { @apply bg-[var(--danger)]; }
+  .status-blocked { @apply bg-[#b91c1c]; }
+  .status-partial { @apply bg-[var(--warning)]; }
+  .status-stale { @apply bg-amber-400; }
+  .status-waiting { @apply bg-[var(--muted)] opacity-20; }
+
+  /* 分数 / 结论档位色（照后端下发阈值上色） */
+  .tier-go { @apply text-[var(--success)] bg-[var(--success-soft)] border border-[var(--success-soft)]; }
+  .tier-patch { @apply text-[var(--warning)] bg-[var(--warning-soft)] border border-[var(--warning-soft)]; }
+  .tier-block { @apply text-[var(--danger)] bg-[var(--danger-soft)] border border-[var(--danger-soft)]; }
+
+  /* 红线 / 规则严重度 */
+  .sev-pass { @apply text-[var(--success)]; }
+  .sev-warning { @apply text-[var(--warning)]; }
+  .sev-block { @apply text-[var(--danger)]; }
+
+  /* 结论横幅基础样式 */
+  .verdict-banner { @apply rounded-xl border px-5 py-4; }
 }

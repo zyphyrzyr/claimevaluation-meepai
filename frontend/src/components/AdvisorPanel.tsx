@@ -76,7 +76,7 @@ export default function AdvisorPanel() {
       {/* 悬浮按钮 */}
       <button
         onClick={() => setOpen(!open)}
-        className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-ember hover:bg-ember-dark text-white shadow-lg flex items-center justify-center transition-colors print:hidden"
+        className="fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-fg hover:opacity-90 text-canvas shadow-lg flex items-center justify-center transition-colors print:hidden"
         title="伴随式追问顾问"
       >
         {open ? (
@@ -93,8 +93,8 @@ export default function AdvisorPanel() {
 
       {/* 对话窗 */}
       {open && (
-        <div className="fixed bottom-24 right-6 z-50 w-[380px] max-h-[70vh] flex flex-col bg-white rounded-2xl border border-ink/10 shadow-xl overflow-hidden print:hidden">
-          <div className="bg-ink text-white px-4 py-3">
+        <div className="fixed bottom-24 right-6 z-50 w-[380px] max-h-[70vh] flex flex-col bg-surface rounded-2xl border border-line shadow-xl overflow-hidden print:hidden">
+          <div className="bg-surface text-fg px-4 py-3 border-b border-line">
             <div className="text-sm font-medium">追问顾问</div>
             <div className="text-[11px] text-white/50 mt-0.5">
               任意阶段可提问 · 自动召回本案材料与经验库
@@ -103,7 +103,7 @@ export default function AdvisorPanel() {
 
           <div ref={bodyRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[200px]">
             {messages.length === 0 && (
-              <div className="text-xs text-ink/40 text-center py-8 leading-relaxed">
+              <div className="text-xs text-muted text-center py-8 leading-relaxed">
                 例：「我们的商标注册证能覆盖被告的商品吗？」<br />
                 「杭州地区类似案件一般判多少？」<br />
                 「缺口清单里哪项最影响评分？」
@@ -113,15 +113,15 @@ export default function AdvisorPanel() {
               <div key={i} className={m.role === 'user' ? 'flex justify-end' : ''}>
                 <div className={`text-sm leading-relaxed whitespace-pre-wrap max-w-[90%] rounded-xl px-3 py-2 ${
                   m.role === 'user'
-                    ? 'bg-ember text-white'
-                    : 'bg-ink-pale text-ink'
+                    ? 'bg-fg text-canvas'
+                    : 'bg-canvas text-fg'
                 }`}>
                   {m.content || (streaming && i === messages.length - 1 ? '…' : '')}
                 </div>
               </div>
             ))}
             {recall.length > 0 && (
-              <div className="text-[11px] text-ink/50 border border-dashed border-ink/15 rounded-lg px-3 py-2">
+              <div className="text-[11px] text-muted border border-dashed border-line rounded-lg px-3 py-2">
                 <span className="font-medium">知识库召回：</span>
                 {recall.map((r, i) => (
                   <span key={i}>
@@ -130,22 +130,22 @@ export default function AdvisorPanel() {
                 ))}
               </div>
             )}
-            {error && <div className="text-xs text-red-600">{error}</div>}
+            {error && <div className="text-xs text-danger">{error}</div>}
           </div>
 
-          <div className="border-t border-ink/10 p-3 flex gap-2">
+          <div className="border-t border-line p-3 flex gap-2">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && send()}
               placeholder="输入问题…"
               disabled={streaming}
-              className="flex-1 border border-ink/15 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-ember/60 disabled:opacity-50"
+              className="flex-1 border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-fg disabled:opacity-50"
             />
             <button
               onClick={send}
               disabled={streaming || !input.trim()}
-              className="bg-ink hover:bg-ink-light text-white px-4 rounded-lg text-sm disabled:opacity-40 transition-colors"
+              className="bg-fg hover:opacity-90 text-canvas px-4 rounded-lg text-sm disabled:opacity-40 transition-colors"
             >
               {streaming ? '…' : '发送'}
             </button>

@@ -41,12 +41,12 @@ export default function RerunControl({ label, hint, busy, compact, onRerun }: Pr
   }
 
   return (
-    <div className={compact ? '' : 'mt-3 pt-3 border-t border-ink/10'}>
+    <div className={compact ? '' : 'mt-3 pt-3 border-t border-line'}>
       {!open ? (
         <button
           onClick={() => setOpen(true)}
           disabled={busy}
-          className="text-xs text-ink/50 hover:text-ember border border-ink/15 hover:border-ember/50 px-2.5 py-1 rounded-md transition-colors disabled:opacity-40"
+          className="text-xs text-muted hover:text-fg border border-line hover:border-fg px-2.5 py-1 rounded-md transition-colors disabled:opacity-40"
         >
           {busy ? '重跑中…' : `重跑「${label}」`}
         </button>
@@ -57,22 +57,22 @@ export default function RerunControl({ label, hint, busy, compact, onRerun }: Pr
             onChange={(e) => setGuidance(e.target.value)}
             rows={3}
             placeholder={`给「${label}」的引导意见（可选）。例：对方商标 2024 年已被提撤三，请据此重新评估权利稳定性。`}
-            className="w-full text-sm border border-ink/15 rounded-lg p-2.5 resize-none focus:outline-none focus:border-ember/60"
+            className="w-full text-sm border border-line rounded-lg p-2.5 resize-none focus:outline-none focus:border-fg"
           />
-          <p className="text-[11px] text-ink/40">
+          <p className="text-[11px] text-muted">
             {hint ?? '引导意见会写入案件观点，自动影响本节点及其下游；纯规则环节（决策合成）将瞬时重算。'}
           </p>
           <div className="flex gap-2">
             <button
               onClick={submit}
               disabled={busy}
-              className="bg-ember hover:bg-ember-dark text-white text-xs px-3 py-1.5 rounded-md transition-colors disabled:opacity-50"
+              className="bg-fg hover:opacity-90 text-canvas text-xs px-3 py-1.5 rounded-md transition-colors disabled:opacity-50"
             >
               确认重跑
             </button>
             <button
               onClick={() => { setOpen(false); setGuidance(''); setError('') }}
-              className="text-xs text-ink/50 px-3 py-1.5 rounded-md hover:bg-ink-pale transition-colors"
+              className="text-xs text-muted px-3 py-1.5 rounded-md hover:bg-surface transition-colors"
             >
               取消
             </button>
@@ -80,13 +80,13 @@ export default function RerunControl({ label, hint, busy, compact, onRerun }: Pr
         </div>
       )}
 
-      {error && <div className="mt-2 text-xs text-red-600">{error}</div>}
+      {error && <div className="mt-2 text-xs text-danger">{error}</div>}
 
       {result && (
         <div className="mt-2 space-y-1 text-xs">
-          <div className="text-emerald-700">{result.effect}</div>
+          <div className="text-success">{result.effect}</div>
           {result.stale_nodes.length > 0 && (
-            <div className="text-amber-700">
+            <div className="text-warning">
               待确认重跑：{result.stale_nodes.map((s) => s.label).join('、')}
             </div>
           )}

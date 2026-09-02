@@ -155,6 +155,37 @@ def _rpc_call(tool_name: str, args: dict, server: str = None) -> Dict:
         return {"error": f"SSE parse fail: {raw[:200]}"}
 
 
+def _rpc_failed(rpc_result: dict) -> str:
+    """识别 RPC 失败并返回人类可读原因；无失败返回空串。
+
+    专用于把被 _rpc_call 吞掉的 401 / 网络错误显式暴露出来，
+    避免上层把「鉴权失败」误当成「检索到 0 条」或「回款概率 50%」。
+    """
+    if not isinstance(rpc_result, dict):
+        return ""
+    err = rpc_result.get("error")
+    if not err:
+        return ""
+    if "401" in err or "Unauthorized" in err or "Authorization" in err:
+        return f"企查查鉴权失败(401)：QCC_API_TOKEN 无效或已过期"
+    if "403" in err or "Forbidden" in err:
+        return f"企查查无权限(403)：该 token 未开通对应工具"
+    return f"企查查调用失败：{err}"
+
+
+def _auth_failed_metrics(error_msg: str) -> dict:
+    """鉴权/传输失败时返回的指标占位：明确置 None，绝不回填假分数。"""
+    return {
+        "recovery_probability": None,
+        "damages_p50": None,
+        "time_extra_months": 0,
+        "red_flags": [],
+        "green_flags": [],
+        "auth_error": True,
+        "error": error_msg,
+    }
+
+
 def _extract_text(rpc_result: dict) -> str:
     """从 rpc 结果提取文本"""
     if not rpc_result or "error" in rpc_result:
@@ -299,7 +330,11 @@ def _search_enterprise(d: dict) -> Dict:
     stage_a = _stage_a_lock_entity(name, location_hint, industry_hint)
     result["stages"]["A_主体锁定"] = stage_a
     if stage_a.get("error"):
-        result["_summary"] = f"❌ 阶段A失败: {stage_a['error']}"
+        failed = _rpc_failed(stage_a) or stage_a["error"]
+        result["status"] = "auth_error" if "鉴权" in failed or "401" in failed else "error"
+        result["error"] = failed
+        result["metrics"] = _auth_failed_metrics(failed)
+        result["_summary"] = f"❌ 阶段A失败: {failed}"
         return result
     locked_name = stage_a.get("locked_name", name)
     summary_parts.append(f"✅ 锁定主体: {locked_name}")
@@ -844,6 +879,13 @@ def _search_individual(d: dict) -> Dict:
     scan_r = _safe_call("get_executive_risk_scan", pname, server="executive",
                         extra_args={"personName": pname})
     result["stages"]["E_人员风险扫描"] = {"_count": _count_items(scan_r)}
+    fail = _rpc_failed(scan_r)
+    if fail:
+        result["status"] = "auth_error"
+        result["error"] = fail
+        result["metrics"] = _auth_failed_metrics(fail)
+        result["_summary"] = f"❌ {fail}"
+        return result
 
     # 失信 / 被执行 / 限高
     dishonest = _safe_call("get_executive_dishonest", pname, server="executive",

@@ -11,9 +11,9 @@ import { ProviderInfo, SettingsSnapshot, settingsApi } from '../api'
  */
 
 const COST_BADGE: Record<string, string> = {
-  low: 'bg-emerald-50 text-emerald-700',
-  medium: 'bg-amber-50 text-amber-700',
-  high: 'bg-rose-50 text-rose-700',
+  low: 'bg-[var(--success-soft)] text-[var(--success)]',
+  medium: 'bg-[var(--warning-soft)] text-[var(--warning)]',
+  high: 'bg-[var(--danger-soft)] text-[var(--danger)]',
 }
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -85,32 +85,32 @@ export default function Settings() {
   }
 
   if (!snap) {
-    return <div className="text-sm text-ink/40">{error || '加载中…'}</div>
+    return <div className="text-sm text-muted">{error || '加载中…'}</div>
   }
 
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-medium">高级设置</h1>
-        <p className="text-sm text-ink/50 mt-1">
+        <p className="text-sm text-muted mt-1">
           切换后端大模型供应商。密钥由服务端环境变量提供，本页不展示也不接收密钥。
         </p>
       </div>
 
-      {error && <div className="bg-red-50 text-red-700 rounded-lg p-3 text-sm">{error}</div>}
-      {notice && <div className="bg-emerald-50 text-emerald-700 rounded-lg p-3 text-sm">{notice}</div>}
+      {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm">{error}</div>}
+      {notice && <div className="bg-[var(--success-soft)] text-[var(--success)] rounded-lg p-3 text-sm">{notice}</div>}
 
       {snap.warnings.map((w, i) => (
-        <div key={i} className="bg-amber-50 text-amber-800 rounded-lg p-3 text-sm">
+        <div key={i} className="bg-[var(--warning-soft)] text-[var(--warning)] rounded-lg p-3 text-sm">
           {w}
         </div>
       ))}
 
       {/* 当前生效 */}
-      <div className="bg-white rounded-xl border border-ink/10 p-5">
+      <div className="bg-surface rounded-xl border border-line p-5">
         <div className="flex items-baseline justify-between mb-4">
           <h2 className="text-sm font-medium">当前供应商</h2>
-          <span className="text-xs text-ink/35">
+          <span className="text-xs text-muted">
             来源：{SOURCE_LABEL[snap.selection_source] ?? snap.selection_source}
           </span>
         </div>
@@ -145,16 +145,16 @@ export default function Settings() {
         </div>
 
         {snap.current.notes && (
-          <p className="text-xs text-ink/50 mt-4 leading-relaxed border-t border-ink/5 pt-3">
+          <p className="text-xs text-muted mt-4 leading-relaxed border-t border-line pt-3">
             {snap.current.notes}
           </p>
         )}
       </div>
 
       {/* 可选项 */}
-      <div className="bg-white rounded-xl border border-ink/10 p-5">
+      <div className="bg-surface rounded-xl border border-line p-5">
         <h2 className="text-sm font-medium mb-1">可选供应商</h2>
-        <p className="text-xs text-ink/40 mb-4">
+        <p className="text-xs text-muted mb-4">
           新增供应商只需在后端 providers.py 加一条预设，本页自动出现。
         </p>
         <div className="space-y-3">
@@ -164,23 +164,23 @@ export default function Settings() {
               <div
                 key={p.id}
                 className={`rounded-lg border p-4 transition-colors ${
-                  active ? 'border-ember/50 bg-ember-pale/40' : 'border-ink/10'
+                  active ? 'border-brand bg-surface' : 'border-line'
                 }`}
               >
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{p.label}</span>
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${COST_BADGE[p.cost_tier] ?? 'bg-ink/10 text-ink/60'}`}>
+                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${COST_BADGE[p.cost_tier] ?? 'bg-surface text-muted'}`}>
                     {p.cost_tier_label}
                   </span>
                   <span
                     className={`text-[11px] px-2 py-0.5 rounded-full ${
-                      p.available ? 'bg-emerald-50 text-emerald-700' : 'bg-ink/5 text-ink/40'
+                      p.available ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-surface text-muted'
                     }`}
                   >
                     {p.available ? `密钥已配置 ${p.key_masked}` : '未配置密钥'}
                   </span>
                   {active && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-ember text-white">
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-brand text-white">
                       当前
                     </span>
                   )}
@@ -188,7 +188,7 @@ export default function Settings() {
                   <button
                     onClick={() => runPing(p)}
                     disabled={!active}
-                    className="text-xs text-ink/50 hover:text-ember disabled:opacity-30"
+                    className="text-xs text-muted hover:text-brand disabled:opacity-30"
                     title={active ? '向该供应商发一个最小请求' : '仅当前供应商可自检'}
                   >
                     连通性自检
@@ -196,24 +196,24 @@ export default function Settings() {
                   <button
                     onClick={() => select(p)}
                     disabled={active || busy}
-                    className="text-xs bg-ink hover:bg-ink-light text-white px-3 py-1 rounded-md disabled:opacity-30 transition-colors"
+                    className="text-xs bg-fg hover:bg-fg text-white px-3 py-1 rounded-md disabled:opacity-30 transition-colors"
                   >
                     {busy && pending === p.id ? '切换中…' : active ? '使用中' : '切换'}
                   </button>
                 </div>
 
-                <div className="text-xs text-ink/45 mt-2 font-mono break-all">
+                <div className="text-xs text-muted mt-2 font-mono break-all">
                   {p.base_url} · 强 {p.strong_model} / 普通 {p.fast_model}
                 </div>
 
                 {!p.available && (
-                  <div className="text-xs text-ink/40 mt-1">
-                    配置方式：服务端设置环境变量 <code className="bg-ink/5 px-1 rounded">{p.primary_key_env}</code>
+                  <div className="text-xs text-muted mt-1">
+                    配置方式：服务端设置环境变量 <code className="bg-surface px-1 rounded">{p.primary_key_env}</code>
                     {p.console_url && (
                       <>
                         {' '}
                         ·{' '}
-                        <a href={p.console_url} target="_blank" rel="noreferrer" className="text-ember hover:underline">
+                        <a href={p.console_url} target="_blank" rel="noreferrer" className="text-brand hover:underline">
                           获取密钥
                         </a>
                       </>
@@ -224,20 +224,20 @@ export default function Settings() {
                 {ping && ping.id === p.id && (
                   <div
                     className={`text-xs mt-2 rounded-md px-2 py-1 ${
-                      ping.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-ink/5 text-ink/60'
+                      ping.ok ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-surface text-muted'
                     }`}
                   >
                     {ping.text}
                   </div>
                 )}
 
-                {p.notes && <p className="text-xs text-ink/40 mt-2 leading-relaxed">{p.notes}</p>}
+                {p.notes && <p className="text-xs text-muted mt-2 leading-relaxed">{p.notes}</p>}
               </div>
             )
           })}
         </div>
-        <p className="text-xs text-ink/30 mt-4">
-          切换仅写入 <code className="bg-ink/5 px-1 rounded">{snap.env_path}</code> 的 LLM_* 项，
+        <p className="text-xs text-muted mt-4">
+          切换仅写入 <code className="bg-surface px-1 rounded">{snap.env_path}</code> 的 LLM_* 项，
           不触碰任何密钥行；配置每次调用重读，改完即刻生效。
         </p>
       </div>
@@ -247,9 +247,9 @@ export default function Settings() {
 
 function Row({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
   return (
-    <div className="flex gap-3 py-1 border-b border-ink/5">
-      <span className="text-ink/40 w-44 shrink-0">{label}</span>
-      <span className={`break-all ${warn ? 'text-ember' : ''}`}>{value}</span>
+    <div className="flex gap-3 py-1 border-b border-line">
+      <span className="text-muted w-44 shrink-0">{label}</span>
+      <span className={`break-all ${warn ? 'text-brand' : ''}`}>{value}</span>
     </div>
   )
 }

@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import { api, mootApi } from '../api'
 import type { MootRound } from '../api'
 import CourtRoom from '../components/CourtRoom'
+import { Card } from '../components/ui/Card'
+import { useTheme } from '../theme/ThemeProvider'
 
 interface JudgeInfo {
   correction_coefficient: number
@@ -14,6 +17,14 @@ interface JudgeInfo {
 
 export default function MootCourt() {
   const { id } = useParams<{ id: string }>()
+  const { setTheme } = useTheme()
+
+  // 模拟法庭 = 暗色剧场例外：进入切 theater，离开恢复 light（P2 双主题机制）
+  useEffect(() => {
+    setTheme('theater')
+    return () => setTheme('light')
+  }, [setTheme])
+
   const [rounds, setRounds] = useState<MootRound[]>([])
   const [running, setRunning] = useState(false)
   const [judge, setJudge] = useState<JudgeInfo | null>(null)
@@ -70,21 +81,21 @@ export default function MootCourt() {
     <div className="space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-xl font-medium">模拟法庭 · 对抗压力测试</h1>
-          <p className="text-sm text-ink/50 mt-1">
+          <h1 className="text-xl font-medium text-fg">模拟法庭 · 对抗压力测试</h1>
+          <p className="text-sm text-muted mt-1">
             原告 / 被告 / 法官三 Agent 五步庭审；法官归纳产出修正系数，回写评分
           </p>
         </div>
         <div className="flex items-center gap-3">
           {result?.scores?.final != null && (
-            <div className="text-sm text-ink/60">
-              当前决策分 <span className="font-semibold text-ink">{result.scores.final}</span>
+            <div className="text-sm text-muted">
+              当前决策分 <span className="font-semibold text-fg">{result.scores.final}</span>
             </div>
           )}
           <button
             onClick={start}
             disabled={running || result?.scores?.final == null}
-            className="bg-ember text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-ember-dark disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            className="bg-brand text-canvas px-5 py-2 rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {running ? '庭审进行中…' : rounds.length ? '重新开庭' : '开庭'}
           </button>
@@ -92,7 +103,7 @@ export default function MootCourt() {
       </div>
 
       {result?.scores?.final == null && !running && (
-        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-4 text-sm">
+        <div className="bg-[var(--warning-soft)] text-[var(--warning)] border border-[var(--warning-soft)] rounded-lg p-4 text-sm">
           该案件尚未完成主诉评估。模拟法庭（内嵌模式）需要先完成评估，
           <Link to={`/cases/${id}/evaluation`} className="underline font-medium">去评估</Link>
           ；或使用
@@ -101,69 +112,76 @@ export default function MootCourt() {
         </div>
       )}
 
-      {error && <div className="bg-red-50 text-red-700 rounded-lg p-4 text-sm">{error}</div>}
+      {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>}
 
       <CourtRoom rounds={rounds} running={running} />
 
       {/* 法官归纳 + 系数回写 */}
       {judge && !running && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          <div className="lg:col-span-2 bg-white rounded-xl border border-ink/10 p-5">
-            <h2 className="text-sm font-medium mb-3">法官归纳</h2>
+          <Card className="lg:col-span-2 p-5">
+            <h2 className="text-sm font-medium mb-3 text-fg">法官归纳</h2>
             {judge.judge_summary ? (
-              <p className="text-sm leading-relaxed text-ink/80">{judge.judge_summary}</p>
+              <p className="text-sm leading-relaxed text-muted">{judge.judge_summary}</p>
             ) : (
-              <p className="text-sm text-ink/40">（历史庭审记录，法官归纳详见备忘录）</p>
+              <p className="text-sm text-muted">（历史庭审记录，法官归纳详见备忘录）</p>
             )}
             {judge.weak_points?.length > 0 && (
               <div className="mt-4">
-                <div className="text-xs font-medium text-red-700 mb-1">原告薄弱点</div>
+                <div className="text-xs font-medium text-[var(--danger)] mb-1">原告薄弱点</div>
                 {judge.weak_points.map((w, i) => (
-                  <div key={i} className="text-sm text-ink/70">· {w}</div>
+                  <div key={i} className="text-sm text-muted">· {w}</div>
                 ))}
               </div>
             )}
             {judge.focus_points?.length > 0 && (
               <div className="mt-3">
-                <div className="text-xs font-medium text-green-700 mb-1">补强建议</div>
+                <div className="text-xs font-medium text-[var(--success)] mb-1">补强建议</div>
                 {judge.focus_points.map((f, i) => (
-                  <div key={i} className="text-sm text-ink/70">· {f}</div>
+                  <div key={i} className="text-sm text-muted">· {f}</div>
                 ))}
               </div>
             )}
-          </div>
+          </Card>
 
           <div className="space-y-5">
-            <div className="bg-white rounded-xl border border-ink/10 p-5 text-center">
-              <div className="text-xs text-ink/50">修正系数（回写评分）</div>
-              <div className="text-4xl font-semibold text-ember mt-2">
+            <Card className="p-5 text-center">
+              <div className="text-xs text-muted">修正系数（回写评分）</div>
+              <div className="text-4xl font-semibold text-brand mt-2">
                 {judge.correction_coefficient}
               </div>
-              <div className="text-xs text-ink/40 mt-2">范围 0.7 – 1.3</div>
-            </div>
+              <div className="text-xs text-muted mt-2">范围 0.7 – 1.3</div>
+            </Card>
             {judge.defense_strength > 0 && (
-              <div className="bg-white rounded-xl border border-ink/10 p-5">
-                <div className="text-xs text-ink/50">被告抗辩强度</div>
+              <Card className="p-5">
+                <div className="text-xs text-muted">被告抗辩强度</div>
                 <div className="mt-1 flex items-center gap-3">
-                  <div className="flex-1 h-2 bg-ink-pale rounded-full overflow-hidden">
-                    <div className="h-full bg-ink rounded-full" style={{ width: `${judge.defense_strength}%` }} />
+                  <div className="flex-1 h-2 bg-line rounded-full overflow-hidden">
+                    <div className="h-full bg-fg rounded-full" style={{ width: `${judge.defense_strength}%` }} />
                   </div>
-                  <span className="text-sm font-medium">{judge.defense_strength}</span>
+                  <span className="text-sm font-medium text-fg">{judge.defense_strength}</span>
                 </div>
-              </div>
+              </Card>
             )}
             {scoresUpdated && (
-              <div className="bg-ink text-white rounded-xl p-5">
-                <div className="text-xs text-white/60 mb-2">决策分已更新（系数回写）</div>
-                <div className="text-2xl font-semibold">
-                  {scoresUpdated.before?.final ?? '—'}
-                  <span className="text-ember mx-2">→</span>
-                  {scoresUpdated.after?.final ?? '—'}
-                </div>
-                <div className="text-xs text-white/50 mt-1">
-                  法律可行性 {scoresUpdated.before?.legal_feasibility} → {scoresUpdated.after?.legal_feasibility}
-                </div>
-              </div>
+              <motion.div
+                key={scoresUpdated.after?.final ?? 'none'}
+                initial={{ scale: 0.92, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: 'spring', stiffness: 220, damping: 14 }}
+              >
+                <Card className="p-5 border-brand shadow-[0_0_24px_rgba(190,124,255,0.22)]">
+                  <div className="text-xs text-muted mb-2">决策分已更新（系数回写）</div>
+                  <div className="text-2xl font-semibold text-fg">
+                    {scoresUpdated.before?.final ?? '—'}
+                    <span className="text-brand mx-2">→</span>
+                    {scoresUpdated.after?.final ?? '—'}
+                  </div>
+                  <div className="text-xs text-muted mt-1">
+                    法律可行性 {scoresUpdated.before?.legal_feasibility} → {scoresUpdated.after?.legal_feasibility}
+                  </div>
+                </Card>
+              </motion.div>
             )}
           </div>
         </div>
@@ -173,11 +191,11 @@ export default function MootCourt() {
         <div className="flex gap-3 text-sm">
           <Link
             to={`/cases/${id}/dashboard`}
-            className="text-ember hover:underline font-medium"
+            className="text-brand hover:underline font-medium"
           >
             返回决策仪表盘 →
           </Link>
-          <Link to={`/cases/${id}/report`} className="text-ink/60 hover:underline">
+          <Link to={`/cases/${id}/report`} className="text-muted hover:underline">
             查看决策备忘录
           </Link>
         </div>

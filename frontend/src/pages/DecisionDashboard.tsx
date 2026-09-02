@@ -5,10 +5,10 @@ import { api } from '../api'
 import RerunControl, { RerunResult } from '../components/RerunControl'
 
 const LEVEL_STYLE: Record<string, { cls: string; text: string }> = {
-  green: { cls: 'bg-green-50 text-green-800 border-green-200', text: '建议优先启动' },
-  yellow: { cls: 'bg-amber-50 text-amber-800 border-amber-200', text: '补充短板后启动' },
-  red: { cls: 'bg-red-50 text-red-800 border-red-200', text: '建议暂缓' },
-  block: { cls: 'bg-red-100 text-red-900 border-red-300', text: '暂不建议起诉' },
+  green: { cls: 'bg-[var(--success-soft)] text-[var(--success)] border-[var(--success-soft)]', text: '建议优先启动' },
+  yellow: { cls: 'bg-[var(--warning-soft)] text-[var(--warning)] border-[var(--warning-soft)]', text: '补充短板后启动' },
+  red: { cls: 'bg-[var(--danger-soft)] text-[var(--danger)] border-[var(--danger-soft)]', text: '建议暂缓' },
+  block: { cls: 'bg-[var(--danger-soft)] text-[var(--danger)] border-[var(--danger-soft)]', text: '暂不建议起诉' },
 }
 
 /** 法律可行性三维度 */
@@ -27,56 +27,105 @@ const BUSINESS_DIMS: Record<string, { key: string; label: string }[]> = {
   要名: [{ key: 'precedent', label: '判例价值' }],
 }
 
-function QuadrantChart({ legal, business, mid }: { legal: number; business: number; mid: number }) {
+function QuadrantChart({ legal, business, mid }: { legal: number | null | undefined; business: number | null | undefined; mid: number }) {
   const ref = useRef<HTMLDivElement>(null)
+  const valid = typeof legal === 'number' && typeof business === 'number'
 
   useEffect(() => {
-    if (!ref.current) return
+    if (!ref.current || !valid) return
     const chart = echarts.init(ref.current)
-    chart.setOption({
-      grid: { left: 48, right: 24, top: 24, bottom: 40 },
-      xAxis: {
-        name: '法律可行性', min: 0, max: 100,
-        splitLine: { lineStyle: { color: '#e5e7eb' } },
-      },
-      yAxis: {
-        name: '业务预期', min: 0, max: 100,
-        splitLine: { lineStyle: { color: '#e5e7eb' } },
-      },
-      series: [
+
+    // echarts 的 canvas 渲染器无法解析 CSS 变量，必须取解析后的颜色值；
+    // 同时监听 data-theme 变化，主题切换时重渲染以跟随双主题配色。
+    const readTheme = () => {
+      const cs = getComputedStyle(document.documentElement)
+      const v = (n: string) => cs.getPropertyValue(n).trim()
+      return {
+        text: v('--text') || '#0d0d0d',
+        muted: v('--text-muted') || '#6b7280',
+        border: v('--border') || '#e5e7eb',
+        brand: v('--brand') || '#0d0d0d',
+      }
+    }
+    const withAlpha = (c: string, a: number) => {
+      const m = c.replace('#', '')
+      if (m.length === 6) {
+        const r = parseInt(m.slice(0, 2), 16)
+        const g = parseInt(m.slice(2, 4), 16)
+        const b = parseInt(m.slice(4, 6), 16)
+        return `rgba(${r}, ${g}, ${b}, ${a})`
+      }
+      return c
+    }
+
+    const render = () => {
+      const c = readTheme()
+      chart.setOption(
         {
-          type: 'scatter',
-          symbolSize: 18,
-          data: [[legal, business]],
-          itemStyle: { color: '#d65938' },
-          markLine: {
-            silent: true,
-            symbol: 'none',
-            lineStyle: { color: '#0d1429', type: 'dashed', opacity: 0.35 },
-            // 中线用后端下发的 QUADRANT_AXIS_MID（与总分档位线同源），
-            // 不再硬编码 50 —— 前端硬编码一份必然与后端 quadrant() 漂移
-            data: [{ xAxis: mid }, { yAxis: mid }],
-            label: {
-              show: true, position: 'insideEndTop', fontSize: 10,
-              color: '#0d142966', formatter: `${mid}`,
+          grid: { left: 48, right: 24, top: 24, bottom: 40 },
+          xAxis: {
+            name: '法律可行性', min: 0, max: 100,
+            nameTextStyle: { color: c.text },
+            axisLine: { lineStyle: { color: c.border } },
+            axisLabel: { color: c.muted },
+            splitLine: { lineStyle: { color: c.border } },
+          },
+          yAxis: {
+            name: '业务预期', min: 0, max: 100,
+            nameTextStyle: { color: c.text },
+            axisLine: { lineStyle: { color: c.border } },
+            axisLabel: { color: c.muted },
+            splitLine: { lineStyle: { color: c.border } },
+          },
+          series: [
+            {
+              type: 'scatter',
+              symbolSize: 18,
+              data: [[legal, business]],
+              itemStyle: { color: c.brand },
+              markLine: {
+                silent: true,
+                symbol: 'none',
+                lineStyle: { color: c.text, type: 'dashed', opacity: 0.35 },
+                // 中线用后端下发的 QUADRANT_AXIS_MID（与总分档位线同源），
+                // 不再硬编码 50 —— 前端硬编码一份必然与后端 quadrant() 漂移
+                data: [{ xAxis: mid }, { yAxis: mid }],
+                label: {
+                  show: true, position: 'insideEndTop', fontSize: 10,
+                  color: c.muted, formatter: `${mid}`,
+                },
+              },
+              markArea: {
+                silent: true,
+                itemStyle: { color: withAlpha(c.brand, 0.06) },
+                data: [[{ coord: [mid, mid] }, { coord: [100, 100] }]],
+              },
             },
-          },
-          markArea: {
-            silent: true,
-            itemStyle: { color: 'rgba(214, 89, 56, 0.05)' },
-            data: [[{ coord: [mid, mid] }, { coord: [100, 100] }]],
-          },
+          ],
         },
-      ],
-    })
+        true,
+      )
+    }
+
+    render()
+    const ro = new MutationObserver(render)
+    ro.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
     const onResize = () => chart.resize()
     window.addEventListener('resize', onResize)
     return () => {
       window.removeEventListener('resize', onResize)
+      ro.disconnect()
       chart.dispose()
     }
-  }, [legal, business, mid])
+  }, [legal, business, mid, valid])
 
+  if (!valid) {
+    return (
+      <div className="w-full h-72 flex items-center justify-center text-muted text-sm">
+        法律可行性或业务预期尚未产出分数，暂不输出矩阵定位
+      </div>
+    )
+  }
   return <div ref={ref} className="w-full h-72" />
 }
 
@@ -89,26 +138,26 @@ function DimBar({ label, dim }: { label: string; dim: any }) {
     <div>
       <div className="flex items-center gap-3">
         <span className="text-sm w-20 shrink-0">{label}</span>
-        <div className="flex-1 h-2 bg-ink-pale rounded-full overflow-hidden">
+        <div className="flex-1 h-2 bg-surface rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full ${
-              stale ? 'bg-amber-300' : status === 'failed' ? 'bg-red-300' : 'bg-ink'
+              stale ? 'bg-[var(--warning)]' : status === 'failed' ? 'bg-[var(--danger)]' : 'bg-fg'
             }`}
             style={{ width: `${score ?? 0}%` }}
           />
         </div>
         <span className="text-sm w-16 text-right shrink-0">
           {stale ? (
-            <span className="text-amber-700 text-xs">失效</span>
+            <span className="text-[var(--warning)] text-xs">失效</span>
           ) : status === 'failed' ? (
-            <span className="text-red-600 text-xs">失败</span>
+            <span className="text-[var(--danger)] text-xs">失败</span>
           ) : (
             score ?? '—'
           )}
         </span>
       </div>
       {stale && dim?.stale_reason && (
-        <div className="ml-[92px] mt-1 text-[11px] text-amber-700/80">
+        <div className="ml-[92px] mt-1 text-[11px] text-[var(--warning)]/80">
           {dim.stale_reason} —— 结果已过期，建议重跑后采信
         </div>
       )}
@@ -139,14 +188,16 @@ export default function DecisionDashboard() {
     }
   }
 
-  if (error) return <div className="bg-red-50 text-red-700 rounded-lg p-4 text-sm">{error}</div>
-  if (!data) return <div className="text-ink/40 text-sm">加载中…</div>
+  if (error) return <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>
+  if (!data) return <div className="text-muted text-sm">加载中…</div>
 
   const { scores, confidence, recommendation, evidence, red_flags, dimension_results,
           defendant_profile, thresholds, goal_type } = data
   const level = LEVEL_STYLE[recommendation?.level] ?? LEVEL_STYLE.yellow
-  const legal = scores?.legal_feasibility ?? 0
-  const business = scores?.business_expectation ?? 0
+  // 缺失/失效维度保持 null，不要静默归 0：后端已对 NaN 做「missing≠0」处理，
+  // 前端若写成 ?? 0 会和「评估未完成」的结论自相矛盾，并把失效维度错误定位到 (0,70)。
+  const legal = scores?.legal_feasibility ?? null
+  const business = scores?.business_expectation ?? null
   const final = scores?.final
   const mid = thresholds?.quadrant_mid ?? 78
   const go = thresholds?.go ?? 78
@@ -161,7 +212,7 @@ export default function DecisionDashboard() {
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <h1 className="text-xl font-medium">决策仪表盘</h1>
         {staleCount > 0 && (
-          <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5">
+          <div className="text-xs text-[var(--warning)] bg-[var(--warning-soft)] border border-[var(--warning-soft)] rounded-lg px-3 py-1.5">
             {staleCount} 个维度结果已失效（上游被重跑），请重跑后采信
           </div>
         )}
@@ -182,7 +233,7 @@ export default function DecisionDashboard() {
             <div className="text-3xl font-semibold">{final ?? '—'}</div>
             <div className="text-xs opacity-70">主诉决策分</div>
             <div className="text-[11px] opacity-50 mt-0.5">
-              法律 {legal} 与 业务 {business} 的均衡水平
+              法律 {legal ?? '—'} 与 业务 {business ?? '—'} 的均衡水平
             </div>
           </div>
         </div>
@@ -190,12 +241,12 @@ export default function DecisionDashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* 二维矩阵 */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-ink/10 p-5">
+        <div className="lg:col-span-2 bg-surface rounded-xl border border-line p-5">
           <h2 className="text-sm font-medium mb-2">二维决策矩阵</h2>
           {final != null ? (
             <QuadrantChart legal={legal} business={business} mid={mid} />
           ) : (
-            <div className="h-72 flex items-center justify-center text-ink/40 text-sm">
+            <div className="h-72 flex items-center justify-center text-muted text-sm">
               评估未完成，暂不输出矩阵定位
             </div>
           )}
@@ -203,28 +254,28 @@ export default function DecisionDashboard() {
 
         {/* 置信度 + 回款 */}
         <div className="space-y-5">
-          <div className="bg-white rounded-xl border border-ink/10 p-5">
+          <div className="bg-surface rounded-xl border border-line p-5">
             <h2 className="text-sm font-medium">置信度（独立输出，不参与均衡）</h2>
             <div className="mt-3 text-3xl font-semibold">{confidence ?? '—'}%</div>
-            <p className="text-xs text-ink/50 mt-2">
+            <p className="text-xs text-muted mt-2">
               由证据完整度（{evidence?.completeness ?? 0}%）决定。
               {confidence != null && confidence < 50 && ' 置信度偏低，建议先补证再决策。'}
             </p>
           </div>
 
           {defendant_profile?.recovery_ability != null && (
-            <div className="bg-white rounded-xl border border-ink/10 p-5">
+            <div className="bg-surface rounded-xl border border-line p-5">
               <h2 className="text-sm font-medium">回款能力（被告偿付能力）</h2>
               <div className="mt-3 text-3xl font-semibold">
                 {defendant_profile.recovery_ability}
-                <span className="text-sm text-ink/40 font-normal"> / 100</span>
+                <span className="text-sm text-muted font-normal"> / 100</span>
               </div>
               <div className="mt-2 space-y-1 text-xs">
                 {(defendant_profile.metrics?.red_flags ?? []).map((f: string) => (
-                  <div key={f} className="text-red-600">▼ {f}</div>
+                  <div key={f} className="text-[var(--danger)]">▼ {f}</div>
                 ))}
                 {(defendant_profile.metrics?.green_flags ?? []).map((f: string) => (
-                  <div key={f} className="text-green-600">▲ {f}</div>
+                  <div key={f} className="text-[var(--success)]">▲ {f}</div>
                 ))}
               </div>
             </div>
@@ -234,18 +285,18 @@ export default function DecisionDashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {/* 法律可行性子维度 + 节点级重跑 */}
-        <div className="bg-white rounded-xl border border-ink/10 p-5">
+        <div className="bg-surface rounded-xl border border-line p-5">
           <h2 className="text-sm font-medium mb-3">法律可行性子维度</h2>
           <div className="space-y-3">
             {LEGAL_DIMS.map(({ key, label }) => (
               <DimBar key={key} label={label} dim={dimension_results?.[key]} />
             ))}
-            <div className="text-xs text-ink/40 pt-1">
+            <div className="text-xs text-muted pt-1">
               对抗检验修正系数：{data.correction_coeff ?? 1.0}
               {data.correction_coeff && data.correction_coeff !== 1 && '（模拟法庭已回写）'}
             </div>
           </div>
-          <div className="mt-3 pt-3 border-t border-ink/10 space-y-2">
+          <div className="mt-3 pt-3 border-t border-line space-y-2">
             {LEGAL_DIMS.map(({ key, label }) => (
               <RerunControl
                 key={key}
@@ -262,9 +313,9 @@ export default function DecisionDashboard() {
         </div>
 
         {/* 业务预期子维度 */}
-        <div className="bg-white rounded-xl border border-ink/10 p-5">
+        <div className="bg-surface rounded-xl border border-line p-5">
           <h2 className="text-sm font-medium mb-1">业务预期子维度</h2>
-          <p className="text-[11px] text-ink/40 mb-3">
+          <p className="text-[11px] text-muted mb-3">
             {goal_type === '要钱' ? '要钱路径：判赔规模与回款能力的均衡水平' : '要名路径：判例价值'}
           </p>
           <div className="space-y-3">
@@ -281,29 +332,29 @@ export default function DecisionDashboard() {
         </div>
 
         {/* 硬门禁 */}
-        <div className="bg-white rounded-xl border border-ink/10 p-5">
+        <div className="bg-surface rounded-xl border border-line p-5">
           <h2 className="text-sm font-medium mb-3">硬门禁（红线检查）</h2>
           <div className="space-y-2">
             {(red_flags ?? []).map((r: any, i: number) => (
               <div key={i} className="flex items-start gap-2 text-sm">
                 <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${
-                  r.severity === 'block' ? 'bg-red-600' : r.severity === 'warning' ? 'bg-amber-500' : 'bg-green-500'
+                  r.severity === 'block' ? 'bg-[var(--danger)]' : r.severity === 'warning' ? 'bg-[var(--warning-soft)]0' : 'bg-[var(--success-soft)]0'
                 }`} />
                 <div>
                   <span className="font-medium">{r.rule_name}</span>
-                  <span className="text-ink/50 ml-2 text-xs">{r.reason}</span>
+                  <span className="text-muted ml-2 text-xs">{r.reason}</span>
                 </div>
               </div>
             ))}
             {!(red_flags ?? []).length && (
-              <p className="text-sm text-ink/40">暂无红线检查结果</p>
+              <p className="text-sm text-muted">暂无红线检查结果</p>
             )}
           </div>
         </div>
       </div>
 
       {/* 证据缺口清单 */}
-      <div className="bg-white rounded-xl border border-ink/10 p-5">
+      <div className="bg-surface rounded-xl border border-line p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-medium">
             证据缺口清单（{evidence?.gap_list?.length ?? 0} 项待补）
@@ -318,27 +369,27 @@ export default function DecisionDashboard() {
         {evidence?.gap_list?.length ? (
           <div className="space-y-2">
             {evidence.gap_list.map((g: any) => (
-              <div key={g.id} className="flex items-start gap-3 text-sm border-b border-ink/5 pb-2">
+              <div key={g.id} className="flex items-start gap-3 text-sm border-b border-line pb-2">
                 <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${
-                  g.status === 'missing' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'
+                  g.status === 'missing' ? 'bg-[var(--danger-soft)] text-[var(--danger)]' : 'bg-[var(--warning-soft)] text-[var(--warning)]'
                 }`}>
                   {g.status === 'missing' ? '缺失' : '不足'}
                 </span>
                 <div>
                   <div>{g.suggestion}</div>
-                  <div className="text-xs text-ink/40 mt-0.5">{g.basis} · {g.reason}</div>
+                  <div className="text-xs text-muted mt-0.5">{g.basis} · {g.reason}</div>
                 </div>
               </div>
             ))}
           </div>
         ) : (
-          <p className="text-sm text-ink/50">证据准备充足，无明显缺口</p>
+          <p className="text-sm text-muted">证据准备充足，无明显缺口</p>
         )}
         {evidence?.extra_evidence?.length > 0 && (
-          <div className="mt-3 pt-3 border-t border-ink/10">
-            <div className="text-xs font-medium text-ink/60 mb-1">清单外发现（AI 识别）</div>
+          <div className="mt-3 pt-3 border-t border-line">
+            <div className="text-xs font-medium text-muted mb-1">清单外发现（AI 识别）</div>
             {evidence.extra_evidence.map((e: any, i: number) => (
-              <div key={i} className="text-sm text-ink/70">· {e.name}：{e.value}</div>
+              <div key={i} className="text-sm text-muted">· {e.name}：{e.value}</div>
             ))}
           </div>
         )}
@@ -348,13 +399,13 @@ export default function DecisionDashboard() {
       <div className="flex flex-wrap gap-3">
         <button
           onClick={() => { window.location.href = `/cases/${id}/moot` }}
-          className="bg-ember text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ember-dark transition-colors"
+          className="bg-brand text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-fg transition-colors"
         >
           启动模拟法庭（压力测试）
         </button>
         <a
           href={`/cases/${id}/report`}
-          className="border border-ink/20 text-ink px-4 py-2 rounded-lg text-sm hover:bg-ink-pale transition-colors"
+          className="border border-line text-fg px-4 py-2 rounded-lg text-sm hover:bg-surface transition-colors"
         >
           查看决策备忘录
         </a>

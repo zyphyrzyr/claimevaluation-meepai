@@ -11,9 +11,9 @@ import { api, exportUrls } from '../api'
  */
 
 const LEVEL_STYLE: Record<string, { chip: string; bar: string }> = {
-  green: { chip: 'bg-emerald-600', bar: 'bg-emerald-600' },
-  yellow: { chip: 'bg-amber-500', bar: 'bg-amber-500' },
-  red: { chip: 'bg-rose-600', bar: 'bg-rose-600' },
+  green: { chip: 'bg-[var(--success)]', bar: 'bg-[var(--success)]' },
+  yellow: { chip: 'bg-[var(--warning-soft)]0', bar: 'bg-[var(--warning-soft)]0' },
+  red: { chip: 'bg-[var(--danger)]', bar: 'bg-[var(--danger)]' },
 }
 
 export default function OnePager() {
@@ -26,30 +26,30 @@ export default function OnePager() {
     api.memo(id).then(setMemo).catch((e) => setError(String(e)))
   }, [id])
 
-  if (error) return <div className="bg-red-50 text-red-700 rounded-lg p-4 text-sm">{error}</div>
-  if (!memo) return <div className="text-ink/40 text-sm">加载中…</div>
+  if (error) return <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>
+  if (!memo) return <div className="text-muted text-sm">加载中…</div>
 
   const op = memo.one_pager
   const s = memo.scores
-  const style = LEVEL_STYLE[op.level] ?? { chip: 'bg-ink', bar: 'bg-ink' }
+  const style = LEVEL_STYLE[op.level] ?? { chip: 'bg-fg', bar: 'bg-fg' }
 
   return (
     <div className="space-y-4">
       {/* 屏幕上的操作条；打印时隐藏 */}
       <div className="flex items-center justify-between flex-wrap gap-3 print:hidden">
-        <Link to={`/cases/${id}/report`} className="text-sm text-ink/50 hover:text-ink">
+        <Link to={`/cases/${id}/report`} className="text-sm text-muted hover:text-fg">
           ← 返回完整备忘录
         </Link>
         <div className="flex items-center gap-3">
           <button
             onClick={() => window.print()}
-            className="border border-ink/20 text-ink px-4 py-2 rounded-lg text-sm hover:bg-ink-pale transition-colors"
+            className="border border-line text-fg px-4 py-2 rounded-lg text-sm hover:bg-surface transition-colors"
           >
             打印 / 另存 PDF
           </button>
           <a
             href={exportUrls.memoDocx(id!)}
-            className="border border-ink/20 text-ink px-4 py-2 rounded-lg text-sm hover:bg-ink-pale transition-colors"
+            className="border border-line text-fg px-4 py-2 rounded-lg text-sm hover:bg-surface transition-colors"
           >
             下载 Word
           </a>
@@ -57,11 +57,11 @@ export default function OnePager() {
       </div>
 
       {/* 一页纸本体：A4 比例，打印时占满页面 */}
-      <div className="bg-white rounded-xl border border-ink/10 print:border-0 print:rounded-none mx-auto max-w-[820px] p-8 space-y-6">
-        <header className="border-b-2 border-ink pb-4">
-          <div className="text-xs text-ink/45 tracking-wide">主诉评估 · 向上汇报摘要</div>
+      <div className="bg-white rounded-xl border border-line print:border-0 print:rounded-none mx-auto max-w-[820px] p-8 space-y-6">
+        <header className="border-b-2 border-line pb-4">
+          <div className="text-xs text-muted tracking-wide">主诉评估 · 向上汇报摘要</div>
           <h1 className="text-2xl font-medium mt-1">{memo.case_name}</h1>
-          <div className="text-sm text-ink/55 mt-1">
+          <div className="text-sm text-muted mt-1">
             {memo.cause_type} ｜ 业务目标「{memo.goal_type}」 ｜ 生成日期{' '}
             {new Date().toLocaleDateString('zh-CN')}
           </div>
@@ -70,15 +70,15 @@ export default function OnePager() {
         {/* 结论 */}
         <section className="flex items-start justify-between gap-6 flex-wrap">
           <div>
-            <div className="text-xs text-ink/45 mb-1">评估结论</div>
+            <div className="text-xs text-muted mb-1">评估结论</div>
             <div className="text-xl font-semibold flex items-center gap-3">
               <span className={`w-2.5 h-2.5 rounded-full ${style.chip}`} />
               {op.conclusion}
             </div>
-            {op.quadrant && <div className="text-sm text-ink/50 mt-1">{op.quadrant}</div>}
+            {op.quadrant && <div className="text-sm text-muted mt-1">{op.quadrant}</div>}
           </div>
           <div className="text-right">
-            <div className="text-xs text-ink/45">主诉决策分</div>
+            <div className="text-xs text-muted">主诉决策分</div>
             <div className="text-5xl font-semibold leading-none mt-1">
               {s.final ?? '—'}
             </div>
@@ -94,14 +94,14 @@ export default function OnePager() {
               { label: '主诉决策分', value: op.scores.final },
               { label: '置信度', value: op.scores.confidence, suffix: '%' },
             ].map((m) => (
-              <div key={m.label} className="border border-ink/10 rounded-lg p-3">
-                <div className="text-[11px] text-ink/45">{m.label}</div>
+              <div key={m.label} className="border border-line rounded-lg p-3">
+                <div className="text-[11px] text-muted">{m.label}</div>
                 <div className="text-2xl font-semibold mt-0.5">
                   {m.value ?? '—'}
-                  <span className="text-xs text-ink/40 font-normal">{m.suffix ?? ''}</span>
+                  <span className="text-xs text-muted font-normal">{m.suffix ?? ''}</span>
                 </div>
                 {typeof m.value === 'number' && (
-                  <div className="h-1 bg-ink/10 rounded-full mt-2">
+                  <div className="h-1 bg-surface rounded-full mt-2">
                     <div
                       className={`h-1 rounded-full ${style.bar}`}
                       style={{ width: `${Math.min(100, m.value)}%` }}
@@ -111,7 +111,7 @@ export default function OnePager() {
               </div>
             ))}
           </div>
-          <p className="text-[11px] text-ink/40 mt-2">
+          <p className="text-[11px] text-muted mt-2">
             主诉决策分为法律可行性与业务预期的均衡水平（幂平均），任一维度过低即显著拉低总分。
           </p>
         </section>
@@ -121,8 +121,8 @@ export default function OnePager() {
           <h2 className="text-sm font-medium mb-2">核心理由</h2>
           <ol className="space-y-2">
             {op.reasons.map((r: string, i: number) => (
-              <li key={i} className="flex gap-2.5 text-sm text-ink/80">
-                <span className="text-ink/35 shrink-0">{i + 1}.</span>
+              <li key={i} className="flex gap-2.5 text-sm text-muted">
+                <span className="text-muted shrink-0">{i + 1}.</span>
                 <span>{r}</span>
               </li>
             ))}
@@ -135,8 +135,8 @@ export default function OnePager() {
             <h2 className="text-sm font-medium mb-2">行动建议</h2>
             <ul className="space-y-1.5">
               {op.actions.map((a: string, i: number) => (
-                <li key={i} className="flex gap-2.5 text-sm text-ink/80">
-                  <span className="text-ink/30 shrink-0">□</span>
+                <li key={i} className="flex gap-2.5 text-sm text-muted">
+                  <span className="text-muted shrink-0">□</span>
                   <span>{a}</span>
                 </li>
               ))}
@@ -152,7 +152,7 @@ export default function OnePager() {
               {memo.red_flags
                 .filter((f: any) => f.severity !== 'pass')
                 .map((f: any, i: number) => (
-                  <li key={i} className="flex gap-2.5 text-sm text-ink/80">
+                  <li key={i} className="flex gap-2.5 text-sm text-muted">
                     <span className="shrink-0">{f.severity === 'block' ? '⛔' : '⚠️'}</span>
                     <span>
                       <span className="font-medium">{f.rule_name}</span>：{f.reason}
@@ -163,7 +163,7 @@ export default function OnePager() {
           </section>
         )}
 
-        <footer className="border-t border-ink/10 pt-3 text-[11px] text-ink/40 leading-relaxed">
+        <footer className="border-t border-line pt-3 text-[11px] text-muted leading-relaxed">
           本摘要由 Soft IP 主诉评估系统生成，AI 辅助评估结果仅供内部决策参考，不构成正式法律意见。
           完整论证见配套《主诉评估决策备忘录》。
         </footer>

@@ -136,6 +136,24 @@ def _rpc_call(tool_name: str, args: dict) -> Dict:
         return {"error": f"SSE 解析失败: {raw[:200]}"}
 
 
+def _rpc_failed(rpc_result) -> str:
+    """识别 RPC 失败并返回人类可读原因；无失败返回空串。
+
+    专用于把被 _rpc_call 吞掉的 401 / 网络错误显式暴露出来，
+    避免上层把「鉴权失败」误当成「检索到 0 条法条」。
+    """
+    if not isinstance(rpc_result, dict):
+        return ""
+    err = rpc_result.get("error")
+    if not err:
+        return ""
+    if "401" in err or "Unauthorized" in err or "Authorization" in err:
+        return "北大法宝鉴权失败(401)：PKULAW_API_TOKEN 无效或已过期"
+    if "403" in err or "Forbidden" in err:
+        return "北大法宝无权限(403)：该 token 未开通对应工具"
+    return f"北大法宝调用失败：{err}"
+
+
 def _extract_items(rpc_result: dict) -> list:
     """从 rpc 结果中提取条目列表
     实际结构: result.content[0].text = JSON 字符串
@@ -179,11 +197,17 @@ def search_for_rights_foundation(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
+    sa = _rpc_call("search_article", {
+        "text": prof["rights_query"],
+        "lib": "中央", "timeliness": "现行有效", "size": 5
+    })
+    fail = _rpc_failed(sa)
+    if fail:
+        result["status"] = "error"
+        result["error"] = fail
+        result["_summary"] = f"⚠️ {fail}"
+        return result
     try:
-        sa = _rpc_call("search_article", {
-            "text": prof["rights_query"],
-            "lib": "中央", "timeliness": "现行有效", "size": 5
-        })
         for it in _extract_items(sa)[:5]:
             if isinstance(it, dict):
                 result["laws"].append({
@@ -222,11 +246,17 @@ def search_for_infringement(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
+    sa = _rpc_call("search_article", {
+        "text": prof["infringement_query"],
+        "lib": "中央", "timeliness": "现行有效", "size": 5
+    })
+    fail = _rpc_failed(sa)
+    if fail:
+        result["status"] = "error"
+        result["error"] = fail
+        result["_summary"] = f"⚠️ {fail}"
+        return result
     try:
-        sa = _rpc_call("search_article", {
-            "text": prof["infringement_query"],
-            "lib": "中央", "timeliness": "现行有效", "size": 5
-        })
         for it in _extract_items(sa)[:3]:
             if isinstance(it, dict):
                 result["laws"].append({
@@ -264,11 +294,17 @@ def search_for_procedure() -> Dict:
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
+    sa = _rpc_call("search_article", {
+        "text": "知识产权 诉讼时效 管辖法院 主体适格 前置程序 民事诉讼法",
+        "lib": "中央", "timeliness": "现行有效", "size": 5
+    })
+    fail = _rpc_failed(sa)
+    if fail:
+        result["status"] = "error"
+        result["error"] = fail
+        result["_summary"] = f"⚠️ {fail}"
+        return result
     try:
-        sa = _rpc_call("search_article", {
-            "text": "知识产权 诉讼时效 管辖法院 主体适格 前置程序 民事诉讼法",
-            "lib": "中央", "timeliness": "现行有效", "size": 5
-        })
         for it in _extract_items(sa)[:5]:
             if isinstance(it, dict):
                 result["laws"].append({
@@ -291,11 +327,17 @@ def search_for_moot_court(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
+    sc = _rpc_call("search_case", {
+        "text": prof["defense_query"],
+        "case_type": "民事案件", "size": 5
+    })
+    fail = _rpc_failed(sc)
+    if fail:
+        result["status"] = "error"
+        result["error"] = fail
+        result["_summary"] = f"⚠️ {fail}"
+        return result
     try:
-        sc = _rpc_call("search_case", {
-            "text": prof["defense_query"],
-            "case_type": "民事案件", "size": 5
-        })
         for it in _extract_items(sc)[:5]:
             if isinstance(it, dict):
                 result["cases"].append({
@@ -320,12 +362,18 @@ def search_for_financial(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
+    sc = _rpc_call("search_case", {
+        "text": prof["damages_query"],
+        "case_type": "民事案件", "doc_type": "判决书",
+        "decision_date_start": "2020-01-01", "size": 5
+    })
+    fail = _rpc_failed(sc)
+    if fail:
+        result["status"] = "error"
+        result["error"] = fail
+        result["_summary"] = f"⚠️ {fail}"
+        return result
     try:
-        sc = _rpc_call("search_case", {
-            "text": prof["damages_query"],
-            "case_type": "民事案件", "doc_type": "判决书",
-            "decision_date_start": "2020-01-01", "size": 5
-        })
         for it in _extract_items(sc)[:5]:
             if isinstance(it, dict):
                 result["cases"].append({
@@ -351,11 +399,17 @@ def search_for_precedent(case_desc: str = "", cause_type: str = CAUSE_TRADEMARK)
     summary = []
 
     query = (case_desc[:200] if case_desc else "") + " " + prof["precedent_query"]
+    sc = _rpc_call("search_case", {
+        "text": query[:500],
+        "case_type": "民事案件", "size": 10
+    })
+    fail = _rpc_failed(sc)
+    if fail:
+        result["status"] = "error"
+        result["error"] = fail
+        result["_summary"] = f"⚠️ {fail}"
+        return result
     try:
-        sc = _rpc_call("search_case", {
-            "text": query[:500],
-            "case_type": "民事案件", "size": 10
-        })
         for it in _extract_items(sc)[:10]:
             if isinstance(it, dict):
                 result["cases"].append({
@@ -413,6 +467,16 @@ def run_verification_phase(report_md: str) -> Dict:
     except Exception as e:
         result["summary"]["hallucinations"].append(f"adjust_provisions: {e}")
 
+    # 鉴权快检：首个调用即 401 → 整段验证不可用，显式报错而非静默 0 验证
+    ap_fail = _rpc_failed(result.get("adjust_provisions"))
+    if ap_fail:
+        result["status"] = "auth_error"
+        result["error"] = ap_fail
+        result["_summary"] = f"⚠️ {ap_fail}"
+        result["summary"]["laws_verified"] = False
+        result["summary"]["cases_verified"] = False
+        return result
+
     # 2. law_recognition
     try:
         result["law_recognition"] = _rpc_call("law_recognition", {"text": report_md[:4000]})
@@ -456,4 +520,8 @@ def get_linked_content(message: str) -> Dict:
         return {"status": "skipped", "error": "未配置 PKULAW_API_TOKEN，法宝超链增强已跳过"}
     if not message:
         return {"error": "message is empty"}
-    return _rpc_call("get_linked_content", {"message": message})
+    r = _rpc_call("get_linked_content", {"message": message})
+    fail = _rpc_failed(r)
+    if fail:
+        return {"status": "error", "error": fail}
+    return r
