@@ -6,13 +6,18 @@ from typing import List, Optional
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.case_context import CaseContext
 from core.config import SUPPORTED_CAUSE_TYPES, GOAL_TYPES
 from core.database import Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, get_db
-from core.evidence_parser import is_image_file, is_pdf_file, ocr_image, parse_pdf
+from core.evidence_parser import (
+    is_image_file, is_pdf_file, is_zip_file, ocr_image, parse_pdf, parse_zip_archive,
+)
+from core.text_extractor import extract_text_from_file, is_supported_description_file
+from core import file_store
 
 router = APIRouter()
 
@@ -37,6 +42,7 @@ class CaseOut(BaseModel):
     goal_type: Optional[str]
     status: str
     created_at: str
+    parse_summary: Optional[dict] = None  # 上传文件/ZIP 解析摘要（仅本次请求含文件时返回）
 
     class Config:
         from_attributes = True
@@ -45,6 +51,39 @@ class CaseOut(BaseModel):
 @router.get("/meta")
 def meta():
     return {"cause_types": SUPPORTED_CAUSE_TYPES, "goal_types": GOAL_TYPES}
+
+
+@router.post("/upload-description-text")
+async def upload_description_text(file: UploadFile):
+    """上传文件并提取文本，用于案情描述导入。
+
+    支持 .txt / .md / .docx / .pdf；解析失败返回 400，成功返回 {filename, text, page_count}。
+    文本编码优先 UTF-8，兼容 GBK/GB2312。
+    """
+    if not file.filename:
+        raise HTTPException(400, "请选择要上传的文件")
+
+    if not is_supported_description_file(file.filename):
+        raise HTTPException(
+            400,
+            "不支持的文件格式，案情描述导入仅支持 .txt / .md / .docx / .pdf"
+        )
+
+    # 大小限制 5MB
+    MAX_SIZE = 5 * 1024 * 1024
+    content = await file.read()
+    if len(content) > MAX_SIZE:
+        raise HTTPException(400, "文件大小超过 5MB 限制")
+
+    result = extract_text_from_file(content, file.filename)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "文件解析失败"))
+
+    return {
+        "filename": result["filename"],
+        "text": result["text"],
+        "page_count": result.get("page_count", 0),
+    }
 
 
 async def _parse_create_request(request: Request) -> tuple[CaseCreate, list[UploadFile]]:
@@ -92,27 +131,68 @@ def _build_context(payload, parties) -> CaseContext:
     return ctx
 
 
-async def _parse_evidence(files) -> list:
-    """解析上传的证据文件（PDF/图片），返回记录列表（含解析文本/状态）。不落库，由调用方在拿到 case_id 后写 EvidenceFile。"""
+async def _parse_evidence(files) -> dict:
+    """解析上传的证据文件（PDF/图片/ZIP）。
+
+    返回 {"records": [...], "zip_summaries": [...]}。records 由调用方写入 EvidenceFile 并追加到 evidence_texts；
+    zip_summaries 仅在包含 .zip 时出现，用于前端展示解压摘要。
+
+    2026-09-03 新增：
+    - 支持 .zip 压缩包，自动解压并批量解析内部 PDF/图片/文本
+    - 压缩包内文本类文件（txt/md/docx）只提取文本，不生成 EvidenceFile 记录
+    """
     records = []
+    zip_summaries = []
     for file in files:
         if not file.filename:
             continue
         content = await file.read()
+
+        # 单个 ZIP 压缩包：展开批量解析
+        if is_zip_file(file.filename):
+            zip_result = parse_zip_archive(content, file.filename)
+            records.extend(zip_result.get("records", []))
+            if zip_result.get("success"):
+                zip_summaries.append({
+                    "filename": file.filename,
+                    "total": zip_result.get("total", 0),
+                    "ok_count": zip_result.get("ok_count", 0),
+                    "failed": zip_result.get("failed", 0),
+                    "skipped": zip_result.get("skipped", 0),
+                    "warnings": zip_result.get("warnings", []),
+                })
+            else:
+                zip_summaries.append({
+                    "filename": file.filename,
+                    "total": 0,
+                    "ok_count": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "warnings": zip_result.get("warnings", []),
+                })
+            continue
+
         if is_pdf_file(file.filename):
             result = parse_pdf(content, file.filename)
         elif is_image_file(file.filename):
             result = ocr_image(content, file.filename)
+        elif file.filename.lower().endswith(".docx"):
+            result = extract_text_from_file(content, file.filename)
+        elif file.filename.lower().endswith(".doc"):
+            text = file_store.doc_bytes_to_text(content, file.filename)
+            result = {"success": bool(text), "text": text or "",
+                      "error": "" if text else "无法解析 .doc（本环境缺少 textutil 或转换失败）"}
         else:
             result = {"success": False, "text": "",
-                      "error": "不支持的文件格式，仅支持 PDF/PNG/JPG/JPEG"}
+                      "error": "不支持的文件格式，仅支持 PDF/PNG/JPG/JPEG/DOC/DOCX/ZIP"}
         records.append({
             "filename": file.filename,
             "content_type": file.content_type or "",
             "text": result.get("text", "") if result.get("success") else "",
             "status": "ok" if result.get("success") else "failed",
+            "raw": content,
         })
-    return records
+    return {"records": records, "zip_summaries": zip_summaries}
 
 
 def _evidence_snippets(records: list) -> str:
@@ -122,16 +202,61 @@ def _evidence_snippets(records: list) -> str:
     )
 
 
+def _build_parse_summary(file_records: list, zip_summaries: list) -> Optional[dict]:
+    """根据解析记录构造前端展示摘要；仅本请求含文件时返回。"""
+    if not file_records and not zip_summaries:
+        return None
+    ok = sum(1 for r in file_records if r["status"] == "ok")
+    failed = sum(1 for r in file_records if r["status"] == "failed")
+    skipped = sum(s.get("skipped", 0) for s in zip_summaries)
+    warnings = [w for s in zip_summaries for w in s.get("warnings", [])]
+    return {
+        "total": len(file_records) + skipped,
+        "ok": ok,
+        "failed": failed,
+        "skipped": skipped,
+        "warnings": warnings[:5],
+    }
+
+
+def _rebuild_case_knowledge(db: Session, case_id: str, text: str) -> None:
+    """重建本案材料库：先清旧条目再入库（add_knowledge 不去重）。
+
+    修复：update_draft 原先直接 ingest 不清旧，导致每次编辑保存都追加一份
+    「证据材料-N」重复条目。统一走「先清后增」，与删除文件链路语义一致。
+    """
+    from core.knowledge.service import delete_knowledge, ingest_case_materials
+    try:
+        for e in db.query(KnowledgeEntry).filter(
+            KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case_id,
+        ).all():
+            delete_knowledge(db, e.id)
+        if (text or "").strip():
+            ingest_case_materials(db, case_id, text)
+    except Exception:
+        pass  # 入库失败不阻断主流程
+
+
 def _write_evidence_files(records: list, case_id: str, db: Session) -> None:
+    store_exts = ('.pdf', '.png', '.jpg', '.jpeg', '.doc', '.docx')
     for r in records:
-        db.add(EvidenceFile(
+        # 压缩包内纯文本类（txt/md）只提取文本追加到 evidence_texts，不生成独立原件记录；
+        # 有扩展名命中的（pdf/png/jpg/jpeg/doc/docx）才建 EvidenceFile 并落盘原件。
+        if not r.get("content_type") and not r["filename"].lower().endswith(store_exts):
+            continue
+        ef = EvidenceFile(
             case_id=case_id,
             file_name=r["filename"],
-            file_type=r["content_type"],
+            file_type=r.get("content_type") or "",
             parse_status=r["status"],
             parsed_text=r["text"],
             storage_uri="",
-        ))
+        )
+        db.add(ef)
+        db.flush()  # 先拿 id，再用 id 命名落盘，规避文件名路径穿越
+        raw = r.get("raw")
+        if raw is not None and r["filename"].lower().endswith(store_exts):
+            ef.storage_uri = file_store.save_original(case_id, ef.id, r["filename"], raw)
 
 
 @router.post("", response_model=CaseOut)
@@ -147,10 +272,15 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(400, f"不支持的业务目标: {payload.goal_type}")
 
     # ---- 草稿模式：名称已在校验通过，其余字段留空也可存；上传文件一并解析落库 ----
+    parse_result = {"records": [], "zip_summaries": []}
+    if files:
+        parse_result = await _parse_evidence(files)
+    file_records = parse_result["records"]
+    zip_summaries = parse_result["zip_summaries"]
+    parsed_text = _evidence_snippets(file_records)
+
     if payload.draft:
         parties = _build_parties(payload)
-        file_records = await _parse_evidence(files) if files else []
-        parsed_text = _evidence_snippets(file_records)
         if parsed_text:
             base = payload.evidence_texts.strip()
             payload.evidence_texts = (base + "\n\n" if base else "") + parsed_text
@@ -177,7 +307,8 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
                 pass
         return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                        goal_type=case.goal_type, status=case.status,
-                       created_at=case.created_at.isoformat())
+                       created_at=case.created_at.isoformat(),
+                       parse_summary=_build_parse_summary(file_records, zip_summaries))
 
     # ---- 正式建案：全字段必填校验 ----
     if not payload.client_org.strip():
@@ -188,9 +319,6 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
 
     parties = _build_parties(payload)
 
-    # 解析上传的证据文件（PDF/图片），解析失败不阻断建案
-    file_records = await _parse_evidence(files) if files else []
-    parsed_text = _evidence_snippets(file_records)
     if parsed_text:
         base = payload.evidence_texts.strip()
         payload.evidence_texts = (base + "\n\n" if base else "") + parsed_text
@@ -229,7 +357,8 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
 
     return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                    goal_type=case.goal_type, status=case.status,
-                   created_at=case.created_at.isoformat())
+                   created_at=case.created_at.isoformat(),
+                   parse_summary=_build_parse_summary(file_records, zip_summaries))
 
 
 @router.get("", response_model=List[CaseOut])
@@ -290,7 +419,9 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
     ctx.case_id = case.id
 
     # 重新解析上传文件并追加到证据文本（旧文件记录保留，新上传的追加上去）
-    file_records = await _parse_evidence(files) if files else []
+    parse_result = await _parse_evidence(files) if files else {"records": [], "zip_summaries": []}
+    file_records = parse_result["records"]
+    zip_summaries = parse_result["zip_summaries"]
     parsed_text = _evidence_snippets(file_records)
     if parsed_text:
         base = ctx.defendant_info["evidence_texts"].strip()
@@ -307,17 +438,13 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
     case.context_json = ctx.to_dict()
     db.commit()
 
-    # 证据文本变化后重新入库本案材料库
-    if ctx.defendant_info["evidence_texts"].strip():
-        from core.knowledge import ingest_case_materials
-        try:
-            ingest_case_materials(db, case.id, ctx.defendant_info["evidence_texts"])
-        except Exception:
-            pass
+    # 证据文本变化后重建本案材料库（先清后增，防重复条目）
+    _rebuild_case_knowledge(db, case.id, ctx.defendant_info["evidence_texts"])
 
     return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                    goal_type=case.goal_type, status=case.status,
-                   created_at=case.created_at.isoformat())
+                   created_at=case.created_at.isoformat(),
+                   parse_summary=_build_parse_summary(file_records, zip_summaries))
 
 
 @router.post("/{case_id}/start-evaluation", response_model=CaseOut)
@@ -407,19 +534,63 @@ def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_d
     db.delete(ef)
     db.commit()
 
-    # 重建本案材料库（add_knowledge 不去重，故先清后增，保证删后一致）
-    from core.knowledge.service import delete_knowledge, ingest_case_materials
-    try:
-        for e in db.query(KnowledgeEntry).filter(
-            KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case_id,
-        ).all():
-            delete_knowledge(db, e.id)
-        if remaining.strip():
-            ingest_case_materials(db, case_id, remaining)
-    except Exception:
-        pass
+    # 重建本案材料库（先清后增，保证删后一致）
+    _rebuild_case_knowledge(db, case_id, remaining)
 
     return {"ok": True}
+
+
+def _get_ef(case_id: str, file_id: str, db: Session) -> EvidenceFile:
+    """校验 file_id 确实属于该 case_id（防越权读他人文件）。"""
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(404, "案件不存在")
+    ef = db.query(EvidenceFile).filter(
+        EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
+    ).first()
+    if not ef:
+        raise HTTPException(404, "文件记录不存在")
+    return ef
+
+
+@router.get("/{case_id}/evidence-files/{file_id}")
+def evidence_file_detail(case_id: str, file_id: str, db: Session = Depends(get_db)):
+    """预览用元信息：解析文本、是否有原件、大小、预览类型。"""
+    ef = _get_ef(case_id, file_id, db)
+    return {
+        "id": ef.id,
+        "file_name": ef.file_name,
+        "parse_status": ef.parse_status,
+        "parsed_text": ef.parsed_text or "",
+        "has_blob": file_store.has_blob(ef.storage_uri),
+        "size": file_store.size(ef.storage_uri),
+        "preview_kind": file_store.preview_kind(ef.storage_uri, ef.file_name),
+    }
+
+
+@router.get("/{case_id}/evidence-files/{file_id}/raw")
+def evidence_file_raw(case_id: str, file_id: str, db: Session = Depends(get_db)):
+    """原始字节流（inline），供 PDF 原生渲染 / 图片显示 / 下载原件。无原件返回 404。"""
+    ef = _get_ef(case_id, file_id, db)
+    p = file_store.original_path(ef.storage_uri)
+    if p is None:
+        raise HTTPException(404, "原始文件不可用：该文件可能上传于旧版本，仅保留解析文本")
+    return FileResponse(
+        p,
+        media_type=file_store.raw_mime(ef.storage_uri),
+        filename=ef.file_name,
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/{case_id}/evidence-files/{file_id}/preview")
+def evidence_file_preview(case_id: str, file_id: str, db: Session = Depends(get_db)):
+    """doc/docx 经 textutil 转出的 HTML（带缓存），供沙箱 iframe 渲染；不可用返回 406。"""
+    ef = _get_ef(case_id, file_id, db)
+    html = file_store.doc_to_html(ef.storage_uri)
+    if html is None:
+        raise HTTPException(406, "该文件类型不支持在线预览（仅 doc/docx 可预览，且需本机 textutil）")
+    return HTMLResponse(html)
 
 
 @router.delete("/{case_id}")

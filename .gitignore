@@ -20,6 +20,5 @@ data/
 frontend/.npm-cache/
 *.tsbuildinfo
 
-# caches
-frontend/.npm-cache/
-*.tsbuildinfo
+# Vite 临时产物
+frontend/vite.config.ts.timestamp-*.mjs

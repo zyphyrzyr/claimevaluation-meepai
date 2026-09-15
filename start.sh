@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 VENV=${VENV:-/Users/zhaoyirui/.workbuddy/binaries/python/envs/default}
-NODE=/Users/zhaoyirui/.workbuddy/binaries/node/versions/22.22.2-2/bin
+NODE=/Users/zhaoyirui/.workbuddy/binaries/node/versions/22.22.2-3/bin
 
 echo "== 启动后端 (FastAPI :8000, USE_MOCK=${USE_MOCK:-True}) =="
 (cd backend && USE_MOCK=${USE_MOCK:-True} $VENV/bin/python -m uvicorn main:app --reload --port 8000) &

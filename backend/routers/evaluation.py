@@ -61,9 +61,64 @@ def nodes_meta():
             "rerunnable": RERUNNABLE_NODES}
 
 
+def _auto_recall(db: Session, case: Case, ctx: CaseContext) -> int:
+    """后台静默召回（方案 B）：确定性查询词 → 双库检索 → 写入注入快照 + 审计留痕。
+
+    - 查询词 = 案由 + 业务目标 + 案情描述截断，纯规则拼接，不用 LLM（确定性可复现）
+    - 检索走 search_knowledge 双库（防跨案污染规则内建）；异常降级为空集，不阻塞评估
+    - 覆盖 ctx.injected_knowledge（原手动注入字段），下游 evaluate_nodes 注入路径零改动
+    """
+    from core.knowledge import search_knowledge
+    from core.knowledge import embeddings as emb
+    from core.config import AUTO_RECALL_TOP_K, auto_recall_min_score
+
+    parts = [
+        case.cause_type or "",
+        ctx.goal_type or "",
+        (case.case_description or "")[:500],
+    ]
+    query = " ".join(p.strip() for p in parts if p.strip())
+    if not query:
+        ctx.injected_knowledge = []
+        ctx.log_event("knowledge_auto_recall", content="(案情为空，无可用查询词)",
+                      effect="未执行自动召回，注入集为空")
+        return 0
+    try:
+        hits = search_knowledge(db, query, case_id=case.id, scope=None,
+                                top_k=AUTO_RECALL_TOP_K)
+    except Exception as e:
+        ctx.injected_knowledge = []
+        ctx.log_event("knowledge_auto_recall", content=f"召回异常: {e}",
+                      effect="自动召回异常降级为空集，不阻塞评估")
+        return 0
+
+    # 合格线随后端自适应：哈希兜底向量分数系统性偏低，共用 0.3 会让经验库短条目全落空
+    hash_backend = emb.use_mock_embedding()
+    threshold = auto_recall_min_score(hash_backend)
+    selected = [h for h in hits if float(h.get("score", 0)) >= threshold]
+    ctx.injected_knowledge = [
+        {"id": h["id"], "title": h["title"], "scope": h["scope"],
+         "source_type": h.get("source_type", ""),
+         "snippet": (h.get("content") or h.get("matched_chunk") or "")[:200]}
+        for h in selected
+    ]
+    titles = "；".join(h["title"] for h in selected)
+    ctx.log_event("knowledge_auto_recall",
+                  content=f"查询词: {query[:150]}",
+                  effect=(f"自动召回 {len(selected)}/{len(hits)} 条（top_k={AUTO_RECALL_TOP_K}, "
+                          f"向量={'哈希兜底' if hash_backend else 'bge-m3'}, "
+                          f"阈值={threshold}）：{titles[:200]}"))
+    return len(selected)
+
+
 @router.post("/{case_id}/run")
 def run_evaluation(case_id: str, db: Session = Depends(get_db)):
-    """启动完整评估，SSE 推送节点进度"""
+    """启动完整评估，SSE 推送节点进度。
+
+    2026-09-03 方案 B：材料注入后台化——启动时先执行自动召回
+    （确定性查询词 + 双库语义检索），命中写入 ctx.injected_knowledge
+    并留审计，替代原「评估准备页手动勾选」。用户无感，过程可查。
+    """
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(404, "案件不存在")
@@ -75,6 +130,10 @@ def run_evaluation(case_id: str, db: Session = Depends(get_db)):
         try:
             case.status = "evaluating"
             db.commit()
+            recalled = _auto_recall(db, case, ctx)
+            events.put({"event": "recall_done", "node": "",
+                        "label": f"已自动召回 {recalled} 条参考材料注入评估节点",
+                        "status": "ok"})
             orch = Orchestrator(ctx, on_event=events.put)
             orch.run_all()
             case.status = "completed" if ctx.scores.get("final") is not None else "partial"

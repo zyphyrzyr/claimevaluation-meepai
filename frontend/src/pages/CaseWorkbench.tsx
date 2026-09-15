@@ -1,19 +1,15 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { api, knowledgeApi, runEvaluation, type EvalEvent } from '../api'
-import { cn } from '../lib/utils'
-import EvalPrep from './EvalPrep'
+import { api, runEvaluation, type EvalEvent } from '../api'
 import EvalRun from './EvalRun'
 import DecisionDashboard from './DecisionDashboard'
-import NewCaseForm, { type CaseFormInitial } from '../components/NewCaseForm'
-import { Card } from '../components/ui/Card'
-import Tooltip from '../components/ui/Tooltip'
+import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
+import SectionNav from '../components/SectionNav'
 
-type Tab = 'detail' | 'prep' | 'run' | 'result'
+type Tab = 'detail' | 'run' | 'result'
 
 const TABS: { key: Tab; label: string }[] = [
   { key: 'detail', label: '案件详情' },
-  { key: 'prep', label: '评估准备' },
   { key: 'run', label: '评估详情' },
   { key: 'result', label: '评估结果' },
 ]
@@ -38,6 +34,7 @@ export default function CaseWorkbench() {
   const [detail, setDetail] = useState<any>(null)
   const [error, setError] = useState('')
   const [activeTab, setActiveTab] = useState<Tab>('detail')
+  const [activeStep, setActiveStep] = useState<string>(FORM_SECTIONS[0].id)
   const [defaultChosen, setDefaultChosen] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
 
@@ -92,33 +89,29 @@ export default function CaseWorkbench() {
       refreshResult()
     } else if (e.event === 'flow_blocked') {
       refreshResult()
+    } else if (e.event === 'recall_done') {
+      // 后台自动召回完成（方案 B）：材料注入全程后台化，这里只做信息展示
+      setInjectedInfo(`${e.label ?? '自动召回完成'}（明细见审计轨迹）`)
     } else if (e.event === 'flow_finished') {
       setFinished(e.status ?? '')
       setPhase('done')
       refreshResult()
+      refreshDetailOnly()
     } else if (e.event === 'flow_error') {
       setEvalError(e.error ?? '未知错误')
     }
   }
 
-  const startEval = async (selectedIds: string[]) => {
+  // 方案 B：评估启动不再需要手动勾选材料——后端在 run 开头自动召回并留审计。
+  // 前端只负责切到评估详情标签并接 SSE 流。
+  const startEval = () => {
     if (!id) return
     setEvalError('')
     setInjectedInfo('')
-    try {
-      if (selectedIds.length > 0) {
-        const r = await knowledgeApi.inject(id, selectedIds)
-        setInjectedInfo(`已注入 ${r.injected} 条参考材料到全部评估节点`)
-      } else {
-        await knowledgeApi.inject(id, [])
-      }
-    } catch (e) {
-      setEvalError(`材料注入失败：${e}`)
-      return
-    }
     setStates({})
     setPhase('running')
     setActiveTab('run')
+    setDetail((d: any) => (d ? { ...d, status: 'evaluating' } : d))
     refreshResult()
     runEvaluation(id, onEvent).catch((e) => setEvalError(String(e)))
   }
@@ -133,15 +126,20 @@ export default function CaseWorkbench() {
     }
   }
 
-  // 草稿在「案件详情」标签保存/启动后，重新拉取并复位默认标签选择
+  // 仅刷新 detail，不复位运行时状态（评估结束后同步案件状态徽标用）
+  const refreshDetailOnly = () => {
+    if (!id) return
+    api.caseDetail(id).then(setDetail).catch(() => {})
+  }
+
+  // 草稿在「案件详情」标签保存后，重新拉取并复位默认标签选择
   const onDraftSaved = () => {
     setDefaultChosen(false)
     setRefreshTick((t) => t + 1)
   }
+  // 「保存并启动评估」：落库成功后直接进入评估运行（方案 B：无准备页，后台自动召回材料）
   const onDraftStarted = () => {
-    setDefaultChosen(false)
-    setActiveTab('prep')
-    setRefreshTick((t) => t + 1)
+    startEval()
   }
 
   if (error) return <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>
@@ -151,100 +149,135 @@ export default function CaseWorkbench() {
   const st = STATUS_BADGE[status] ?? STATUS_BADGE.pending
   const evaluated = EVALUATED_STATUSES.includes(status)
 
+  const fileCount = detail.evidence_files?.length ?? 0
+
   return (
-    <div>
-      {/* 顶部区域：返回 / 标题 / 案件名（降级副说明） / 状态 / 标签导航 */}
-      <div className="mb-6">
-        <div className="flex items-center flex-wrap gap-x-3 gap-y-2">
-          <button
-            onClick={() => navigate('/workbench')}
-            className="inline-flex items-center gap-1 text-sm text-muted hover:text-fg transition-colors shrink-0"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
+    <div className="max-w-[67rem] mx-auto xl:grid xl:grid-cols-[9rem_minmax(0,1fr)] xl:gap-8">
+      {/* 章节导航列：正好填进左侧边栏与内容区之间原先空着的那段留白。
+          纵向起点与粘性位置同为 calc(25vh+3rem)：3rem 用来抵消 main 的 pt-5 与左栏标题区
+          的高度差，让导航首项与左侧「案件列表」落在同一水平线上。
+          评估详情/评估结果两个标签暂无章节结构，这里保留空列占位，避免切换标签时内容横向位移。 */}
+      <div className="hidden xl:block">
+        {activeTab === 'detail' && (
+          <SectionNav
+            sections={FORM_SECTIONS}
+            active={activeStep}
+            onSelect={setActiveStep}
+            className="mt-[calc(25vh+3rem)] sticky top-[calc(25vh+3rem)]"
+          />
+        )}
+      </div>
+
+      <div className="min-w-0">
+        {/* 面包屑：把「这是个案件工作台」降级为导航信息，不再占用页面标题 */}
+        <nav className="flex items-center gap-2 text-xs text-muted mb-3">
+          <button onClick={() => navigate('/workbench')} className="hover:text-fg transition-colors">
             案件列表
           </button>
+          <span className="text-line">/</span>
+          <span>案件工作台</span>
+        </nav>
 
-          <h1 className="text-xl font-medium shrink-0">个案工作台</h1>
-
-          <span className="text-muted shrink-0">·</span>
-
-          <Tooltip content={detail.name}>
-            <span className="inline-block max-w-xs text-sm text-muted truncate align-middle">
-              {detail.name}
-            </span>
-          </Tooltip>
-
-          <span className="inline-flex items-center gap-1.5 text-xs text-muted shrink-0 rounded-full border border-line px-2 py-0.5">
+        {/* 主标题就是案件名：完整展示、可换行，不再截断 */}
+        <div className="flex items-start gap-3">
+          <h1 className="flex-1 min-w-0 text-2xl font-medium leading-snug break-words">{detail.name}</h1>
+          <span className="mt-1.5 inline-flex items-center gap-1.5 shrink-0 rounded-full border border-line px-2.5 py-1 text-xs text-muted">
             <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
             {st.text}
           </span>
-
-          <nav className="flex items-center gap-1 flex-wrap ml-auto">
-            {TABS.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setActiveTab(t.key)}
-                className={`px-3 py-2 rounded-md text-sm transition-colors ${
-                  activeTab === t.key ? 'text-fg font-medium' : 'text-muted hover:text-fg'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </nav>
         </div>
+
+        {/* 摘要带：把关键事实前置，进页面即可确认是哪个案子、什么目标、证据齐不齐 */}
+        <div className="flex flex-wrap gap-2 mt-3">
+          <SummaryChip label="案由" value={detail.cause_type} />
+          <SummaryChip label="业务目标" value={detail.goal_type} />
+          <SummaryChip label="证据" value={fileCount > 0 ? `${fileCount} 份文件` : '未上传'} />
+        </div>
+
+        {/* 标签导航：独立成行 + 下划线指示（原先只靠字重，选中态几乎看不出来） */}
+        <div className="flex items-center gap-6 mt-6 border-b border-line">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              className={`relative pb-3 text-sm transition-colors ${
+                activeTab === t.key ? 'text-fg font-medium' : 'text-muted hover:text-fg'
+              }`}
+            >
+              {t.label}
+              {activeTab === t.key && (
+                <span className="absolute -bottom-px left-0 right-0 h-[2px] rounded-full bg-fg" />
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-6">
+          {activeTab === 'detail' && (
+            <CaseDetailTab
+              detail={detail}
+              evaluated={evaluated}
+              activeStep={activeStep}
+              onActiveStepChange={setActiveStep}
+              onSaved={onDraftSaved}
+              onStarted={onDraftStarted}
+              onStartMoot={(cid) => navigate(`/cases/${cid}/moot?mode=standalone`)}
+            />
+          )}
+          {activeTab === 'run' && (
+            <EvalRun
+              caseId={id!}
+              result={result}
+              states={states}
+              phase={phase}
+              finished={finished}
+              error={evalError}
+              onStart={startEval}
+              onViewResult={() => setActiveTab('result')}
+              onRerun={rerunNode}
+            />
+          )}
+          {activeTab === 'result' && <DecisionDashboard />}
+        </div>
+
+        {injectedInfo && (
+          <div className="bg-[var(--info-soft)] text-[var(--info)] rounded-lg px-4 py-2 text-xs mt-4">
+            {injectedInfo}
+          </div>
+        )}
       </div>
-
-      {activeTab === 'detail' && (
-        <CaseDetailTab
-          detail={detail}
-          evaluated={evaluated}
-          onSaved={onDraftSaved}
-          onStarted={onDraftStarted}
-          onStartMoot={(cid) => navigate(`/cases/${cid}/moot?mode=standalone`)}
-        />
-      )}
-      {activeTab === 'prep' && (
-        <EvalPrep caseId={id!} caseDetail={detail} evaluated={evaluated} onStart={startEval} error={evalError} />
-      )}
-      {activeTab === 'run' && (
-        <EvalRun
-          caseId={id!}
-          result={result}
-          states={states}
-          phase={phase}
-          finished={finished}
-          error={evalError}
-          onViewResult={() => setActiveTab('result')}
-          onRerun={rerunNode}
-        />
-      )}
-      {activeTab === 'result' && <DecisionDashboard />}
-
-      {injectedInfo && (
-        <div className="bg-[var(--info-soft)] text-[var(--info)] rounded-lg px-4 py-2 text-xs mt-4">
-          {injectedInfo}
-        </div>
-      )}
     </div>
   )
 }
 
+/** 摘要带上的单个事实标签（无值时不渲染，避免出现「业务目标：—」这类空壳） */
+function SummaryChip({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-xs">
+      <span className="text-muted">{label}</span>
+      <span className="text-fg">{value}</span>
+    </span>
+  )
+}
+
 // ---------------------------------------------------------------------------
-// 案件详情标签：始终为可编辑表单（与新建案件页布局一致）
-// 已评估案件（evaluated）顶部显示提示，引导重新评估；未评估不提示
+// 案件详情标签：始终为可编辑表单（与新建案件页共用 NewCaseForm，布局同步加分）
+// evaluated 时把「建议重新评估」提示交给表单吸底操作条，不再用满宽色块压住页首
 // ---------------------------------------------------------------------------
 function CaseDetailTab({
   detail,
   evaluated,
+  activeStep,
+  onActiveStepChange,
   onSaved,
   onStarted,
   onStartMoot,
 }: {
   detail: any
   evaluated: boolean
+  activeStep: string
+  onActiveStepChange: (id: string) => void
   onSaved: () => void
   onStarted: () => void
   onStartMoot: (caseId: string) => void
@@ -262,114 +295,18 @@ function CaseDetailTab({
     evidence_files: detail.evidence_files ?? [],
   }
   return (
-    <>
-      {evaluated && (
-        <div className="bg-[var(--warning-soft)] text-[var(--warning)] border border-[var(--warning)]/30 rounded-lg px-4 py-2.5 text-sm mb-4">
-          已有评估结果，修改后建议重新评估
-        </div>
-      )}
-      <NewCaseForm
-        caseId={detail.id}
-        initial={initial}
-        onCreated={(cid, status) => {
-          if (status === 'pending') onStarted()
-          else onSaved()
-        }}
-        onStartMoot={onStartMoot}
-      />
-    </>
+    <NewCaseForm
+      caseId={detail.id}
+      initial={initial}
+      activeStep={activeStep}
+      onActiveStepChange={onActiveStepChange}
+      notice={evaluated ? '已有评估结果，修改后建议重新评估' : undefined}
+      onCreated={(cid, status) => {
+        if (status === 'pending') onStarted()
+        else onSaved()
+      }}
+      onStartMoot={onStartMoot}
+    />
   )
 }
 
-// 建案时录入的全部字段回看
-function CaseInfoCard({
-  detail,
-  descExpanded,
-  setDescExpanded,
-}: {
-  detail: any
-  descExpanded: boolean
-  setDescExpanded: Dispatch<SetStateAction<boolean>>
-}) {
-  const di = detail.context?.defendant_info ?? {}
-  const views: string[] = detail.context?.user_viewpoints ?? []
-  const files: { id: string; file_name: string; parse_status: string }[] = detail.evidence_files ?? []
-  const desc = detail.case_description ?? ''
-  const evText = di.evidence_texts ?? ''
-  return (
-    <Card className="p-5">
-      <h2 className="text-sm font-medium mb-3">案件信息</h2>
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-3 text-sm">
-        <div>
-          <div className="text-xs text-muted mb-0.5">案件名称</div>
-          <div className="text-fg">{detail.name || '—'}</div>
-        </div>
-        <div>
-          <div className="text-xs text-muted mb-0.5">业务目标</div>
-          <div className="text-fg">{detail.goal_type || '—'}</div>
-        </div>
-        <div>
-          <div className="text-xs text-muted mb-0.5">案由</div>
-          <div className="text-fg">{detail.cause_type || '—'}</div>
-        </div>
-        <div>
-          <div className="text-xs text-muted mb-0.5">原告 / 客户主体</div>
-          <div className="text-fg">{detail.client_org || '—'}</div>
-        </div>
-        <div className="sm:col-span-2">
-          <div className="text-xs text-muted mb-0.5">被告</div>
-          <div className="text-fg">
-            {di.name || '—'}
-            {di.type ? `（${di.type === 'company' ? '企业' : di.type === 'individual' ? '个人' : di.type}）` : ''}
-          </div>
-        </div>
-        <div className="sm:col-span-2">
-          <div className="text-xs text-muted mb-0.5">案情描述</div>
-          <div className={cn('text-fg whitespace-pre-wrap max-w-3xl', !descExpanded && 'line-clamp-3')}>
-            {desc || '—'}
-          </div>
-          {desc.length > 120 && (
-            <button
-              onClick={() => setDescExpanded((v) => !v)}
-              className="text-xs text-brand hover:underline mt-1"
-            >
-              {descExpanded ? '收起' : '展开全文'}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {evText && (
-        <div className="mt-3">
-          <div className="text-xs text-muted mb-1">证据材料文本</div>
-          <div className="text-xs text-fg whitespace-pre-wrap bg-canvas border border-line rounded-lg p-3 max-h-40 overflow-auto max-w-3xl">
-            {evText}
-          </div>
-        </div>
-      )}
-
-      {files.length > 0 && (
-        <div className="mt-3">
-          <div className="text-xs text-muted mb-1">已上传证据文件（{files.length}）</div>
-          <div className="flex flex-wrap gap-2">
-            {files.map((f) => (
-              <span key={f.id} className="text-xs bg-canvas border border-line rounded px-2 py-1 text-fg">
-                {f.file_name}
-                {f.parse_status === 'ok' ? ' · 已解析' : f.parse_status === 'failed' ? ' · 解析失败' : ''}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {views.length > 0 && (
-        <div className="mt-3">
-          <div className="text-xs text-muted mb-1">已注入观点</div>
-          {views.map((v: string, i: number) => (
-            <div key={i} className="text-sm text-muted">· {v}</div>
-          ))}
-        </div>
-      )}
-    </Card>
-  )
-}

@@ -298,7 +298,18 @@ def search_for_financial_qcc_full(defendant_info: dict = None) -> Dict:
         defendant_info = {"name": defendant_info, "type": "enterprise"}
 
     if not defendant_info or not defendant_info.get("name", "").strip():
-        return {"_summary": "⚠️ 未提供被告名称，无法调用企查查", "stages": {}, "metrics": {}}
+        # 必须带 error 键。早期版本只返回空 metrics 不带 error，编排器
+        # 于是按「无异常」把 recovery 节点标成 ok——「回款能力未知」在界面上
+        # 被展示成「回款能力正常」，是典型的静默兜底。口径与
+        # _qcc_unconfigured_result 保持一致：拿不到就是拿不到，明说。
+        message = "未提供被告名称，无法调用企查查画像"
+        return {
+            "status": "skipped",
+            "error": message,
+            "_summary": f"⚠️ {message}",
+            "stages": {},
+            "metrics": {},
+        }
 
     d_type = defendant_info.get("type", "enterprise")
 

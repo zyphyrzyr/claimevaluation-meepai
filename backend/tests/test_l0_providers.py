@@ -349,3 +349,51 @@ class TestSettingsApi:
         resp = client.post("/api/settings/providers/deepseek/test").json()
         assert resp["ok"] is False
         assert "Mock" in resp.get("skipped", "")
+
+
+# ============================================================
+# E. 测试环境自身的隔离（护栏）
+# ============================================================
+
+class TestEnvIsolation:
+    """
+    守住 conftest 里那条 .env 隔离夹具。
+
+    它挂了不会有任何测试立刻变红——只是红灯会在几个月后以「TestProviderSwap
+    三个用例莫名其妙失败」的形式回来，而那时没人会想到是 conftest 被改过。
+    所以这里显式钉住：测试期间读的一定是临时 .env，不是仓库里那份真的。
+    """
+
+    def test_tests_never_read_the_project_dotenv(self):
+        assert config.ENV_PATH != config.PROJECT_DIR / ".env"
+        assert config.ENV_PATH.parent != config.PROJECT_DIR
+
+    def test_isolated_dotenv_is_outside_the_repo(self):
+        """隔离路径必须落在临时目录里，绝不能碰仓库内任何文件。"""
+        assert str(config.ENV_PATH).startswith(str(Path(tempfile.gettempdir())))
+
+    def test_switching_provider_writes_only_the_isolated_file(self, monkeypatch):
+        """
+        最危险的一种回归：切换供应商会把整组参数写进 config.ENV_PATH，
+        隔离一旦失效，写的是开发者本地那份真 .env——不报错，直接改人家的配置。
+        """
+        real_env = config.PROJECT_DIR / ".env"
+        read_real = lambda: (real_env.read_text(encoding="utf-8")
+                             if real_env.exists() else None)
+        before = read_real()
+
+        # 隔离的 .env 是空的，未配专属密钥的供应商不允许切换（那条闸门本身是对的）
+        monkeypatch.setenv("KIMI_API_KEY", "sk-isolation-guard-1234")
+        try:
+            settings_store.select_provider("kimi")
+            after = read_real()
+        finally:
+            # 本用例的失败路径恰恰意味着「真实 .env 已被改写」。
+            # 只断言不修复的话，跑一次测试就把开发者的配置改了，还留一地鸡毛——
+            # 断言负责报警，这里负责把现场恢复原样。
+            if read_real() != before and before is not None:
+                real_env.write_text(before, encoding="utf-8")
+
+        assert after == before, "切换供应商改动了仓库里的真实 .env"
+        assert "kimi" in config.ENV_PATH.read_text(encoding="utf-8"), \
+            "切换结果应落在隔离的临时 .env 里"

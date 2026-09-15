@@ -4,7 +4,7 @@
 - 案件材料自动入库（来源 A）、评分链路手动勾选注入、观点沉淀（来源 C）
 """
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -102,32 +102,11 @@ def ingest(case_id: str, payload: IngestRequest, db: Session = Depends(get_db)):
     return {"ok": True, "ingested": count}
 
 
-class InjectRequest(BaseModel):
-    entry_ids: List[str]
-
-
-@router.post("/cases/{case_id}/inject")
-def inject(case_id: str, payload: InjectRequest, db: Session = Depends(get_db)):
-    """评分链路手动勾选注入（§7 保复现性：注入哪些条目全程留审计）"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
-    ctx = _load_ctx(case)
-    rows = db.query(KnowledgeEntry).filter(KnowledgeEntry.id.in_(payload.entry_ids)).all()
-    # 防污染：勾选了其他案件的材料时拒绝
-    for r in rows:
-        if r.scope == "case" and r.case_id != case_id:
-            raise HTTPException(400, f"条目 {r.id}（{r.title}）属于其他案件，禁止注入")
-    ctx.injected_knowledge = [
-        {"id": r.id, "title": r.title, "scope": r.scope,
-         "source_type": r.source_type, "snippet": (r.content or "")[:200]}
-        for r in rows
-    ]
-    ctx.log_event("knowledge_inject", content="；".join(r.title for r in rows),
-                  effect=f"已勾选注入 {len(rows)} 条知识库条目到全部 LLM 评估节点")
-    _save_ctx(db, case, ctx)
-    return {"ok": True, "injected": len(rows),
-            "entries": ctx.injected_knowledge}
+# 手动勾选注入接口（POST /cases/{case_id}/inject）已于 2026-09-03 移除。
+# 方案 B 把材料注入完全后台化：评估启动时由 evaluation._auto_recall 自动召回并
+# 覆盖 ctx.injected_knowledge。保留手动接口会误导——用户勾选的条目会在下一次
+# 评估启动时被自动召回整体覆盖，界面上看不出为什么没生效。注入明细改由审计轨迹
+# 的 knowledge_auto_recall 事件承载，可查且可复现。
 
 
 class DepositRequest(BaseModel):

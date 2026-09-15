@@ -1,5 +1,13 @@
 const BASE = '/api'
 
+export interface ParseSummary {
+  total: number
+  ok: number
+  failed: number
+  skipped: number
+  warnings: string[]
+}
+
 export interface CaseItem {
   id: string
   name: string
@@ -7,6 +15,17 @@ export interface CaseItem {
   goal_type: string | null
   status: string
   created_at: string
+  parse_summary?: ParseSummary
+}
+
+export interface EvidenceFileMeta {
+  id: string
+  file_name: string
+  parse_status: string
+  parsed_text: string
+  has_blob: boolean
+  size: number | null
+  preview_kind: 'pdf' | 'image' | 'html' | 'none'
 }
 
 export interface CaseCreatePayload {
@@ -71,6 +90,21 @@ export const api = {
   startEvaluation: (id: string) => request<CaseItem>(`/cases/${id}/start-evaluation`, { method: 'POST' }),
   deleteEvidenceFile: (id: string, fileId: string) =>
     request<{ ok: boolean }>(`/cases/${id}/evidence-files/${fileId}`, { method: 'DELETE' }),
+  evidenceFileMeta: (id: string, fileId: string) =>
+    request<EvidenceFileMeta>(`/cases/${id}/evidence-files/${fileId}`),
+  // 二进制预览直连 URL：不经 request() 的 json 解析，直接给 <iframe>/<img> src
+  evidenceFileRawUrl: (id: string, fileId: string) =>
+    `${BASE}/cases/${id}/evidence-files/${fileId}/raw`,
+  evidenceFilePreviewUrl: (id: string, fileId: string) =>
+    `${BASE}/cases/${id}/evidence-files/${fileId}/preview`,
+  uploadDescriptionText: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ filename: string; text: string; page_count: number }>(
+      '/cases/upload-description-text',
+      { method: 'POST', body: form },
+    )
+  },
   deleteCase: (id: string) =>
     request<{ ok: boolean }>(`/cases/${id}`, { method: 'DELETE' }),
   result: (id: string) => request<any>(`/evaluation/${id}/result`),
@@ -226,11 +260,8 @@ export const knowledgeApi = {
       method: 'POST',
       body: JSON.stringify({ evidence_texts }),
     }),
-  inject: (caseId: string, entry_ids: string[]) =>
-    request<{ ok: boolean; injected: number }>(`/knowledge/cases/${caseId}/inject`, {
-      method: 'POST',
-      body: JSON.stringify({ entry_ids }),
-    }),
+  // 手动勾选注入接口已随「评估准备」页一并移除（方案 B：注入由后端自动召回完成），
+  // 对应后端 POST /knowledge/cases/{id}/inject 亦已删除。
   deposit: (caseId: string, title: string, content: string) =>
     request<{ ok: boolean; id: string }>(`/knowledge/cases/${caseId}/deposit`, {
       method: 'POST',

@@ -62,6 +62,7 @@ export default function EvalRun({
   phase,
   finished,
   error,
+  onStart,
   onViewResult,
   onRerun,
 }: {
@@ -71,6 +72,7 @@ export default function EvalRun({
   phase: 'prep' | 'running' | 'done'
   finished: string
   error: string
+  onStart?: () => void
   onViewResult: () => void
   onRerun: (node: string, guidance: string) => Promise<void>
 }) {
@@ -99,8 +101,18 @@ export default function EvalRun({
     return (
       <>
         <h1 className="text-xl font-medium mb-1">评估分析</h1>
-        <div className="bg-surface border border-line rounded-xl p-8 text-center text-muted text-sm">
-          本案尚未开始评估，请到「评估准备」勾选参考材料并点击「开始评估」。
+        <div className="bg-surface border border-line rounded-xl p-8 text-center">
+          <p className="text-muted text-sm mb-4">
+            本案尚未开始评估。参考材料将在启动后由系统在后台自动召回并注入评估节点。
+          </p>
+          {onStart && (
+            <button
+              onClick={onStart}
+              className="bg-fg hover:opacity-90 text-canvas px-6 py-2.5 rounded-lg text-sm font-medium transition-colors"
+            >
+              开始评估 →
+            </button>
+          )}
         </div>
       </>
     )

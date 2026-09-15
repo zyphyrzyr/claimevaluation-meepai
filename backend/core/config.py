@@ -46,6 +46,35 @@ RIGHTS_RED_LINE = 60
 SCORE_THRESHOLD_GO = 78        # >= 78 建议优先启动
 SCORE_THRESHOLD_PATCH = 62     # 62-77 补充短板后启动；< 62 暂缓
 
+# 评估启动时的后台自动召回（方案 B：材料注入完全后台化，用户无感）
+# - 查询词 = 案由 + 业务目标 + 案情描述（确定性拼接，不用 LLM）
+# - 双库检索（本案材料库 + 全局经验库，防污染规则内建于 search_knowledge）
+# - 只保留 score >= 合格线的命中，注入快照照常写入审计；合格线由
+#   auto_recall_min_score() 按向量化后端给出（哈希兜底 vs bge-m3 两套刻度）
+AUTO_RECALL_TOP_K = int(os.environ.get("AUTO_RECALL_TOP_K", "8"))
+
+# 合格线**随后端自适应**，不能两后端共用一条线——
+# 哈希兜底向量按字符二元组统计，余弦相似度系统性偏低（实测相关文本仅 0.13-0.61），
+# 沿用 bge-m3 标定的 0.3 会让**全局经验库的短条目（20-40 字）全军覆没**：
+# 实测 4 条全落在 0.13-0.23，一条都进不了注入集，「经验沉淀」在演示里等于没生效，
+# 而界面只显示「自动召回 0 条」，与空库无从区分。长条目（案件材料库 200+ 字）
+# 尚能到 0.43-0.61，是唯一没暴露该问题的场景。
+# 0.12 取自实测短条目下沿 0.13 再留一档余量，宁可少召回也不放噪声进来。
+AUTO_RECALL_MIN_SCORE_REAL = float(os.environ.get("AUTO_RECALL_MIN_SCORE_REAL", "0.3"))
+AUTO_RECALL_MIN_SCORE_HASH = float(os.environ.get("AUTO_RECALL_MIN_SCORE_HASH", "0.12"))
+# 显式覆盖（调试/压测用）：设了就无视后端，一律用它
+AUTO_RECALL_MIN_SCORE_OVERRIDE = os.environ.get("AUTO_RECALL_MIN_SCORE")
+
+
+def auto_recall_min_score(hash_embedding: bool) -> float:
+    """返回当前向量化后端下应当生效的合格线。
+
+    :param hash_embedding: True = 当前走离线哈希兜底向量（分数偏低），False = bge-m3
+    """
+    if AUTO_RECALL_MIN_SCORE_OVERRIDE is not None:
+        return float(AUTO_RECALL_MIN_SCORE_OVERRIDE)
+    return AUTO_RECALL_MIN_SCORE_HASH if hash_embedding else AUTO_RECALL_MIN_SCORE_REAL
+
 # 四象限图中线（法律轴 / 业务轴各自的中线）
 # 语义上不同于上面的「总分档位线」，两者独立命名，不得合并。
 # 取值与 SCORE_THRESHOLD_GO 对齐：幂平均恒有 min(x,y) <= M_p(x,y) <= max(x,y)，

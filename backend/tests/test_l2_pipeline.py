@@ -439,3 +439,52 @@ class TestFailureHandling:
         assert calls == [], f"拦截后仍调用了 LLM 节点：{calls}"
         assert ctx.recommendation["level"] == "block"
         assert ctx.scores["final"] is None
+
+
+class TestRecoveryFailureVisibility:
+    """
+    回款能力「取不到」必须和「回款能力正常」区分开。
+
+    早期实现里 qcc_api 在未提供被告名称时只返回空 metrics、不带 error 键，
+    编排器因此按「无异常」把 recovery 节点标成 ok。界面上用户看到的是
+    「回款能力：正常」，而实际值是 None —— 一个典型的静默兜底
+    （2026-09-03 接真实 key 联调时发现）。
+
+    两条断言缺一不可：只钉住 qcc_api 的返回值，将来有人改了编排器的
+    状态判定照样会兜底回去；只钉住编排器，又会在 qcc_api 换写法时漏掉。
+
+    【必须伪装成「已配置」】测试环境里 QCC token 是空的，_qcc_configured()
+    会先短路返回「未配置」分支——而那个分支本来就带 error，于是两条测试
+    不修代码也能绿。第一版就是这么写的，变异检验（把修复撤掉）发现毫无反应，
+    才发现测的压根不是要修的那行。这里统一把 _qcc_configured 顶成 True。
+    """
+
+    def test_qcc_reports_error_when_defendant_name_missing(self, monkeypatch):
+        from core import qcc_api
+        monkeypatch.setattr(qcc_api, "_qcc_configured", lambda: True)
+
+        profile = qcc_api.search_for_financial_qcc_full({})
+        assert profile.get("error"), (
+            "未提供被告名称时必须带 error 键；只给空 metrics 会让调用方把"
+            "「取不到」误判成「成功但没数据」")
+        assert (profile.get("metrics") or {}).get("recovery_probability") is None
+
+    def test_recovery_is_marked_failed_not_ok(self, monkeypatch):
+        import core.evaluate_nodes as en
+        from core import qcc_api
+
+        monkeypatch.setattr(qcc_api, "_qcc_configured", lambda: True)
+        monkeypatch.setattr(orchestrator, "_use_mock", lambda: False)
+        # 判赔规模走 LLM，与本用例无关，钉成固定值隔离掉
+        monkeypatch.setattr(en, "evaluate_damages",
+                            lambda ctx, use_mock=True: {"score": 70, "analysis": "判赔规模"})
+
+        ctx = _good_ctx(goal_type="要钱",
+                        defendant_info={"name": "   ", "type": "enterprise"})
+        orchestrator.Orchestrator(ctx).run_node("business")
+
+        dim = ctx.dimension_results["recovery"]
+        assert dim["status"] == "failed", (
+            f"回款能力取不到时必须标 failed；标成 {dim['status']!r} 会让界面"
+            f"把「未知」显示成「正常」")
+        assert ctx.recovery_ability is None

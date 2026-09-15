@@ -3,6 +3,12 @@ L2 全链路 E2E（HTTP + SSE 脚本）
 覆盖：三案由×双目标矩阵、SSE 事件契约、节点重跑、顾问闭环、内嵌法庭回写、独立模式隔离、版本快照
 前置：后端 http://localhost:8000 运行中（USE_MOCK=True）
 运行：backend/ 目录 python tests/e2e_l2_http.py
+
+⚠️ 防污染：本脚本会向「当前运行中后端」的数据库写入 E2E 案件与全局库条目
+（含 /knowledge/deposit 沉淀）。不要对着真实数据的 dev server 跑——应先以隔离
+数据目录启动后端再跑本脚本：
+  SOFT_IP_DATA_DIR=/tmp/softip_e2e USE_MOCK=True bash start.sh
+否则 E2E 沉淀会污染真实全局经验库（曾积压 19 条，见 scripts/cleanup_knowledge.py）。
 """
 import json
 import sys

@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, CaseItem } from '../api'
 import SlideOver from '../components/SlideOver'
-import NewCaseForm from '../components/NewCaseForm'
+import NewCaseForm, { FORM_SECTIONS } from '../components/NewCaseForm'
+import SectionNav from '../components/SectionNav'
 
 const STATUS_LABELS: Record<string, { text: string; dot: string }> = {
   draft: { text: '草稿', dot: 'bg-muted' },
@@ -27,6 +28,10 @@ export default function Workbench() {
   const [cases, setCases] = useState<CaseItem[]>([])
   const [error, setError] = useState('')
   const [drawerOpen, setDrawerOpen] = useState(false)
+  /** 抽屉面板本身：抽屉内表单以它为滚动容器（不是 window） */
+  const drawerPanelRef = useRef<HTMLDivElement>(null)
+  /** 抽屉内表单的当前步骤（与左侧导航联动） */
+  const [drawerStep, setDrawerStep] = useState<string>(FORM_SECTIONS[0].id)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -151,8 +156,30 @@ export default function Workbench() {
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         title="新建案件"
+        panelRef={drawerPanelRef}
       >
-        <NewCaseForm onCreated={handleCreated} />
+        {/* 抽屉里同样给章节导航留一列（抽屉宽 76rem，减掉 p-6 后 1168px，
+            扣掉 144px 导航 + 32px 间距，表单有 992px——「案由/业务目标」两等分后每格 488px，
+            分段按钮各 244px，足以让「要钱（判赔规模 · 回款能力）」单行显示不折行）。
+            这里滚动容器是抽屉面板自身而非 window，所以粘性偏移用 top-6，不走 25vh。 */}
+        <div className="lg:grid lg:grid-cols-[9rem_minmax(0,1fr)] lg:gap-8">
+          <div className="hidden lg:block">
+            <SectionNav
+              sections={FORM_SECTIONS}
+              active={drawerStep}
+              onSelect={setDrawerStep}
+              className="sticky top-6"
+            />
+          </div>
+          <div className="min-w-0">
+            <NewCaseForm
+              onCreated={handleCreated}
+              activeStep={drawerStep}
+              onActiveStepChange={setDrawerStep}
+              navBreakpoint="lg"
+            />
+          </div>
+        </div>
       </SlideOver>
     </div>
   )
