@@ -32,7 +32,7 @@ const RERUNNABLE = new Set(['evidence_review', 'rights', 'infringement', 'proced
 //   · 本文件：一次只渲染 EVAL_AXES 里的一个轴（单块逐步），切换动画走 lib/motion.ts 的 STEP_MOTION
 //   · CaseWorkbench：渲染左侧章节导航（点击 = 切换当前轴，不再整页滚动）
 // label 是导航用短名（去掉「轴」字，9rem 的窄列更清爽）；
-// axis 是单步内分区标题，保持原文不动。
+// axis 是单步内分区标题，已与 label 统一去掉「轴」字。
 export const EVAL_AXES: {
   id: string
   label: string
@@ -41,8 +41,8 @@ export const EVAL_AXES: {
   cols: string
 }[] = [
   { id: 'eval-prep', label: '前置盘点', axis: '前置盘点', nodes: ['evidence_review', 'red_gate'], cols: 'sm:grid-cols-2' },
-  { id: 'eval-legal', label: '法律可行性', axis: '法律可行性轴', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
-  { id: 'eval-business', label: '业务预期', axis: '业务预期轴', nodes: ['business'], cols: '' },
+  { id: 'eval-legal', label: '法律可行性', axis: '法律可行性', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
+  { id: 'eval-business', label: '业务预期', axis: '业务预期', nodes: ['business'], cols: '' },
   { id: 'eval-synth', label: '决策合成', axis: '决策合成', nodes: ['synthesize'], cols: '' },
 ]
 
@@ -147,6 +147,11 @@ export default function EvalRun({
 
   // 当前展示的轴（单块逐步）：父级持有一个 activeAxis，这里只渲染命中的那一个。
   const activeGroup = EVAL_AXES.find((a) => a.id === activeAxis) ?? EVAL_AXES[0]
+
+  // 轴标题旁的维度 chip 点击：平滑滚动定位到对应节点卡（node-* id 由下方节点卡 wrapper 提供）
+  const scrollToNode = (node: string) => {
+    document.getElementById('node-' + node)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
 
   const nodeCard = (
     node: string,
@@ -426,8 +431,22 @@ export default function EvalRun({
       <AnimatePresence mode="wait">
         <motion.div key={activeGroup.id} {...STEP_MOTION}>
           <section>
-            <div className="flex items-center gap-2 mb-3">
+            <div className="flex items-center gap-2 mb-3 flex-wrap">
               <span className="text-xs font-medium text-muted tracking-wide">{activeGroup.axis}</span>
+              {activeGroup.nodes.length > 1 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {activeGroup.nodes.map((node) => (
+                    <button
+                      key={node}
+                      type="button"
+                      onClick={() => scrollToNode(node)}
+                      className="text-xs px-2 py-0.5 rounded-full border border-line text-muted hover:text-fg hover:border-fg transition-colors"
+                    >
+                      {NODE_LABELS[node] ?? node}
+                    </button>
+                  ))}
+                </div>
+              )}
               <span className="flex-1 h-px bg-line" />
             </div>
             <div className={cn('grid gap-3', activeGroup.cols)}>
@@ -435,7 +454,7 @@ export default function EvalRun({
                 if (node === 'business') {
                   const b = detailOf('business')?.result ?? {}
                   return (
-                    <div key={node} className="space-y-3">
+                    <div key={node} id={'node-' + node} className="space-y-3 scroll-mt-24">
                       {nodeCard('business', (
                         <div className="text-sm text-muted">
                           目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
@@ -453,7 +472,7 @@ export default function EvalRun({
                   )
                 }
                 return (
-                  <div key={node}>
+                  <div key={node} id={'node-' + node} className="scroll-mt-24">
                     {nodeCard(node, renderDetail(node), {
                       rerunnable: node !== 'red_gate' && node !== 'synthesize',
                       skipIfBlocked: true,
