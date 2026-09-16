@@ -25,7 +25,11 @@ const NODE_LABELS: Record<string, string> = {
   recovery: '回款能力',
   precedent: '判例价值',
 }
-const RERUNNABLE = new Set(['evidence_review', 'rights', 'infringement', 'procedure', 'business'])
+const RERUNNABLE = new Set(['evidence_review', 'red_gate', 'rights', 'infringement', 'procedure', 'business'])
+// 判赔规模/回款能力/判例价值 是 business 节点的子维度、不在 NODE_ORDER 里，无法单独重跑；
+// 它们的「重跑」= 重跑父节点 business（两个子维度一起刷新）。
+const RERUN_AS: Record<string, string> = { damages: 'business', recovery: 'business', precedent: 'business' }
+const rerunNodeOf = (node: string) => RERUN_AS[node] ?? node
 
 // 分轴呈现：让「每个环节的信息与结论」沿横轴分组清晰铺开。
 // 导出供两处消费，避免「导航文字」和「分区标题」两边各写一份而走歪：
@@ -110,7 +114,7 @@ export default function EvalRun({
   const doRerun = async (node: string) => {
     setRerunBusy(true)
     try {
-      await onRerun(node, rerunGuidance)
+      await onRerun(rerunNodeOf(node), rerunGuidance)
     } finally {
       setRerunBusy(false)
       setRerunTarget(null)
@@ -154,7 +158,6 @@ export default function EvalRun({
   // 业务预期轴的可切换小标题是子维度（判赔规模/回款能力；要名为判例价值）；其他轴用 activeGroup.nodes
   const chipNodes = activeGroup.id === 'eval-business' ? subNodes : activeGroup.nodes
   const currentNode = chipNodes.includes(activeNode ?? '') ? (activeNode as string) : chipNodes[0]
-  const b = detailOf('business')?.result ?? {}
 
   const nodeCard = (
     node: string,
@@ -166,7 +169,7 @@ export default function EvalRun({
     const d = detailOf(node)
     const isStale = status === 'stale'
     const isSkipped = opts?.skipIfBlocked && blocked && !d && status === 'waiting'
-    const rerunnable = opts?.rerunnable && RERUNNABLE.has(node)
+    const rerunnable = opts?.rerunnable && RERUNNABLE.has(rerunNodeOf(node))
 
     const right = (
       <>
@@ -470,36 +473,26 @@ export default function EvalRun({
               )}
             </div>
             {activeGroup.id === 'eval-business' ? (
-              // 业务预期（方案A）：总览卡常驻（含重跑），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）
-              <div className="space-y-3">
-                {nodeCard('business', (
-                  <div className="text-sm text-muted">
-                    目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
-                    {b.sub_dimensions?.length > 0 && (
-                      <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
-                    )}
+              // 业务预期：总览卡已删（目标见头部 chip、子维度见小标题），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）
+              subNodes.length > 1 ? (
+                <AnimatePresence mode="wait">
+                  <motion.div key={activeGroup.id + ':' + currentNode} {...STEP_MOTION}>
+                    {nodeCard(currentNode, renderDetail(currentNode), { skipIfBlocked: true, rerunnable: true })}
+                  </motion.div>
+                </AnimatePresence>
+              ) : (
+                subNodes.map((sub) => (
+                  <div key={sub}>
+                    {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true, rerunnable: true })}
                   </div>
-                ), { rerunnable: true })}
-                {subNodes.length > 1 ? (
-                  <AnimatePresence mode="wait">
-                    <motion.div key={activeGroup.id + ':' + currentNode} {...STEP_MOTION}>
-                      {nodeCard(currentNode, renderDetail(currentNode), { skipIfBlocked: true })}
-                    </motion.div>
-                  </AnimatePresence>
-                ) : (
-                  subNodes.map((sub) => (
-                    <div key={sub} className="pl-5 border-l border-line">
-                      {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
-                    </div>
-                  ))
-                )}
-              </div>
+                ))
+              )
             ) : activeGroup.nodes.length > 1 ? (
               // 多节点轴（前置盘点/法律可行性）：一次只显示当前维度一张卡（占满全宽），切换动画与切轴一致（复用 STEP_MOTION）
               <AnimatePresence mode="wait">
                 <motion.div key={activeGroup.id + ':' + currentNode} {...STEP_MOTION}>
                   {nodeCard(currentNode, renderDetail(currentNode), {
-                    rerunnable: currentNode !== 'red_gate' && currentNode !== 'synthesize',
+                    rerunnable: currentNode !== 'synthesize',
                     skipIfBlocked: true,
                   })}
                 </motion.div>
