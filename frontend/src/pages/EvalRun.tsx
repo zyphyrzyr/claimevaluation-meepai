@@ -25,12 +25,23 @@ const NODE_LABELS: Record<string, string> = {
 }
 const RERUNNABLE = new Set(['evidence_review', 'rights', 'infringement', 'procedure', 'business'])
 
-// 分轴呈现：让「每个环节的信息与结论」沿横轴分组清晰铺开
-const AXES: { axis: string; nodes: string[]; cols: string }[] = [
-  { axis: '前置盘点', nodes: ['evidence_review', 'red_gate'], cols: 'sm:grid-cols-2' },
-  { axis: '法律可行性轴', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
-  { axis: '业务预期轴', nodes: ['business'], cols: '' },
-  { axis: '决策合成', nodes: ['synthesize'], cols: '' },
+// 分轴呈现：让「每个环节的信息与结论」沿横轴分组清晰铺开。
+// 导出供两处消费，避免「导航文字」和「分区标题」两边各写一份而走歪：
+//   · 本文件：渲染各轴卡片，section 的 id 即左侧导航的锚点
+//   · CaseWorkbench：渲染左侧章节导航
+// label 是导航用短名（去掉「轴」字，9rem 的窄列更清爽）；
+// axis 是页面上的分区标题，保持原文不动。
+export const EVAL_AXES: {
+  id: string
+  label: string
+  axis: string
+  nodes: string[]
+  cols: string
+}[] = [
+  { id: 'eval-prep', label: '前置盘点', axis: '前置盘点', nodes: ['evidence_review', 'red_gate'], cols: 'sm:grid-cols-2' },
+  { id: 'eval-legal', label: '法律可行性', axis: '法律可行性轴', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
+  { id: 'eval-business', label: '业务预期', axis: '业务预期轴', nodes: ['business'], cols: '' },
+  { id: 'eval-synth', label: '决策合成', axis: '决策合成', nodes: ['synthesize'], cols: '' },
 ]
 
 const SEV_LABEL: Record<string, string> = { pass: '通过', warning: '警示', block: '拦截' }
@@ -346,8 +357,8 @@ export default function EvalRun({
         每个环节均展示状态、分数（档位色）、结论与依据
       </p>
 
-      {AXES.map((group) => (
-        <section key={group.axis} className="mb-6">
+      {EVAL_AXES.map((group) => (
+        <section key={group.axis} id={group.id} className="mb-6 scroll-mt-[calc(25vh+4.25rem)]">
           <div className="flex items-center gap-2 mb-3">
             <span className="text-xs font-medium text-muted tracking-wide">{group.axis}</span>
             <span className="flex-1 h-px bg-line" />

@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api, runEvaluation, type EvalEvent } from '../api'
-import EvalRun from './EvalRun'
+import EvalRun, { EVAL_AXES } from './EvalRun'
 import DecisionDashboard from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
@@ -27,6 +27,79 @@ const STATUS_BADGE: Record<string, { text: string; dot: string }> = {
   blocked: { text: '红线拦截', dot: 'bg-danger' },
 }
 
+/**
+ * 左侧章节导航的纵向定位：两个标签共用同一串类，保证位置完全一致。
+ * mt 决定「自然位置」（未滚动时落在哪）＝ main 的 pt-5(20) + mt(25vh+48) = 25vh+68px，
+ * 与左侧大导航首项（py-5 + text-xl 行高28 + py-5 + mt-25vh = 25vh+68px）恰好重合；
+ * top 决定「粘住后停在哪」，必须等于自然位置，否则滚动到触发点时会跳一段。
+ */
+const NAV_STICKY = 'mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]'
+
+/** 上面那条「导航钉住线」对应的视口 y（px），与 NAV_STICKY 的 top 同源：
+ *  0.25vh(25vh) + 68px。锚点滚动落点与滚动高亮都以它为基准。 */
+const navLineY = () => 0.25 * window.innerHeight + 68
+
+/**
+ * 评估详情的「滚动高亮 + 点击跳转」。
+ * 与案件详情的导航有个本质区别：那边是单块逐步表单，active 直接由 activeStep 决定；
+ * 这边内容一次全渲染、页面整体滚动，导航只能跟随滚动位置。
+ * 两个必须处理的边界：
+ *  1) 最后一个轴可能永远越不过激活线（页面不够长）→ 滚到底部时强制高亮最后一项；
+ *  2) 点击导航后的平滑滚动途中会途经中间的轴 → 短暂抑制高亮，避免闪跳。
+ */
+function useEvalAxisNav(enabled: boolean) {
+  const [activeAxis, setActiveAxis] = useState(EVAL_AXES[0].id)
+  const suppressUntil = useRef(0)
+
+  useEffect(() => {
+    if (!enabled) return
+    let raf = 0
+    const update = () => {
+      raf = 0
+      if (Date.now() < suppressUntil.current) return
+      // 滚到（接近）底部：最后一个轴可能越不过激活线，直接判定为它
+      if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2) {
+        setActiveAxis(EVAL_AXES[EVAL_AXES.length - 1].id)
+        return
+      }
+      const line = navLineY()
+      // 各轴在文档中顺序排列，取「最后一个已越过激活线」的那个
+      let current = EVAL_AXES[0].id
+      for (const a of EVAL_AXES) {
+        const el = document.getElementById(a.id)
+        if (!el) continue
+        if (el.getBoundingClientRect().top - line <= 0) current = a.id
+        else break
+      }
+      setActiveAxis(current)
+    }
+    const onScroll = () => {
+      if (!raf) raf = requestAnimationFrame(update)
+    }
+    update()
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onScroll)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onScroll)
+    }
+  }, [enabled])
+
+  const goToAxis = useCallback((id: string) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    suppressUntil.current = Date.now() + 650
+    setActiveAxis(id)
+    window.scrollTo({
+      top: el.getBoundingClientRect().top + window.scrollY - navLineY(),
+      behavior: 'smooth',
+    })
+  }, [])
+
+  return { activeAxis, goToAxis }
+}
+
 export default function CaseWorkbench() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -45,6 +118,11 @@ export default function CaseWorkbench() {
   const [injectedInfo, setInjectedInfo] = useState('')
   const [result, setResult] = useState<any>(null)
   const [evalError, setEvalError] = useState('')
+
+  // 评估详情是否已经有可锚定的分区：未评估时 EvalRun 只渲染一张「尚未开始评估」卡片，
+  // 此时不给左侧导航，避免出现点不动的死链接。（与 EvalRun 的空状态判定同源）
+  const evalReady = Boolean(result) || phase !== 'prep'
+  const { activeAxis, goToAxis } = useEvalAxisNav(activeTab === 'run' && evalReady)
 
   const loadDetail = () => {
     if (!id) return
@@ -154,28 +232,33 @@ export default function CaseWorkbench() {
   return (
     <div className="max-w-[67rem] mx-auto xl:grid xl:grid-cols-[9rem_minmax(0,1fr)] xl:gap-8">
       {/* 章节导航列：正好填进左侧边栏与内容区之间原先空着的那段留白。
+          两个标签共用这一列，纵向定位也共用 NAV_STICKY，所以位置完全一致。
+
           粘性与偏移都挂在内层 SectionNav 上（本列只是占位容器，不参与定位）——
           注意不能挂到这个网格项上：网格项会被拉伸到整行高度，自身没有可粘行程，
           sticky 会退化成「一开始就贴在网格顶部」，导航直接跳到页面上方。
-          mt 与 top 是两个不同的量，必须分开算（写成同一个值就会一滚动就跳位）：
-          · mt = calc(25vh+3rem) —— 决定「自然位置」（未滚动时落在哪）。
-            自然位置 = main 的 pt-5(20px) + 25vh + 48px = calc(25vh+68px)。
-            而侧边栏首项 = py-5(20) + text-xl 行高(28) + py-5(20) + mt-[25vh] = calc(25vh+68px)，
-            两者恰好相等，所以 mt 取 3rem 时导航与侧边栏首项是天然对齐的。
-          · top = calc(25vh+4.25rem) —— 决定「粘住后停在哪」。必须等于自然位置，
-            否则滚动到触发点时会被顶到阈值、瞬间跳一段（差值就是偏移量）。
-            原来写成 3rem，比自然位置小 20px，表现就是「一滚就往上蹿 20px 然后停住」。
           实测（headless Chrome 1440x757，侧边栏首项 y=257）：
-          改前 scroll=0 时差值为 0、scroll≥20 后恒为 -20；改后全程差值 0，导航纹丝不动。
-          行程安全性：只要视口高度 ≥ 341px，导航都不会被包含块底边顶出。
-          评估详情/评估结果两个标签暂无章节结构，这里保留空列占位，避免切换标签时内容横向位移。 */}
+          mt/top 同值时 scroll≥20 后差值为 -20（往上蹿一段）；让 top 等于自然位置后全程差值 0。
+
+          两种驱动模式共用同一个受控组件，只是喂进去的 active / onSelect 不同：
+          · 案件详情：单块逐步表单 → active=activeStep，点击=切换显示哪一块（不滚动）
+          · 评估详情：长页整体滚动 → active=滚动高亮，点击=平滑滚到对应轴
+          评估结果标签暂无章节结构，保留空列占位，避免切换标签时内容横向位移。 */}
       <div className="hidden xl:block">
         {activeTab === 'detail' && (
           <SectionNav
             sections={FORM_SECTIONS}
             active={activeStep}
             onSelect={setActiveStep}
-            className="mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]"
+            className={NAV_STICKY}
+          />
+        )}
+        {activeTab === 'run' && evalReady && (
+          <SectionNav
+            sections={EVAL_AXES}
+            active={activeAxis}
+            onSelect={goToAxis}
+            className={NAV_STICKY}
           />
         )}
       </div>
