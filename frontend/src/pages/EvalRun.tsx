@@ -148,10 +148,10 @@ export default function EvalRun({
   // 当前展示的轴（单块逐步）：父级持有一个 activeAxis，这里只渲染命中的那一个。
   const activeGroup = EVAL_AXES.find((a) => a.id === activeAxis) ?? EVAL_AXES[0]
 
-  // 轴标题旁的维度 chip 点击：平滑滚动定位到对应节点卡（node-* id 由下方节点卡 wrapper 提供）
-  const scrollToNode = (node: string) => {
-    document.getElementById('node-' + node)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+  // 轴内维度切换：多节点轴一次只显示一个维度。activeNode 记忆轴内选中；
+  // 选中节点不属于当前轴（刚切轴）时回退到该轴第一个节点。
+  const [activeNode, setActiveNode] = useState<string | null>(null)
+  const currentNode = activeGroup.nodes.includes(activeNode ?? '') ? (activeNode as string) : activeGroup.nodes[0]
 
   const nodeCard = (
     node: string,
@@ -435,52 +435,73 @@ export default function EvalRun({
               <span className="text-xs font-medium text-muted tracking-wide">{activeGroup.axis}</span>
               {activeGroup.nodes.length > 1 && (
                 <div className="flex flex-wrap gap-1.5">
-                  {activeGroup.nodes.map((node) => (
-                    <button
-                      key={node}
-                      type="button"
-                      onClick={() => scrollToNode(node)}
-                      className="text-xs px-2 py-0.5 rounded-full border border-line text-muted hover:text-fg hover:border-fg transition-colors"
-                    >
-                      {NODE_LABELS[node] ?? node}
-                    </button>
-                  ))}
+                  {activeGroup.nodes.map((node) => {
+                    const on = node === currentNode
+                    return (
+                      <button
+                        key={node}
+                        type="button"
+                        onClick={() => setActiveNode(node)}
+                        className={cn(
+                          'text-xs px-2.5 py-1 rounded-full border transition-colors',
+                          on
+                            ? 'bg-fg text-canvas border-fg font-medium'
+                            : 'bg-surface text-muted border-line hover:text-fg hover:border-fg',
+                        )}
+                      >
+                        {NODE_LABELS[node] ?? node}
+                      </button>
+                    )
+                  })}
                 </div>
               )}
               <span className="flex-1 h-px bg-line" />
             </div>
-            <div className={cn('grid gap-3', activeGroup.cols)}>
-              {activeGroup.nodes.map((node) => {
-                if (node === 'business') {
-                  const b = detailOf('business')?.result ?? {}
+            {activeGroup.nodes.length > 1 ? (
+              // 多节点轴：一次只显示当前维度一张卡（占满全宽），切换动画与切轴一致（复用 STEP_MOTION）
+              <AnimatePresence mode="wait">
+                <motion.div key={activeGroup.id + ':' + currentNode} {...STEP_MOTION}>
+                  {nodeCard(currentNode, renderDetail(currentNode), {
+                    rerunnable: currentNode !== 'red_gate' && currentNode !== 'synthesize',
+                    skipIfBlocked: true,
+                  })}
+                </motion.div>
+              </AnimatePresence>
+            ) : (
+              // 单节点轴（业务预期含子维度嵌套 / 决策合成）：保持整排渲染，不加切换
+              <div className={cn('grid gap-3', activeGroup.cols)}>
+                {activeGroup.nodes.map((node) => {
+                  if (node === 'business') {
+                    const b = detailOf('business')?.result ?? {}
+                    return (
+                      <div key={node} className="space-y-3">
+                        {nodeCard('business', (
+                          <div className="text-sm text-muted">
+                            目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
+                            {b.sub_dimensions?.length > 0 && (
+                              <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
+                            )}
+                          </div>
+                        ), { rerunnable: true })}
+                        {subNodes.map((sub) => (
+                          <div key={sub} className="pl-5 border-l border-line">
+                            {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  }
                   return (
-                    <div key={node} id={'node-' + node} className="space-y-3 scroll-mt-24">
-                      {nodeCard('business', (
-                        <div className="text-sm text-muted">
-                          目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
-                          {b.sub_dimensions?.length > 0 && (
-                            <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
-                          )}
-                        </div>
-                      ), { rerunnable: true })}
-                      {subNodes.map((sub) => (
-                        <div key={sub} className="pl-5 border-l border-line">
-                          {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
-                        </div>
-                      ))}
+                    <div key={node}>
+                      {nodeCard(node, renderDetail(node), {
+                        rerunnable: node !== 'red_gate' && node !== 'synthesize',
+                        skipIfBlocked: true,
+                      })}
                     </div>
                   )
-                }
-                return (
-                  <div key={node} id={'node-' + node} className="scroll-mt-24">
-                    {nodeCard(node, renderDetail(node), {
-                      rerunnable: node !== 'red_gate' && node !== 'synthesize',
-                      skipIfBlocked: true,
-                    })}
-                  </div>
-                )
-              })}
-            </div>
+                })}
+              </div>
+            )}
           </section>
         </motion.div>
       </AnimatePresence>
