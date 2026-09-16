@@ -1,4 +1,6 @@
 import { useState, type ReactNode } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { STEP_MOTION } from '../lib/motion'
 import { cn } from '../lib/utils'
 import { type Thresholds, type NodeState } from '../lib/tiers'
 import { Card } from '../components/ui/Card'
@@ -27,10 +29,10 @@ const RERUNNABLE = new Set(['evidence_review', 'rights', 'infringement', 'proced
 
 // 分轴呈现：让「每个环节的信息与结论」沿横轴分组清晰铺开。
 // 导出供两处消费，避免「导航文字」和「分区标题」两边各写一份而走歪：
-//   · 本文件：渲染各轴卡片，section 的 id 即左侧导航的锚点
-//   · CaseWorkbench：渲染左侧章节导航
+//   · 本文件：一次只渲染 EVAL_AXES 里的一个轴（单块逐步），切换动画走 lib/motion.ts 的 STEP_MOTION
+//   · CaseWorkbench：渲染左侧章节导航（点击 = 切换当前轴，不再整页滚动）
 // label 是导航用短名（去掉「轴」字，9rem 的窄列更清爽）；
-// axis 是页面上的分区标题，保持原文不动。
+// axis 是单步内分区标题，保持原文不动。
 export const EVAL_AXES: {
   id: string
   label: string
@@ -65,6 +67,9 @@ function scaleLabel(s?: string) {
 /**
  * 评估详情（运行/完成时间线）。运行时状态由父级 CaseWorkbench 持有并下发，
  * 本组件只负责渲染；节点级重跑与「查看决策仪表盘」通过回调上抛。
+ *
+ * 呈现方式是「单块逐步」：一次只渲染 EVAL_AXES 里的一个轴，切换动画与案件详情共用
+ * lib/motion.ts 的 STEP_MOTION。当前步由父级持有（activeAxis），因为左侧导航列在父级手上。
  */
 export default function EvalRun({
   caseId,
@@ -73,6 +78,8 @@ export default function EvalRun({
   phase,
   finished,
   error,
+  activeAxis,
+  onAxisChange,
   onStart,
   onViewResult,
   onRerun,
@@ -83,6 +90,10 @@ export default function EvalRun({
   phase: 'prep' | 'running' | 'done'
   finished: string
   error: string
+  /** 当前展示的轴（EVAL_AXES 的 id） */
+  activeAxis: string
+  /** 切换轴：左侧导航列与窄屏分段控件都走它 */
+  onAxisChange: (id: string) => void
   onStart?: () => void
   onViewResult: () => void
   onRerun: (node: string, guidance: string) => Promise<void>
@@ -110,22 +121,19 @@ export default function EvalRun({
   // 尚未开始评估（本会话未运行且后端也无历史结果）
   if (!result && phase === 'prep') {
     return (
-      <>
-        <h1 className="text-xl font-medium mb-1">评估分析</h1>
-        <div className="bg-surface border border-line rounded-xl p-8 text-center">
-          <p className="text-muted text-sm mb-4">
-            本案尚未开始评估。参考材料将在启动后由系统在后台自动召回并注入评估节点。
-          </p>
-          {onStart && (
-            <button
-              onClick={onStart}
-              className="bg-fg hover:opacity-90 text-canvas px-6 py-2.5 rounded-lg text-sm font-medium transition-colors"
-            >
-              开始评估 →
-            </button>
-          )}
-        </div>
-      </>
+      <div className="bg-surface border border-line rounded-xl p-8 text-center">
+        <p className="text-muted text-sm mb-4">
+          本案尚未开始评估。参考材料将在启动后由系统在后台自动召回并注入评估节点。
+        </p>
+        {onStart && (
+          <button
+            onClick={onStart}
+            className="bg-fg hover:opacity-90 text-canvas px-6 py-2.5 rounded-lg text-sm font-medium transition-colors"
+          >
+            开始评估 →
+          </button>
+        )}
+      </div>
     )
   }
 
@@ -136,6 +144,9 @@ export default function EvalRun({
     return states[node] ?? 'waiting'
   }
   const subNodes = goalType === '要名' ? ['precedent'] : ['damages', 'recovery']
+
+  // 当前展示的轴（单块逐步）：父级持有一个 activeAxis，这里只渲染命中的那一个。
+  const activeGroup = EVAL_AXES.find((a) => a.id === activeAxis) ?? EVAL_AXES[0]
 
   const nodeCard = (
     node: string,
@@ -351,54 +362,76 @@ export default function EvalRun({
 
   return (
     <>
-      <h1 className="text-xl font-medium mb-1">评估分析</h1>
-      <p className="text-sm text-muted mb-6">
-        前置盘点 → 硬门禁 → 法律可行性（权利/侵权/程序）→ 业务预期 → 决策合成，
-        每个环节均展示状态、分数（档位色）、结论与依据
-      </p>
+      {/* 窄屏兜底：左侧导航列在 xl 以下隐藏，用横向分段控件补上切换入口，否则其余轴无法访问 */}
+      <div className="flex flex-wrap gap-2 mb-4 xl:hidden">
+        {EVAL_AXES.map((s) => {
+          const on = activeAxis === s.id
+          return (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => onAxisChange(s.id)}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-sm border transition-colors',
+                on
+                  ? 'bg-fg text-canvas border-fg font-medium'
+                  : 'bg-surface text-muted border-line hover:text-fg',
+              )}
+            >
+              {s.label}
+            </button>
+          )
+        })}
+      </div>
 
-      {EVAL_AXES.map((group) => (
-        <section key={group.axis} id={group.id} className="mb-6 scroll-mt-[calc(25vh+4.25rem)]">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-xs font-medium text-muted tracking-wide">{group.axis}</span>
-            <span className="flex-1 h-px bg-line" />
-          </div>
-          <div className={cn('grid gap-3', group.cols)}>
-            {group.nodes.map((node) => {
-              if (node === 'business') {
-                const b = detailOf('business')?.result ?? {}
+      {error && (
+        <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm mb-4">{error}</div>
+      )}
+
+      {/* 单块逐步：一次只渲染 activeGroup，切换走 STEP_MOTION（与案件详情一致）。
+          mode="wait" 保证旧块完全退场后再进新块，避免两块共存导致高度抖动。 */}
+      <AnimatePresence mode="wait">
+        <motion.div key={activeGroup.id} {...STEP_MOTION}>
+          <section>
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-xs font-medium text-muted tracking-wide">{activeGroup.axis}</span>
+              <span className="flex-1 h-px bg-line" />
+            </div>
+            <div className={cn('grid gap-3', activeGroup.cols)}>
+              {activeGroup.nodes.map((node) => {
+                if (node === 'business') {
+                  const b = detailOf('business')?.result ?? {}
+                  return (
+                    <div key={node} className="space-y-3">
+                      {nodeCard('business', (
+                        <div className="text-sm text-muted">
+                          目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
+                          {b.sub_dimensions?.length > 0 && (
+                            <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
+                          )}
+                        </div>
+                      ), { rerunnable: true })}
+                      {subNodes.map((sub) => (
+                        <div key={sub} className="pl-5 border-l border-line">
+                          {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }
                 return (
-                  <div key={node} className="space-y-3">
-                    {nodeCard('business', (
-                      <div className="text-sm text-muted">
-                        目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
-                        {b.sub_dimensions?.length > 0 && (
-                          <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
-                        )}
-                      </div>
-                    ), { rerunnable: true })}
-                    {subNodes.map((sub) => (
-                      <div key={sub} className="pl-5 border-l border-line">
-                        {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
-                      </div>
-                    ))}
+                  <div key={node}>
+                    {nodeCard(node, renderDetail(node), {
+                      rerunnable: node !== 'red_gate' && node !== 'synthesize',
+                      skipIfBlocked: true,
+                    })}
                   </div>
                 )
-              }
-              return (
-                <div key={node}>
-                  {nodeCard(node, renderDetail(node), {
-                    rerunnable: node !== 'red_gate' && node !== 'synthesize',
-                    skipIfBlocked: true,
-                  })}
-                </div>
-              )
-            })}
-          </div>
-        </section>
-      ))}
-
-      {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm mt-4">{error}</div>}
+              })}
+            </div>
+          </section>
+        </motion.div>
+      </AnimatePresence>
 
       {result?.scores?.final != null && (
         <button

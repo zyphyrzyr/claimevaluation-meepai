@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { STEP_MOTION } from '../lib/motion'
 import { api, CaseCreatePayload } from '../api'
 import { cn } from '../lib/utils'
 import EvidencePreview, { PreviewTarget } from './EvidencePreview'
@@ -711,14 +712,12 @@ export default function NewCaseForm({
         <AnimatePresence mode="wait">
           {/* 案情与证据块内部靠 h-full + flex 撑满高度（左列两个 textarea 按比例分配、右列卡片列表滚动），
               这需要本层有「确定高度」，否则子元素的 height:100% 无法解析、整条撑满链塌掉，
-              textarea 退回浏览器默认的两行高。因此仅对该块开启 h-full。 */}
+              textarea 退回浏览器默认的两行高。因此仅对该块开启 h-full。
+              切换动画来自 lib/motion.ts 的 STEP_MOTION，与评估详情共用同一套参数。 */}
           <motion.div
             key={current}
             className={cn(current === 'form-evidence' && 'h-full')}
-            initial={{ opacity: 0, y: 7 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -7 }}
-            transition={{ duration: 0.22, ease: 'easeOut' }}
+            {...STEP_MOTION}
           >
             {renderSection(current)}
           </motion.div>
