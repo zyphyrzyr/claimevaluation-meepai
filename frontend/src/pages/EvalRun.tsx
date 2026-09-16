@@ -151,7 +151,10 @@ export default function EvalRun({
   // 轴内维度切换：多节点轴一次只显示一个维度。activeNode 记忆轴内选中；
   // 选中节点不属于当前轴（刚切轴）时回退到该轴第一个节点。
   const [activeNode, setActiveNode] = useState<string | null>(null)
-  const currentNode = activeGroup.nodes.includes(activeNode ?? '') ? (activeNode as string) : activeGroup.nodes[0]
+  // 业务预期轴的可切换小标题是子维度（判赔规模/回款能力；要名为判例价值）；其他轴用 activeGroup.nodes
+  const chipNodes = activeGroup.id === 'eval-business' ? subNodes : activeGroup.nodes
+  const currentNode = chipNodes.includes(activeNode ?? '') ? (activeNode as string) : chipNodes[0]
+  const b = detailOf('business')?.result ?? {}
 
   const nodeCard = (
     node: string,
@@ -433,9 +436,9 @@ export default function EvalRun({
           <section>
             <div className="flex items-center gap-2 mb-3 flex-wrap">
               <span className="text-xs font-medium text-muted tracking-wide">{activeGroup.axis}</span>
-              {activeGroup.nodes.length > 1 && (
+              {chipNodes.length > 1 && (
                 <div className="flex flex-wrap gap-1.5">
-                  {activeGroup.nodes.map((node) => {
+                  {chipNodes.map((node) => {
                     const on = node === currentNode
                     return (
                       <button
@@ -466,8 +469,33 @@ export default function EvalRun({
                 </button>
               )}
             </div>
-            {activeGroup.nodes.length > 1 ? (
-              // 多节点轴：一次只显示当前维度一张卡（占满全宽），切换动画与切轴一致（复用 STEP_MOTION）
+            {activeGroup.id === 'eval-business' ? (
+              // 业务预期（方案A）：总览卡常驻（含重跑），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）
+              <div className="space-y-3">
+                {nodeCard('business', (
+                  <div className="text-sm text-muted">
+                    目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
+                    {b.sub_dimensions?.length > 0 && (
+                      <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
+                    )}
+                  </div>
+                ), { rerunnable: true })}
+                {subNodes.length > 1 ? (
+                  <AnimatePresence mode="wait">
+                    <motion.div key={activeGroup.id + ':' + currentNode} {...STEP_MOTION}>
+                      {nodeCard(currentNode, renderDetail(currentNode), { skipIfBlocked: true })}
+                    </motion.div>
+                  </AnimatePresence>
+                ) : (
+                  subNodes.map((sub) => (
+                    <div key={sub} className="pl-5 border-l border-line">
+                      {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : activeGroup.nodes.length > 1 ? (
+              // 多节点轴（前置盘点/法律可行性）：一次只显示当前维度一张卡（占满全宽），切换动画与切轴一致（复用 STEP_MOTION）
               <AnimatePresence mode="wait">
                 <motion.div key={activeGroup.id + ':' + currentNode} {...STEP_MOTION}>
                   {nodeCard(currentNode, renderDetail(currentNode), {
@@ -477,38 +505,16 @@ export default function EvalRun({
                 </motion.div>
               </AnimatePresence>
             ) : (
-              // 单节点轴（业务预期含子维度嵌套 / 决策合成）：保持整排渲染，不加切换
+              // 单节点轴（决策合成）：整排渲染，不加切换
               <div className={cn('grid gap-3', activeGroup.cols)}>
-                {activeGroup.nodes.map((node) => {
-                  if (node === 'business') {
-                    const b = detailOf('business')?.result ?? {}
-                    return (
-                      <div key={node} className="space-y-3">
-                        {nodeCard('business', (
-                          <div className="text-sm text-muted">
-                            目标：<b className="text-fg">{b.goal_type ?? goalType}</b>
-                            {b.sub_dimensions?.length > 0 && (
-                              <span> · 子维度 {b.sub_dimensions.map((s: string) => NODE_LABELS[s] ?? s).join(' + ')}</span>
-                            )}
-                          </div>
-                        ), { rerunnable: true })}
-                        {subNodes.map((sub) => (
-                          <div key={sub} className="pl-5 border-l border-line">
-                            {nodeCard(sub, renderDetail(sub), { skipIfBlocked: true })}
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  }
-                  return (
-                    <div key={node}>
-                      {nodeCard(node, renderDetail(node), {
-                        rerunnable: node !== 'red_gate' && node !== 'synthesize',
-                        skipIfBlocked: true,
-                      })}
-                    </div>
-                  )
-                })}
+                {activeGroup.nodes.map((node) => (
+                  <div key={node}>
+                    {nodeCard(node, renderDetail(node), {
+                      rerunnable: node !== 'red_gate' && node !== 'synthesize',
+                      skipIfBlocked: true,
+                    })}
+                  </div>
+                ))}
               </div>
             )}
           </section>
