@@ -190,7 +190,12 @@ def evaluation_result(case_id: str, db: Session = Depends(get_db)):
         "defendant_profile": {
             "recovery_ability": ctx.recovery_ability,
             "metrics": (ctx.defendant_profile or {}).get("metrics", {}),
+            # 8 阶段明细与那句摘要：界面上「外部数据依据」要展示「查到什么、据此推断了什么」
+            "stages": (ctx.defendant_profile or {}).get("stages", {}),
+            "summary": (ctx.defendant_profile or {}).get("_summary", ""),
         },
+        # 自动召回的材料：界面上要能回答「这个判断参考了哪些材料」
+        "recalled_materials": ctx.injected_knowledge or [],
         "correction_coeff": ctx.correction_coeff,
         # 档位与四象限中线由后端下发，避免前端再硬编码一份（两处硬编码必然漂移）
         "thresholds": {
@@ -205,6 +210,34 @@ def evaluation_result(case_id: str, db: Session = Depends(get_db)):
 class RerunRequest(BaseModel):
     node: str
     guidance: str = ""
+
+
+@router.get("/{case_id}/audit")
+def case_audit(case_id: str, limit: int = 200, db: Session = Depends(get_db)):
+    """
+    案件审计轨迹。
+
+    此前审计只写库、无出口：界面上写着「明细见审计轨迹」，用户却无处可查
+    （前端 grep 不到任何 audit 接口）。这个方法把 audit_events 暴露出来，
+    让「谁在什么时候做了什么、影响了什么」真的可见。
+    """
+    case = db.query(Case).filter(Case.id == case_id).first()
+    if not case:
+        raise HTTPException(404, "案件不存在")
+    rows = (db.query(AuditEvent)
+            .filter(AuditEvent.case_id == case_id)
+            .order_by(AuditEvent.created_at.desc())
+            .limit(max(1, min(limit, 500)))
+            .all())
+    return [{
+        "id": r.id,
+        "event_type": r.event_type,
+        "node": r.node,
+        "node_label": NODE_LABELS.get(r.node or "", r.node or ""),
+        "content": r.content,
+        "effect": r.effect,
+        "created_at": r.created_at.isoformat(timespec="seconds") if r.created_at else "",
+    } for r in rows]
 
 
 @router.post("/{case_id}/rerun")

@@ -47,6 +47,16 @@ export interface EvalEvent {
   label: string
   status?: string
   error?: string
+  /** node_step：给人看的一句话（当前在做什么） */
+  text?: string
+  /** node_step / mcp_call：补充说明（缺口清单、规则命中、阶段结果等） */
+  detail?: string
+  /** mcp_call：外部数据源名称（企查查 / 北大法宝） */
+  vendor?: string
+  /** node_finished：本节点耗时 */
+  duration_ms?: number
+  /** node_finished：一句话结论 */
+  summary?: string
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -114,6 +124,8 @@ export const api = {
       body: JSON.stringify({ node, guidance }),
     }),
   mootHistory: (id: string) => request<any>(`/moot/${id}`),
+  /** 审计轨迹：观点注入、节点重跑、自动召回等留痕（此前只落库、无出口） */
+  audit: (id: string) => request<any[]>(`/evaluation/${id}/audit`),
   memo: (id: string) => request<any>(`/report/${id}/memo`),
   snapshot: (id: string) => request<any>(`/report/${id}/snapshot`, { method: 'POST' }),
   versions: (id: string) => request<any[]>(`/report/${id}/versions`),
