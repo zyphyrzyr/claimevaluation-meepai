@@ -48,6 +48,8 @@ export const EVAL_AXES: {
   { id: 'eval-legal', label: '法律可行性', axis: '法律可行性', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
   { id: 'eval-business', label: '业务预期', axis: '业务预期', nodes: ['business'], cols: '' },
   { id: 'eval-synth', label: '决策合成', axis: '决策合成', nodes: ['synthesize'], cols: '' },
+  // 模拟法庭不在自动流程里（手动 opt-in 的压力测试），nodes 空 = 无 chip，选中时走专属面板分支
+  { id: 'eval-moot', label: '模拟法庭（可选）', axis: '模拟法庭', nodes: [], cols: '' },
 ]
 
 const SEV_LABEL: Record<string, string> = { pass: '通过', warning: '警示', block: '拦截' }
@@ -87,6 +89,7 @@ export default function EvalRun({
   onStart,
   onViewResult,
   onRerun,
+  onStartMoot,
 }: {
   caseId: string
   result: any
@@ -101,6 +104,8 @@ export default function EvalRun({
   onStart?: () => void
   onViewResult: () => void
   onRerun: (node: string, guidance: string) => Promise<void>
+  /** 启动模拟法庭压力测试：跳转 /cases/{id}/moot 内嵌模式（SSE 逐轮直播在那一页） */
+  onStartMoot: () => void
 }) {
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
@@ -110,6 +115,9 @@ export default function EvalRun({
     result?.thresholds ?? { go: 78, patch: 62, quadrant_mid: 78, power_mean_p: -0.5 }
   const goalType: string = result?.goal_type ?? '要钱'
   const blocked = Boolean(result?.dimension_results?.red_gate?.result?.blocked)
+  // 模拟法庭状态（与决策仪表盘同口径：correction_coeff 存在且 ≠1 视为已回写）
+  const mootCoeff = result?.correction_coeff
+  const mootDone = mootCoeff != null && mootCoeff !== 1
 
   const doRerun = async (node: string) => {
     setRerunBusy(true)
@@ -391,6 +399,23 @@ export default function EvalRun({
             {syn.missing?.length > 0 && (
               <div className="text-sm text-[var(--warning)] mt-1">未产出维度：{syn.missing.join('、')}</div>
             )}
+            {/* 方案A：模拟法庭状态行 —— 未进行给入口（跳内嵌模式），已回写显示系数 */}
+            <div className="text-sm text-muted mt-2 flex items-center gap-2 flex-wrap">
+              {mootDone ? (
+                <span>模拟法庭已回写 · 修正系数 <b className="text-fg">{mootCoeff}</b></span>
+              ) : (
+                <span>模拟法庭未进行 · 修正系数 1.0（法律可行性暂未修正）</span>
+              )}
+              {!mootDone && result?.scores?.final != null && (
+                <button
+                  type="button"
+                  onClick={onStartMoot}
+                  className="text-xs font-medium text-muted hover:text-fg transition-colors"
+                >
+                  启动压力测试 →
+                </button>
+              )}
+            </div>
             <ConclusionCard
               recommendation={syn.recommendation?.recommendation}
               reason={syn.recommendation?.reason}
@@ -472,7 +497,39 @@ export default function EvalRun({
                 </button>
               )}
             </div>
-            {activeGroup.id === 'eval-business' ? (
+            {activeGroup.id === 'eval-moot' ? (
+              // 模拟法庭（可选）：不在自动流程里的压力测试入口，选中此轴时渲染专属面板
+              <div className="rounded-xl border border-line bg-canvas p-5 space-y-4">
+                <div className="flex items-center gap-2 text-sm">
+                  <span
+                    className={cn(
+                      'w-2 h-2 rounded-full shrink-0',
+                      mootDone ? 'bg-[var(--success)]' : 'bg-[var(--warning)]',
+                    )}
+                  />
+                  {mootDone ? (
+                    <span className="text-fg">
+                      已回写 · 修正系数 <b>{mootCoeff}</b>（法律可行性已按模拟法庭结论修正）
+                    </span>
+                  ) : (
+                    <span className="text-fg">未进行 · 修正系数 1.0（法律可行性暂未修正）</span>
+                  )}
+                </div>
+                <p className="text-sm text-muted">
+                  评估完成后的对抗压力测试：五步庭审对抗 → 法官归纳修正系数 → 回写并重算决策合成。未进行时法律可行性按系数 1.0 计算。
+                </p>
+                {result?.scores?.final != null ? (
+                  <button
+                    onClick={onStartMoot}
+                    className="bg-fg hover:opacity-90 text-canvas rounded-lg px-4 py-2 text-sm font-medium transition-colors"
+                  >
+                    启动模拟法庭压力测试 →
+                  </button>
+                ) : (
+                  <p className="text-xs text-muted">完成主诉评估后可启动（红线拦截同样不可启动）</p>
+                )}
+              </div>
+            ) : activeGroup.id === 'eval-business' ? (
               // 业务预期：总览卡已删（目标见头部 chip、子维度见小标题），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）
               subNodes.length > 1 ? (
                 <AnimatePresence mode="wait">

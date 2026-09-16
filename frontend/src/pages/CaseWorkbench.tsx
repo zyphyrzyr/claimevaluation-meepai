@@ -269,6 +269,7 @@ export default function CaseWorkbench() {
               onStart={startEval}
               onViewResult={() => setActiveTab('result')}
               onRerun={rerunNode}
+              onStartMoot={() => navigate(`/cases/${id}/moot`)}
             />
           )}
           {activeTab === 'result' && <DecisionDashboard />}
