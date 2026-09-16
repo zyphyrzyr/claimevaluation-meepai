@@ -25,7 +25,7 @@ NODE_ORDER = [
 
 NODE_LABELS = {
     "evidence_review": "证据盘点",
-    "red_gate": "硬门禁检查",
+    "red_gate": "红线检查",
     "rights": "权利基础",
     "infringement": "侵权认定",
     "procedure": "诉讼程序",
