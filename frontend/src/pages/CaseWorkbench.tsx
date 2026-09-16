@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api, runEvaluation, type EvalEvent } from '../api'
-import EvalRun from './EvalRun'
+import EvalRun, { EVAL_AXES } from './EvalRun'
 import DecisionDashboard from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
@@ -27,6 +27,14 @@ const STATUS_BADGE: Record<string, { text: string; dot: string }> = {
   blocked: { text: '红线拦截', dot: 'bg-danger' },
 }
 
+/**
+ * 左侧章节导航的纵向定位：两个标签共用同一串类，保证位置完全一致。
+ * mt 决定「自然位置」（未滚动时落在哪）＝ main 的 pt-5(20) + mt(25vh+48) = 25vh+68px，
+ * 与左侧大导航首项（py-5 + text-xl 行高28 + py-5 + mt-25vh = 25vh+68px）恰好重合；
+ * top 决定「粘住后停在哪」，必须等于自然位置，否则滚动到触发点时会跳一段。
+ */
+const NAV_STICKY = 'mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]'
+
 export default function CaseWorkbench() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -45,6 +53,15 @@ export default function CaseWorkbench() {
   const [injectedInfo, setInjectedInfo] = useState('')
   const [result, setResult] = useState<any>(null)
   const [evalError, setEvalError] = useState('')
+  // 评估过程事件流（node_step / mcp_call / 节点起止）：提升到容器层，理由同 states——
+  // 标签切换会让子组件卸载，过程记录不能跟着丢。
+  const [traceEvents, setTraceEvents] = useState<EvalEvent[]>([])
+
+  // 评估详情是否已经有可展示的轴：未评估时 EvalRun 只渲染一张「尚未开始评估」卡片，
+  // 此时不给左侧导航，避免出现点不动的死链接。（与 EvalRun 的空状态判定同源）
+  const evalReady = Boolean(result) || phase !== 'prep'
+  // 当前展示的轴（单块逐步）：点击左侧导航 = 切换 activeAxis，与案件详情的 activeStep 同构
+  const [activeAxis, setActiveAxis] = useState(EVAL_AXES[0].id)
 
   const loadDetail = () => {
     if (!id) return
@@ -58,6 +75,7 @@ export default function CaseWorkbench() {
         setFinished('')
         setInjectedInfo('')
         setEvalError('')
+        setTraceEvents([])
       })
       .catch((e) => setError(String(e)))
   }
@@ -82,6 +100,16 @@ export default function CaseWorkbench() {
   }
 
   const onEvent = (e: EvalEvent) => {
+    // 过程类事件先原样留档，供「评估过程」时间线与节点卡内的步骤列表消费
+    if (
+      e.event === 'node_step' ||
+      e.event === 'mcp_call' ||
+      e.event === 'node_started' ||
+      e.event === 'node_finished' ||
+      e.event === 'recall_done'
+    ) {
+      setTraceEvents((arr) => [...arr, e])
+    }
     if (e.event === 'node_started') {
       setStates((s) => ({ ...s, [e.node]: 'running' }))
     } else if (e.event === 'node_finished') {
@@ -109,6 +137,7 @@ export default function CaseWorkbench() {
     setEvalError('')
     setInjectedInfo('')
     setStates({})
+    setTraceEvents([])
     setPhase('running')
     setActiveTab('run')
     setDetail((d: any) => (d ? { ...d, status: 'evaluating' } : d))
@@ -154,16 +183,34 @@ export default function CaseWorkbench() {
   return (
     <div className="max-w-[67rem] mx-auto xl:grid xl:grid-cols-[9rem_minmax(0,1fr)] xl:gap-8">
       {/* 章节导航列：正好填进左侧边栏与内容区之间原先空着的那段留白。
-          纵向起点与粘性位置同为 calc(25vh+3rem)：3rem 用来抵消 main 的 pt-5 与左栏标题区
-          的高度差，让导航首项与左侧「案件列表」落在同一水平线上。
-          评估详情/评估结果两个标签暂无章节结构，这里保留空列占位，避免切换标签时内容横向位移。 */}
+          两个标签共用这一列，纵向定位也共用 NAV_STICKY，所以位置完全一致。
+
+          粘性与偏移都挂在内层 SectionNav 上（本列只是占位容器，不参与定位）——
+          注意不能挂到这个网格项上：网格项会被拉伸到整行高度，自身没有可粘行程，
+          sticky 会退化成「一开始就贴在网格顶部」，导航直接跳到页面上方。
+          实测（headless Chrome 1440x757，侧边栏首项 y=257）：
+          mt/top 同值时 scroll≥20 后差值为 -20（往上蹿一段）；让 top 等于自然位置后全程差值 0。
+
+          两种驱动模式共用同一个受控组件，只是喂进去的 active / onSelect 不同：
+          · 案件详情：单块逐步表单 → active=activeStep，点击=切换显示哪一块（不滚动）
+          · 评估详情：单块逐步（切轴） → active=activeAxis，点击=切换展示哪一个轴（不滚动）
+          两者都用 STEP_MOTION 做切换动画，交互完全一致；左侧列只负责定位与高亮。
+          评估结果标签暂无章节结构，保留空列占位，避免切换标签时内容横向位移。 */}
       <div className="hidden xl:block">
         {activeTab === 'detail' && (
           <SectionNav
             sections={FORM_SECTIONS}
             active={activeStep}
             onSelect={setActiveStep}
-            className="mt-[calc(25vh+3rem)] sticky top-[calc(25vh+3rem)]"
+            className={NAV_STICKY}
+          />
+        )}
+        {activeTab === 'run' && evalReady && (
+          <SectionNav
+            sections={EVAL_AXES}
+            active={activeAxis}
+            onSelect={setActiveAxis}
+            className={NAV_STICKY}
           />
         )}
       </div>
@@ -232,9 +279,13 @@ export default function CaseWorkbench() {
               phase={phase}
               finished={finished}
               error={evalError}
+              activeAxis={activeAxis}
+              onAxisChange={setActiveAxis}
               onStart={startEval}
               onViewResult={() => setActiveTab('result')}
               onRerun={rerunNode}
+              onStartMoot={() => navigate(`/cases/${id}/moot`)}
+              traceEvents={traceEvents}
             />
           )}
           {activeTab === 'result' && <DecisionDashboard />}

@@ -22,6 +22,12 @@ class CaseContext:
     # 每个案件都被「缺少原告信息」block 掉（评测报告 P0-1）
     parties: List[Dict[str, Any]] = field(default_factory=list)
 
+    # 已上传证据附件的轻量元数据（不入向量库、不参与评分，仅用于红线门禁去误杀）
+    # 每个元素：{file_name, file_type, parse_status}；parse_status 为 "ok"/"failed"/空
+    # 用途：把「系统未能读取」与「证据缺失」区分开——文件已上传但未成功解析时，
+    # 红线规则降级为 warning 而非 block，避免把系统故障记在客户头上（2026-09-16）。
+    evidence_files_meta: List[Dict[str, Any]] = field(default_factory=list)
+
     # 证据盘点产出
     evidence_matrix: List[Dict[str, Any]] = field(default_factory=list)
     gap_list: List[Dict[str, Any]] = field(default_factory=list)

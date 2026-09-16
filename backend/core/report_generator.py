@@ -185,9 +185,9 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     lines.append(f"- **建议**：{rec.get('recommendation', '—')}")
     lines.append("")
 
-    # 硬门禁
+    # 红线检查
     if data["red_flags"]:
-        lines.append("### 硬门禁检查")
+        lines.append("### 红线检查")
         lines.append("")
         for f in data["red_flags"]:
             mark = {"block": "⛔", "warning": "⚠️", "pass": "✅"}.get(f.get("severity"), "·")

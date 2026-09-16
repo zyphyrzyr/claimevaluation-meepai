@@ -108,6 +108,22 @@ def _build_prompt(cause_type: str, case_description: str,
             lines.append(f"- [{cat}-{idx}] {entry['item']}（依据：{entry['basis']}；要件：{entry['element']}）")
     checklist_text = "\n".join(lines)
 
+    # 证据材料文本预算：早期写死 6000 字会静默截断，证据一多排在后面的文件 LLM 根本看不到
+    # → 被误判为缺失。这里放宽到 12000 字，并在超出时显式标注「后续未纳入核验」，
+    # 让盘点结论可解释，而不是悄悄丢证据。
+    EVIDENCE_TEXT_BUDGET = 12000
+    if evidence_texts:
+        if len(evidence_texts) > EVIDENCE_TEXT_BUDGET:
+            evidence_block = (
+                evidence_texts[:EVIDENCE_TEXT_BUDGET]
+                + "\n…（证据材料较长，以下仅展示前 12000 字，其余部分未纳入本次逐项核验，"
+                  "建议拆分上传或补充关键证据的文字说明）"
+            )
+        else:
+            evidence_block = evidence_texts
+    else:
+        evidence_block = "（未上传证据文件，仅凭案情描述判断）"
+
     return f"""请对照标准取证清单，逐项核验本案证据准备情况。
 
 ## 案情描述
@@ -117,7 +133,7 @@ def _build_prompt(cause_type: str, case_description: str,
 {cause_type}
 
 ## 已上传证据材料文本
-{evidence_texts[:6000] if evidence_texts else "（未上传证据文件，仅凭案情描述判断）"}
+{evidence_block}
 
 ## 用户经验与观点
 {user_viewpoints[:1000] if user_viewpoints else "（无）"}

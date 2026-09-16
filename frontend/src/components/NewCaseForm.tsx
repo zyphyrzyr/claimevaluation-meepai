@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { STEP_MOTION } from '../lib/motion'
 import { api, CaseCreatePayload } from '../api'
 import { cn } from '../lib/utils'
 import EvidencePreview, { PreviewTarget } from './EvidencePreview'
@@ -423,7 +424,7 @@ export default function NewCaseForm({
             <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_20rem] gap-6 lg:items-stretch lg:flex-1 lg:min-h-0">
               {/* 左列：案情描述 + 证据材料文本 */}
               <div className="min-w-0 lg:flex lg:flex-col lg:gap-5">
-                <div className="lg:flex-[3] lg:min-h-0 lg:flex lg:flex-col">
+                <div className="lg:flex-1 lg:min-h-0 lg:flex lg:flex-col">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs text-muted">
                       案情描述 <Req />
@@ -479,7 +480,9 @@ export default function NewCaseForm({
                   />
                 </div>
 
-                <div className="mt-5 lg:mt-0 lg:flex-[2] lg:min-h-0 lg:flex lg:flex-col">
+                {/* min-h 是地板值：卡片最矮时（clamp 下限 24rem）两个框也各约 5 行，
+                    不会再被压成两行；案情描述那侧保持 min-h-0，空间紧张时优先让它让位。 */}
+                <div className="mt-5 lg:mt-0 lg:flex-1 lg:min-h-[7rem] lg:flex lg:flex-col">
                   <label className={labelCls}>
                     证据材料文本 <Req />
                   </label>
@@ -707,12 +710,14 @@ export default function NewCaseForm({
           </div>
         )}
         <AnimatePresence mode="wait">
+          {/* 案情与证据块内部靠 h-full + flex 撑满高度（左列两个 textarea 按比例分配、右列卡片列表滚动），
+              这需要本层有「确定高度」，否则子元素的 height:100% 无法解析、整条撑满链塌掉，
+              textarea 退回浏览器默认的两行高。因此仅对该块开启 h-full。
+              切换动画来自 lib/motion.ts 的 STEP_MOTION，与评估详情共用同一套参数。 */}
           <motion.div
             key={current}
-            initial={{ opacity: 0, y: 7 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -7 }}
-            transition={{ duration: 0.22, ease: 'easeOut' }}
+            className={cn(current === 'form-evidence' && 'h-full')}
+            {...STEP_MOTION}
           >
             {renderSection(current)}
           </motion.div>

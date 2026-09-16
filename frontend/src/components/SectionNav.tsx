@@ -2,16 +2,26 @@ import { cn } from '../lib/utils'
 
 /**
  * 章节导航 / 步骤选择器：与左侧边栏同款视觉（text-sm / py-2 / muted → fg，当前项通过 font-medium + text-fg 高亮，无左侧导轨）。
- * 受控组件：当前步骤由父级 state 驱动（不再做 scroll-spy），点击直接切换 activeStep。
+ * 受控组件：`active` 与 `onSelect` 全由父级决定，因此同一个组件能支撑两种完全不同的模式——
+ *
+ *   A. 步骤切换（案件详情：单块逐步表单）
+ *      `active` 由父级 state 直接决定，点击 = 切换右侧显示哪一块，页面不滚动。
+ *   B. 锚点跳转（评估详情：长页整体滚动）
+ *      内容一次全渲染，`active` 来自父级的滚动高亮，点击 = 平滑滚到对应 section。
+ *      这两套驱动逻辑都在调用方（CaseWorkbench），本组件不做任何假设。
  *
  * 两个刻意的设计取舍：
  *
- * 1) 纵向定位交给调用方（className）。整页场景用 `mt-[calc(25vh+3rem)] sticky top-[calc(25vh+3rem)]`
- *    与左侧边栏首项对齐；抽屉里用 `sticky top-6`。
+ * 1) 纵向定位交给调用方（className）。整页场景用
+ *    `mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]`，抽屉里用 `sticky top-6`。
+ *    mt 与 top 是两件事：mt 决定「自然位置」（未滚动时落在哪，要跟左侧边栏首项对齐），
+ *    top 决定「粘住后停在哪」，两者相等才不会在触发瞬间跳位。
+ *    注意 sticky 必须挂在本组件（内层）上，不能挂到外层网格项——网格项被拉伸到整行高度，
+ *    自身没有可粘行程，sticky 会退化成一开始就贴住网格顶部。
  *    同一个组件因此能同时适配「整页」与「抽屉内」两种场景，不必分叉。
  *
- * 2) 不再做滚动高亮——右侧工作区改为限高、内部滚动的单块逐步表单，页面整体不再随内容滚动，
- *    导航天然固定不动；当前项只表示「正在编辑哪一块」，由 active 直接决定。
+ * 2) 本组件自身不做滚动监听。曾经做过 scroll-spy，但对场景 A（单块逐步表单）是无意义的开销；
+ *    现在需要高亮跟随滚动的是场景 B，那套逻辑放在 CaseWorkbench 里，按标签启用。
  */
 export default function SectionNav({
   sections,

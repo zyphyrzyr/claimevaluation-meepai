@@ -333,7 +333,7 @@ export default function DecisionDashboard() {
 
         {/* 硬门禁 */}
         <div className="bg-surface rounded-xl border border-line p-5">
-          <h2 className="text-sm font-medium mb-3">硬门禁（红线检查）</h2>
+          <h2 className="text-sm font-medium mb-3">红线检查</h2>
           <div className="space-y-2">
             {(red_flags ?? []).map((r: any, i: number) => (
               <div key={i} className="flex items-start gap-2 text-sm">
