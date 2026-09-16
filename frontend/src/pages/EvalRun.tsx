@@ -456,6 +456,15 @@ export default function EvalRun({
                 </div>
               )}
               <span className="flex-1 h-px bg-line" />
+              {result?.scores?.final != null && (
+                <button
+                  type="button"
+                  onClick={onViewResult}
+                  className="shrink-0 text-xs font-medium text-muted hover:text-fg transition-colors"
+                >
+                  查看决策仪表盘 →
+                </button>
+              )}
             </div>
             {activeGroup.nodes.length > 1 ? (
               // 多节点轴：一次只显示当前维度一张卡（占满全宽），切换动画与切轴一致（复用 STEP_MOTION）
@@ -505,15 +514,6 @@ export default function EvalRun({
           </section>
         </motion.div>
       </AnimatePresence>
-
-      {result?.scores?.final != null && (
-        <button
-          onClick={onViewResult}
-          className="mt-6 w-full bg-fg hover:opacity-90 text-canvas py-3 rounded-lg text-sm font-medium transition-colors"
-        >
-          查看决策仪表盘 →
-        </button>
-      )}
     </>
   )
 }
