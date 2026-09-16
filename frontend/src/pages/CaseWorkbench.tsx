@@ -154,18 +154,25 @@ export default function CaseWorkbench() {
   return (
     <div className="max-w-[67rem] mx-auto xl:grid xl:grid-cols-[9rem_minmax(0,1fr)] xl:gap-8">
       {/* 章节导航列：正好填进左侧边栏与内容区之间原先空着的那段留白。
-          粘性必须挂在这个网格项上，而不是内层 SectionNav：sticky 元素只能在「包含块」内移动，
-          挂在内层时包含块就是这个只有导航高度的包装层，行程为零 → 页面一滚导航就跟着走。
-          挂在外层后包含块是整行（与右栏同高），行程充足，全程钉住。
-          top 用 calc(25vh+3rem) 与左侧边栏首项对齐；同时去掉原先内层那个同值的 mt——
-          mt 与 top 同值会让元素自然位置正好卡在阈值上，粘性迟迟不生效。
+          粘性与偏移都挂在内层 SectionNav 上（本列只是占位容器，不参与定位）——
+          注意不能挂到这个网格项上：网格项会被拉伸到整行高度，自身没有可粘行程，
+          sticky 会退化成「一开始就贴在网格顶部」，导航直接跳到页面上方。
+          mt 与 top 是两个不同的量，必须分开算：
+          · mt = calc(25vh+3rem) —— 让导航的「自然位置」落在与左侧边栏首项同高的地方。
+            内容区顶部有 pt-5(20px)，所以自然位置 = 20px + 25vh + 48px = calc(25vh+4.25rem)，
+            实测左侧边栏首项 y=182（25vh+68px@900 视口），两者正好重合。
+          · top = calc(25vh+4.25rem) —— 粘住后停住的位置，必须等于自然位置，
+            否则滚动到触发点时会瞬间跳一段（同值即零位移）。
+          行程校验：导航列高 562 − 偏移 162 − 导航高 156 = 244px ≥ 页面最大滚动量 219px，
+          因此任意滚动位置都钉在 y=182 不动。
           评估详情/评估结果两个标签暂无章节结构，这里保留空列占位，避免切换标签时内容横向位移。 */}
-      <div className="hidden xl:block sticky top-[calc(25vh+3rem)]">
+      <div className="hidden xl:block">
         {activeTab === 'detail' && (
           <SectionNav
             sections={FORM_SECTIONS}
             active={activeStep}
             onSelect={setActiveStep}
+            className="mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]"
           />
         )}
       </div>
