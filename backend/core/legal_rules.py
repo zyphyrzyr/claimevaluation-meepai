@@ -25,6 +25,36 @@ EVIDENCE_CATEGORY_TO_CHECK = {
     "has_damage_proof": "损害赔偿证据",
 }
 
+# 文件名关键词 → 证据类别（仅用于在红线门禁中判断「该类证据是否曾被上传」）。
+# 与 EVIDENCE_CATEGORY_TO_CHECK 的语义对齐：rights=权利基础 / infringement=侵权认定 / damage=损害。
+# 命中后只在「文件已上传但系统未能成功解析」时起作用——把解析失败从「证据缺失」里剥出来。
+PROOF_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "rights": ["注册", "商标证", "登记证书", "权属", "许可合同", "权利", "商标"],
+    "infringement": ["侵权", "截图", "照片", "实物", "公证", "购买", "订单", "页面", "封存"],
+    "damage": ["销量", "获利", "赔偿", "损失", "许可费", "营业额"],
+}
+
+
+def infer_uploaded_proof_categories(files_meta: Iterable[Dict[str, Any]]) -> Dict[str, bool]:
+    """从已上传证据附件推断「哪些类别的证据曾被上传、但系统未能成功解析」。
+
+    返回 {rights, infringement, damage}：某类为 True 表示该类别下存在至少一个
+    文件名命中关键词、且 parse_status != "ok" 的文件。parse 成功的文件不计入——
+    成功读取后证据是否充分由 evidence_matrix 说了算，这里不替它背书。
+
+    目的：红线门禁据此把「已上传但读不出」的证据从 block 降级为 warning，
+    避免把系统无法读取的故障记成客户证据缺失（2026-09-16 栖木家居案误杀根因）。
+    """
+    result = {"rights": False, "infringement": False, "damage": False}
+    for f in files_meta or []:
+        if (f.get("parse_status") or "") == "ok":
+            continue
+        name = (f.get("file_name") or "").lower()
+        for cat, kws in PROOF_CATEGORY_KEYWORDS.items():
+            if any(kw in name for kw in kws):
+                result[cat] = True
+    return result
+
 
 def build_evidence_checklist(evidence_matrix: Iterable[Dict[str, Any]]) -> Dict[str, bool]:
     """
@@ -172,6 +202,15 @@ class RuleEngine:
         # 检查是否有权利证明
         has_rights_proof = evidence_checklist.get("has_rights_proof", False)
         if not has_rights_proof:
+            if case_facts.get("evidence_upload", {}).get("rights"):
+                return RuleResult(
+                    rule_code="subject_qualification",
+                    rule_name="主体资格检查",
+                    severity="warning",
+                    result="权利证明已上传但系统未能读取",
+                    reason="已上传权利基础证明文件（如商标注册证），但系统未能完整解析其文本，"
+                           "暂无法核实权利有效性；建议确认文件或补充文本后重跑"
+                )
             return RuleResult(
                 rule_code="subject_qualification",
                 rule_name="主体资格检查",
@@ -229,6 +268,17 @@ class RuleEngine:
         has_rights_proof = evidence_checklist.get("has_rights_proof", False)
 
         if not has_rights_proof:
+            # 已上传权利证明文件但系统未能读取（如图片证据缺 OCR 引擎）→ 是系统故障，
+            # 不该判客户证据缺失，降级为 warning 并提示补正，不阻断评估。
+            if case_facts.get("evidence_upload", {}).get("rights"):
+                return RuleResult(
+                    rule_code="missing_rights_proof",
+                    rule_name="权利证明缺失检查",
+                    severity="warning",
+                    result="权利证明已上传但系统未能读取",
+                    reason="已上传权利基础证明文件（如商标注册证），但系统未能完整解析其文本，"
+                           "无法核实权利有效性；建议确认文件或手动补充文本后重跑。当前按未验证处理，不阻断评估。",
+                )
             return RuleResult(
                 rule_code="missing_rights_proof",
                 rule_name="权利证明缺失检查",
@@ -254,6 +304,17 @@ class RuleEngine:
         has_infringement_proof = evidence_checklist.get("has_infringement_proof", False)
 
         if not has_infringement_proof:
+            # 已上传侵权证据但系统未能读取（如截图/实物照片/公证书图片缺 OCR）→ 系统故障，
+            # 降级为 warning 并提示补正，不阻断评估。
+            if case_facts.get("evidence_upload", {}).get("infringement"):
+                return RuleResult(
+                    rule_code="missing_infringement_proof",
+                    rule_name="侵权固定证据缺失检查",
+                    severity="warning",
+                    result="侵权证据已上传但系统未能读取",
+                    reason="已上传侵权固定证据（如侵权页面截图、实物照片、公证文书），但系统未能完整解析其文本，"
+                           "无法核实侵权行为；建议确认文件或手动补充文本后重跑。当前按未验证处理，不阻断评估。",
+                )
             return RuleResult(
                 rule_code="missing_infringement_proof",
                 rule_name="侵权固定证据缺失检查",

@@ -15,7 +15,7 @@ from . import evaluate_nodes, scoring
 from .case_context import CaseContext
 from .config import get_runtime_settings
 from .evidence_review import review_evidence
-from .legal_rules import run_rule_engine, build_evidence_checklist
+from .legal_rules import run_rule_engine, build_evidence_checklist, infer_uploaded_proof_categories
 
 NODE_ORDER = [
     "evidence_review", "red_gate",
@@ -136,11 +136,14 @@ class Orchestrator:
         # 真实模式的字段缺失问题因此被完全掩盖（评测报告 P0-1）。
         # 规则引擎读的是 parties / evidence_checklist，而不是 v4 的 evidence_matrix，
         # 两者之间必须经 build_evidence_checklist 映射。
+        # evidence_upload：把「已上传但系统未能读取」的证据从「证据缺失」里剥出来，
+        # 避免解析失败（如缺 OCR 引擎）被误判为客户证据缺失而 block（2026-09-16）。
         case_facts = {
             "timeline": ctx.defendant_info.get("timeline", []),
             "case_description": ctx.case_description,
             "parties": ctx.parties,
             "evidence_checklist": build_evidence_checklist(ctx.evidence_matrix),
+            "evidence_upload": infer_uploaded_proof_categories(ctx.evidence_files_meta),
         }
         hits = run_rule_engine(case_facts)
         ctx.red_flags = hits

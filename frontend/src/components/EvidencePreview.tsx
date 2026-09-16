@@ -91,11 +91,26 @@ export default function EvidencePreview({
       )
     } else {
       // none：旧版本文件无原件，回退解析文本
+      const unreadable = meta.parse_status !== 'ok'
       body = (
         <div className="p-6 overflow-auto h-full">
-          <div className="text-xs text-muted mb-2">
-            该文件未保留原始版式（可能上传于旧版本），仅展示已解析文本：
-          </div>
+          {unreadable ? (
+            <div className="rounded-md border border-line bg-canvas p-4 mb-3">
+              <div className="text-sm text-[var(--warning)] font-medium mb-1">
+                系统暂未能读取该文件
+              </div>
+              <p className="text-xs text-muted leading-relaxed">
+                文件已上传，但系统未能解析出其文本内容（图片类证据通常需 OCR 识别、
+                PDF 扫描件可能未识别；旧版本上传的文件可能未保留原件）。
+                这属于系统识别局限，<b className="text-fg">不代表证据本身缺失</b>——
+                可在「案件详情」中手动补充证据文本，或重新上传清晰文件后重跑评估。
+              </p>
+            </div>
+          ) : (
+            <div className="text-xs text-muted mb-2">
+              该文件未保留原始版式（可能上传于旧版本），仅展示已解析文本：
+            </div>
+          )}
           <pre className="text-sm text-fg whitespace-pre-wrap break-words leading-relaxed">
             {meta.parsed_text || '（无解析文本）'}
           </pre>
@@ -104,8 +119,15 @@ export default function EvidencePreview({
     }
     footer = meta ? (
       <div className="flex items-center justify-between gap-3 border-t border-line bg-canvas px-6 py-4 shrink-0">
-        <span className="text-xs text-muted truncate">
-          {meta.parse_status === 'ok' ? '已解析' : '解析失败'} ·{' '}
+        <span
+          className="text-xs text-muted truncate"
+          title={
+            meta.parse_status === 'ok'
+              ? '已成功解析文本，可用于证据盘点与个案召回'
+              : '文件已上传，但系统未能读取其内容（图片类证据需 OCR 识别；PDF 可能未识别）。可在案件详情中手动补充文本或重跑评估——系统未读取不等于证据缺失'
+          }
+        >
+          {meta.parse_status === 'ok' ? '已解析' : '系统暂未能读取'} ·{' '}
           {meta.size != null ? `${(meta.size / 1024).toFixed(1)} KB` : '原件不可用'}
         </span>
         {meta.has_blob && (

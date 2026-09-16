@@ -236,7 +236,40 @@ export default function EvalRun({
         )
       case 'red_gate':
         if (r.blocked) {
-          return <div className="verdict-banner tier-block">命中程序性红线，流程终止（具体红线见下方明细）</div>
+          // 命中红线时除横幅外，必须把「具体红线」逐条列清（含 result + reason），
+          // 否则用户只看到"流程终止"却不知为何——尤其要把"已上传但系统未能读取"
+          // 这类系统侧原因与真实证据缺失区分开。
+          const blockers = (r.hits ?? []).filter((h: any) => h.severity === 'block')
+          const unread = (r.hits ?? []).filter(
+            (h: any) => h.severity === 'warning' && /已上传但系统未能读取/.test(h.result || ''),
+          )
+          return (
+            <div className="space-y-2">
+              <div className="verdict-banner tier-block">命中程序性红线，流程终止</div>
+              <ul className="space-y-1.5">
+                {blockers.map((h: any) => (
+                  <li key={h.rule_code} className="text-sm flex gap-2">
+                    <span className={`sev-${h.severity} font-medium shrink-0 w-10`}>{SEV_LABEL[h.severity] ?? h.severity}</span>
+                    <span className="text-muted"><b className="text-fg">{h.rule_name}</b>：{h.result}。{h.reason}</span>
+                  </li>
+                ))}
+              </ul>
+              {unread.length > 0 && (
+                <div className="rounded-md border border-line bg-canvas p-3">
+                  <div className="text-xs text-[var(--warning)] font-medium mb-1">
+                    另：以下证据已上传但系统未能读取（属识别局限，非证据缺失）
+                  </div>
+                  <ul className="space-y-1">
+                    {unread.map((h: any) => (
+                      <li key={h.rule_code} className="text-xs text-muted">
+                        · {h.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )
         }
         return (
           <ul className="space-y-1.5">

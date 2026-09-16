@@ -25,6 +25,11 @@ router = APIRouter()
 def _load_ctx(case: Case) -> CaseContext:
     ctx = CaseContext.from_dict(case.context_json or {})
     ctx.case_id = case.id
+    # 把已上传证据附件的元数据带进上下文，供红线门禁区分「未上传」与「已上传但系统未能读取」
+    ctx.evidence_files_meta = [
+        {"file_name": f.file_name, "file_type": f.file_type, "parse_status": f.parse_status}
+        for f in (case.evidence_files or [])
+    ]
     return ctx
 
 
