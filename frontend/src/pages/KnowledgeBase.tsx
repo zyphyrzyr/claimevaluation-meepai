@@ -5,7 +5,7 @@ import { useAuth } from '../auth/AuthProvider'
 import { fmtDateTime, relativeTime } from '../lib/time'
 
 /**
- * 全局经验库（§7 RAG 双集合分库之一）
+ * 个人知识库（§7 RAG 双集合分库之一；界面上原叫「全局经验库」）
  * 来源 B 手动录入 / C 观点沉淀 / D 独立建库；案件材料库在各案件评估准备页自动入库
  *
  * 版式：列表是主体，检索是列表的控制器，新增收进抽屉。
@@ -36,7 +36,6 @@ const SOURCE_LABEL: Record<string, string> = {
 export default function KnowledgeBase() {
   const auth = useAuth()
   const [entries, setEntries] = useState<KnowledgeEntryItem[]>([])
-  const [info, setInfo] = useState<{ backend: string; embedding: string } | null>(null)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -63,7 +62,6 @@ export default function KnowledgeBase() {
   useEffect(() => {
     setHits(null)
     load()
-    knowledgeApi.info().then(setInfo).catch(() => {})
   }, [ownerKey])
 
   /**
@@ -97,7 +95,7 @@ export default function KnowledgeBase() {
       setTitle('')
       setContent('')
       setAddOpen(false)
-      setNotice('已入全局经验库，评估启动时会参与自动召回。')
+      setNotice('已入个人知识库，评估启动时会参与自动召回。')
       auth.refresh()
       load()
     } catch (e) {
@@ -108,7 +106,7 @@ export default function KnowledgeBase() {
   }
 
   const remove = async (id: string, name: string) => {
-    if (!confirm(`删除经验库条目「${name}」？向量将同步清除。`)) return
+    if (!confirm(`删除知识库条目「${name}」？向量将同步清除。`)) return
     try {
       await knowledgeApi.deleteEntry(id)
       // 删掉的条目可能正在命中结果里，一起清掉免得留下点不动的幽灵行
@@ -145,17 +143,10 @@ export default function KnowledgeBase() {
   return (
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl font-medium">全局经验库</h1>
-          <p className="text-sm text-muted mt-1">
-            跨案件沉淀的办案经验与类案数据；评估启动时自动召回，模拟法庭与追问顾问共用同一召回通道
-            {info && (
-              <span className="ml-2 text-xs text-muted">
-                向量后端 {info.backend} · {info.embedding}
-              </span>
-            )}
-          </p>
-        </div>
+        {/* 标题只留一行：下面的副标题原本在讲「跨案件沉淀…共用同一召回通道」，
+            末尾还挂着向量后端与 embedding 型号——那是给开发看的实现细节，
+            摆在客户面前既占地方又漏了技术栈，整段撤掉。 */}
+        <h1 className="text-xl font-medium">个人知识库</h1>
         <button
           onClick={() => { setAddOpen(true); setNotice('') }}
           className="shrink-0 bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
@@ -319,7 +310,7 @@ export default function KnowledgeBase() {
               disabled={saving || !title.trim() || !content.trim()}
               className="bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-40 transition-colors"
             >
-              {saving ? '入库中…' : '入全局经验库'}
+              {saving ? '入库中…' : '入个人知识库'}
             </button>
             <button onClick={() => setAddOpen(false)} className="text-sm text-muted hover:text-fg px-3 py-2">
               取消

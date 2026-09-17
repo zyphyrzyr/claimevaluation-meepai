@@ -18,7 +18,7 @@ import { humanError } from './api'
 // 摆给客户看只会暴露成本档位与密钥掩码。它与 /settings 路由都还在，知道地址就能进。
 const navItems = [
   { to: '/workbench', label: '案件列表' },
-  { to: '/knowledge', label: '经验库' },
+  { to: '/knowledge', label: '个人知识库' },
 ]
 
 export default function App() {
