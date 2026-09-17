@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { api, authApi, humanError, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
-import EvalRun, { EVAL_AXES, NODE_ORDER } from './EvalRun'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { api, authApi, mootApi, humanError, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
+import EvalRun, { EVAL_AXES, NODE_ORDER, type MootState } from './EvalRun'
 import DecisionDashboard, { RESULT_SECTIONS } from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
@@ -39,9 +39,20 @@ const STATUS_BADGE: Record<string, { text: string; dot: string }> = {
  */
 const NAV_STICKY = 'mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]'
 
+const EMPTY_MOOT: MootState = {
+  mode: 'embedded',
+  rounds: [],
+  running: false,
+  stopped: false,
+  judge: null,
+  scoresUpdated: null,
+  error: '',
+}
+
 export default function CaseWorkbench() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const auth = useAuth()
   const [claiming, setClaiming] = useState(false)
 
@@ -65,9 +76,14 @@ export default function CaseWorkbench() {
   // 标签切换会让子组件卸载，过程记录不能跟着丢。
   const [traceEvents, setTraceEvents] = useState<EvalEvent[]>([])
 
+  // 模拟法庭运行时状态：同样必须在容器层。评估详情是「单块逐步」渲染，
+  // 切一次轴就卸载一次 EvalRun——庭审跑到一半切去看法律可行性，回来就空了。
+  const [moot, setMoot] = useState<MootState>(EMPTY_MOOT)
+
   // 评估详情是否已经有可展示的轴：未评估时 EvalRun 只渲染一张「尚未开始评估」卡片，
   // 此时不给左侧导航，避免出现点不动的死链接。（与 EvalRun 的空状态判定同源）
-  const evalReady = Boolean(result) || phase !== 'prep'
+  // 庭审已开过场（或正在开）：就算评估没跑过也要给导航，否则模拟法庭轴成了死链接
+  const evalReady = Boolean(result) || phase !== 'prep' || moot.running || moot.rounds.length > 0
   // 当前展示的轴（单块逐步）：点击左侧导航 = 切换 activeAxis，与案件详情的 activeStep 同构
   const [activeAxis, setActiveAxis] = useState(EVAL_AXES[0].id)
   // 评估结果当前展示的块（可视化结果 / 详细结果），与上面两个同为「单块逐步」模型
@@ -108,6 +124,29 @@ export default function CaseWorkbench() {
     setDefaultChosen(true)
     if (id && EVALUATED_STATUSES.includes(detail.status)) {
       api.result(id).then(setResult).catch(() => {})
+      // 已跑过的庭审：把历史记录填回场上，否则进来只看到「未进行」但系数已经回写过
+      api
+        .mootHistory(id)
+        .then((h) => {
+          if (!h?.transcript?.length) return
+          setMoot((m) =>
+            m.rounds.length
+              ? m
+              : {
+                  ...m,
+                  rounds: h.transcript,
+                  judge: {
+                    correction_coefficient: h.correction_coeff,
+                    defense_strength: 0,
+                    judge_summary: '',
+                    weak_points: [],
+                    focus_points: [],
+                    from_history: true,
+                  },
+                },
+          )
+        })
+        .catch(() => {})
     }
     // 刷新页面时若后端评估仍在跑/已暂停（case.status 仍是 evaluating），
     // 重新接上 SSE 流并同步 phase，否则会丢失进度与「暂停/恢复」控制权。
@@ -238,6 +277,72 @@ export default function CaseWorkbench() {
     abortRef.current?.abort()
   }
 
+  // ---- 模拟法庭：就地开庭 / 中止 -------------------------------------------
+  //
+  // 早期版本是 navigate 到 /cases/:id/moot 独立页，那一页还会把整个 <html>
+  // 刷成暗色剧场，观感像跳去了另一个站点。现在庭审就在「评估详情 - 模拟法庭」
+  // 这一轴里跑，配色沿用浅色 token，状态住在容器层。
+
+  /** 开庭。mode: embedded = 评估后压力测试（系数回写）；standalone = 纯演练不回写 */
+  const startMoot = async (mode: 'embedded' | 'standalone' = 'embedded') => {
+    if (!id) return
+    setMoot({ ...EMPTY_MOOT, mode, running: true })
+    setActiveTab('run')
+    setActiveAxis('eval-moot')
+
+    const onEvent = (ev: any) => {
+      if (ev.event === 'round') {
+        setMoot((m) => ({ ...m, rounds: [...m.rounds, ev] }))
+      } else if (ev.event === 'moot_finished') {
+        setMoot((m) => ({ ...m, judge: ev }))
+      } else if (ev.event === 'scores_updated') {
+        setMoot((m) => ({ ...m, scoresUpdated: ev }))
+        // 内嵌模式回写了系数与决策合成：刷新结果页与案件状态，别让用户看到旧分
+        refreshResult()
+        refreshDetailOnly()
+      } else if (ev.event === 'moot_stopped') {
+        // 中止：已说轮次留在场上，但不回写、不落库
+        setMoot((m) => ({ ...m, running: false, stopped: true }))
+        refreshResult()
+      } else if (ev.event === 'moot_error') {
+        setMoot((m) => ({ ...m, error: ev.error ?? '庭审失败' }))
+      }
+    }
+
+    try {
+      if (mode === 'standalone') {
+        const d = detail ?? (await api.caseDetail(id))
+        await mootApi.runStandalone(
+          {
+            case_description: d.case_description ?? '',
+            cause_type: d.cause_type ?? '商标侵权',
+            viewpoints: d.context?.user_viewpoints ?? [],
+            case_id: id,
+          },
+          onEvent,
+        )
+      } else {
+        await mootApi.runEmbedded(id, onEvent)
+      }
+    } catch (e) {
+      setMoot((m) => ({ ...m, error: humanError(e) || String(e) }))
+    } finally {
+      setMoot((m) => ({ ...m, running: false }))
+    }
+  }
+
+  /**
+   * 中止庭审。
+   *
+   * 后端只在「取下一轮之前」检查停止标志——真实模式下一轮就是一次十秒级的
+   * LLM 调用，调用中途打断不了。所以这里按下后不立刻清场，等 moot_stopped
+   * 回来再收尾；对已经跑完的庭审调用是无害空操作（返回 stopped=false）。
+   */
+  const stopMoot = () => {
+    if (!id) return
+    mootApi.stop(id).catch(() => {})
+  }
+
   const rerunNode = async (node: string, guidance: string) => {
     if (!id) return
     try {
@@ -262,6 +367,53 @@ export default function CaseWorkbench() {
   // 「保存并启动评估」：落库成功后直接进入评估运行（方案 B：无准备页，后台自动召回材料）
   const onDraftStarted = () => {
     startEval()
+  }
+
+  // ---- URL 直达：?tab=run&axis=eval-moot[&moot=embedded|standalone] ----
+  //
+  // 评估结果页的「启动模拟法庭」、以及新建案件后「仅开始模拟法庭」都靠它落位。
+  // 用 searchParams 而不是跳转独立路由：同一个 /cases/:id 路由不会重挂载组件，
+  // 已经跑起来的评估进度与庭审现场都不会因为这次跳转丢掉。
+
+  // tab / axis 只负责「落在哪一屏」；每次 URL 变化都跟一次，允许外部反复指定
+  useEffect(() => {
+    const tab = searchParams.get('tab')
+    const axis = searchParams.get('axis')
+    if (tab === 'run' || tab === 'result' || tab === 'detail') setActiveTab(tab)
+    if (axis === 'eval-moot') setActiveAxis('eval-moot')
+  }, [searchParams])
+
+  // moot=xxx 负责「顺带开庭」。用 ref 记已经处理过的参数值，避免 StrictMode
+  // 下重复触发把同一场庭审开两遍。用完立刻把它从地址里抹掉（replace，不留历史），
+  // 否则用户赛后刷新页面会莫名其妙又开一场——参数是一次性指令，不是持久状态。
+  const mootParam = searchParams.get('moot')
+  const mootAutoRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!id || !detail) return
+    if (mootParam !== 'embedded' && mootParam !== 'standalone') return
+    // 「已处理过」记的是**整条 query**而不是 moot 的值：同一次会话里
+    // 「结果页 → 启动模拟法庭」可以点第二次（第二次点开的仍然是 moot=embedded），
+    // 按值去重会把第二次静默吞掉。消费后参数会被抹掉，所以两次的 query 必然不同。
+    const key = searchParams.toString()
+    if (mootAutoRef.current === key) return
+    mootAutoRef.current = key
+    startMoot(mootParam)
+    const rest = new URLSearchParams(searchParams)
+    rest.delete('moot')
+    navigate(`/cases/${id}?${rest}`, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mootParam, id, detail])
+
+  /** 案件详情「仅开始模拟法庭」：就地开庭；若案件是刚新建的则换到它的地址再开 */
+  const onDetailStartMoot = (cid: string) => {
+    if (!cid) return
+    if (cid !== id) {
+      navigate(`/cases/${cid}?tab=run&axis=eval-moot&moot=standalone`)
+      return
+    }
+    setActiveTab('run')
+    setActiveAxis('eval-moot')
+    startMoot('standalone')
   }
 
   if (error) return <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>
@@ -404,7 +556,7 @@ export default function CaseWorkbench() {
               onActiveStepChange={setActiveStep}
               onSaved={onDraftSaved}
               onStarted={onDraftStarted}
-              onStartMoot={(cid) => navigate(`/cases/${cid}/moot?mode=standalone`)}
+              onStartMoot={onDetailStartMoot}
               readOnly={isPublic}
             />
           )}
@@ -433,7 +585,9 @@ export default function CaseWorkbench() {
               onStart={startEval}
               onViewResult={() => setActiveTab('result')}
               onRerun={rerunNode}
-              onStartMoot={() => navigate(`/cases/${id}/moot`)}
+              onStartMoot={() => startMoot('embedded')}
+              onStopMoot={stopMoot}
+              moot={moot}
               traceEvents={traceEvents}
               // finished 只在 SSE 事件里填过，刷新页面后为空；
               // 因此再兜一层后端结果状态，保证「终止后刷新」仍能说清为什么没有结果。

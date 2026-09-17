@@ -8,7 +8,11 @@ import { Badge } from '../components/ui/Badge'
 import { ScoreBadge } from '../components/ui/ScoreBadge'
 import { StepperNode } from '../components/ui/StepperNode'
 import { EvalTrace } from '../components/EvalTrace'
-import type { EvalEvent } from '../api'
+import MootPanel, {
+  type MootJudgeInfo,
+  type MootScoresUpdated,
+} from '../components/MootPanel'
+import type { EvalEvent, MootRound } from '../api'
 import { Basis, BasisList, sevPill, SEV_LABEL, signalMeaning } from '../components/Basis'
 
 // 流程顺序与后端 NODE_ORDER 对齐（orchestrator.py）
@@ -40,6 +44,24 @@ const rerunNodeOf = (node: string) => RERUN_AS[node] ?? node
 //   · CaseWorkbench：渲染左侧章节导航（点击 = 切换当前轴，不再整页滚动）
 // label 是导航用短名（去掉「轴」字，9rem 的窄列更清爽）；
 // axis 是单步内分区标题，已与 label 统一去掉「轴」字。
+/**
+ * 模拟法庭的运行时状态。
+ *
+ * 由父级（CaseWorkbench）持有而不是住在本组件里：本组件是「单块逐步」渲染，
+ * 切一次轴就卸载一次，庭审跑到一半切走再切回来会整场清零。
+ */
+export interface MootState {
+  /** 内嵌 = 评估后压力测试（系数回写）；独立演练 = 纯演练不回写 */
+  mode: 'embedded' | 'standalone'
+  rounds: MootRound[]
+  running: boolean
+  /** 本次被用户中止：保留已说轮次，但不回写、不落库 */
+  stopped: boolean
+  judge: MootJudgeInfo | null
+  scoresUpdated: MootScoresUpdated | null
+  error: string
+}
+
 export const EVAL_AXES: {
   id: string
   label: string
@@ -130,6 +152,8 @@ export default function EvalRun({
   onViewResult,
   onRerun,
   onStartMoot,
+  onStopMoot,
+  moot,
   traceEvents,
   voided,
 }: {
@@ -146,8 +170,12 @@ export default function EvalRun({
   onStart?: () => void
   onViewResult: () => void
   onRerun: (node: string, guidance: string) => Promise<void>
-  /** 启动模拟法庭：跳转 /cases/{id}/moot 内嵌模式（SSE 逐轮直播在那一页） */
+  /** 启动模拟法庭：就地在本轴开庭，不再跳转独立页面 */
   onStartMoot: () => void
+  /** 中止进行中的庭审：当前这轮说完后停止，不回写系数 */
+  onStopMoot: () => void
+  /** 模拟法庭运行时状态（父级持有） */
+  moot: MootState
   /** 评估过程事件流（node_step / mcp_call / 节点起止），由父级持有，避免切标签时丢失 */
   traceEvents: EvalEvent[]
   /** 本次评估被「终止」作废：已完成的节点结果已全部清空，需提示用户可重新评估 */
@@ -177,7 +205,9 @@ export default function EvalRun({
   }
 
   // 尚未开始评估（本会话未运行且后端也无历史结果）
-  if (!result && phase === 'prep') {
+  // 例外：模拟法庭轴。独立演练不要求先跑评估，未评估的案件也要能就地开庭——
+  // 若这里一并挡掉，「仅开始模拟法庭」这条入口对草稿案件就是死的。
+  if (!result && phase === 'prep' && activeAxis !== 'eval-moot') {
     return (
       <div className="bg-surface border border-line rounded-xl p-8 text-center">
         <p className="text-muted text-sm mb-4">
@@ -825,37 +855,22 @@ export default function EvalRun({
               )}
             </div>
             {activeGroup.id === 'eval-moot' ? (
-              // 模拟法庭（可选）：不在自动流程里的庭审对抗入口，选中此轴时渲染专属面板
-              <div className="rounded-xl border border-line bg-canvas p-5 space-y-4">
-                <div className="flex items-center gap-2 text-sm">
-                  <span
-                    className={cn(
-                      'w-2 h-2 rounded-full shrink-0',
-                      mootDone ? 'bg-[var(--success)]' : 'bg-[var(--warning)]',
-                    )}
-                  />
-                  {mootDone ? (
-                    <span className="text-fg">
-                      已回写 · 修正系数 <b>{mootCoeff}</b>（法律可行性已按模拟法庭结论修正）
-                    </span>
-                  ) : (
-                    <span className="text-fg">未进行 · 修正系数 1.0（法律可行性暂未修正）</span>
-                  )}
-                </div>
-                <p className="text-sm text-muted">
-                  评估完成后的庭审对抗演练：五步庭审对抗 → 法官归纳修正系数 → 回写并重算决策合成。未进行时法律可行性按系数 1.0 计算。
-                </p>
-                {result?.scores?.final != null ? (
-                  <button
-                    onClick={onStartMoot}
-                    className="bg-fg hover:opacity-90 text-canvas rounded-lg px-4 py-2 text-sm font-medium transition-colors"
-                  >
-                    启动模拟法庭 →
-                  </button>
-                ) : (
-                  <p className="text-xs text-muted">完成主诉评估后可启动（红线拦截同样不可启动）</p>
-                )}
-              </div>
+              // 模拟法庭（可选）：就地开庭，状态全在父级（切轴不丢场）
+              <MootPanel
+                mode={moot.mode}
+                rounds={moot.rounds}
+                running={moot.running}
+                stopped={moot.stopped}
+                judge={moot.judge}
+                scoresUpdated={moot.scoresUpdated}
+                error={moot.error}
+                savedCoeff={mootCoeff}
+                canStart={moot.mode === 'standalone' || result?.scores?.final != null}
+                canStartHint="完成主诉评估后可启动（红线拦截同样不可启动）"
+                onStart={onStartMoot}
+                onStop={onStopMoot}
+                caseId={caseId}
+              />
             ) : activeGroup.id === 'eval-business' ? (
               // 业务预期：总览卡已删（目标见头部 chip、子维度见小标题），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）
               subNodes.length > 1 ? (

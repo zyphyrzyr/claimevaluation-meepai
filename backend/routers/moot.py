@@ -1,9 +1,11 @@
 """
 模拟法庭路由（P2 双模式）
 - POST /api/moot/{case_id}/run   内嵌模式：评估完成后压力测试，系数回写 + 决策合成重算
+- POST /api/moot/{case_id}/stop  中止进行中的庭审（内嵌 / 挂案独立演练）
 - POST /api/moot/standalone      独立模式：手动组料纯演练，不回写评分
 - GET  /api/moot/{case_id}       查询已保存的庭审记录
 SSE 事件流：round（逐轮发言）→ moot_finished（法官归纳 + 系数）
+          中止时以 moot_stopped 结束，不回写系数、不落库
 """
 
 import json
@@ -30,6 +32,52 @@ def _load_ctx(case: Case) -> CaseContext:
     ctx = CaseContext.from_dict(case.context_json or {})
     ctx.case_id = case.id
     return ctx
+
+
+# ============================================================
+# 庭审中止标志
+# ============================================================
+# 按「案件」登记停止请求：内嵌模式一定有 case_id；独立演练传了 case_id 时也挂上去。
+# 纯独立演练（不带 case_id）没有可登记的键，因此不支持中止——那种模式下
+# 前端不显示中止按钮。
+_MOOT_STOP: dict = {}
+_MOOT_STOP_LOCK = threading.Lock()
+
+
+def _register_stop(key: str) -> threading.Event:
+    """开跑前登记一个「本次运行的停止按钮」。同案重复开跑会顶掉上一个标志。"""
+    with _MOOT_STOP_LOCK:
+        ev = threading.Event()
+        _MOOT_STOP[key] = ev
+        return ev
+
+
+def _release_stop(key: Optional[str]) -> None:
+    if not key:
+        return
+    with _MOOT_STOP_LOCK:
+        _MOOT_STOP.pop(key, None)
+
+
+def _pump(gen, stop_ev: Optional[threading.Event], on_event, counter: dict) -> bool:
+    """逐轮取事件推给 on_event；stop_ev 置位时以 moot_stopped 收尾。
+
+    返回 True 表示「被中止」。抽成独立函数是因为这段逻辑最难测：真实模式下
+    next(gen) 是一次十秒级的 LLM 调用，而 httpx 的 ASGI 传输**不会增量返回**
+    SSE（整个响应体读完后才交给调用方），所以 TestClient 里根本抓不到
+    「跑到一半」这一刻——只能把循环单独拎出来，喂一个假生成器做确定性断言。
+    """
+    while True:
+        if stop_ev is not None and stop_ev.is_set():
+            on_event({"event": "moot_stopped", "rounds": counter["rounds"]})
+            return True
+        try:
+            event = next(gen)
+        except StopIteration:
+            return False
+        if event.get("event") == "round":
+            counter["rounds"] += 1
+        on_event(event)
 
 
 def _save_rounds(db: Session, case_id: Optional[str], rounds: list, mode: str) -> None:
@@ -71,6 +119,10 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
 
     events: queue.Queue = queue.Queue()
     result_holder: dict = {}
+    stop_key = case.id
+    stop_ev = _register_stop(stop_key)
+    # 用容器而不是闭包变量计数：work() 里要改这个值
+    counter = {"rounds": 0}
 
     def work():
         try:
@@ -78,12 +130,11 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
             if recall["refs"]:
                 events.put({"event": "recall", "refs": recall["refs"]})
             gen = moot_service.run_embedded(ctx, recall_context=recall["context"])
-            while True:
-                try:
-                    event = next(gen)
-                except StopIteration:
-                    break
-                events.put(event)
+            # 中止检查放在「取下一轮」之前：真实模式下 next(gen) 就是一次
+            # LLM 调用（十秒级），调用中途打断不了。能承诺的只有
+            # 「当前这轮说完就停」——前端文案必须照这个口径，别许诺立即停止。
+            if _pump(gen, stop_ev, events.put, counter):
+                return
 
             # 生成器内部已回写 correction_coeff 与 moot_transcript；此处重算合成（纯规则瞬时）
             if ctx.correction_coeff != 1.0 or ctx.moot_transcript:
@@ -110,6 +161,7 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
         except Exception as e:
             events.put({"event": "moot_error", "error": str(e)})
         finally:
+            _release_stop(stop_key)
             events.put(None)
 
     threading.Thread(target=work, daemon=True).start()
@@ -122,6 +174,24 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.post("/{case_id}/stop")
+def stop_moot(case_id: str, case: Case = Depends(case_owned)):
+    """中止进行中的庭审。
+
+    这里只登记一个「停止请求」，真正生效点在下一次取轮次之前（见 run_embedded）：
+    真实模式下一轮就是一次 LLM 调用，中途打断不了，生效时机会落在当前这轮说完之后。
+
+    对没在跑的庭审调用是**无害的空操作**（返回 stopped=false），因为前端很可能因为
+    网络延迟、点了刚刚已经跑完的庭审。
+    """
+    with _MOOT_STOP_LOCK:
+        ev = _MOOT_STOP.get(case_id)
+    if ev is None:
+        return {"stopped": False, "detail": "当前没有进行中的庭审"}
+    ev.set()
+    return {"stopped": True}
 
 
 @router.get("/{case_id}")
@@ -179,6 +249,11 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
     except Exception:
         pass
 
+    # 纯独立演练（无 case_id）没有可登记的键，不支持中止；挂在案件下的演练按案件登记
+    stop_ev = _register_stop(cid) if cid else None
+    counter = {"rounds": 0}
+    final_holder: dict = {}
+
     def work():
         try:
             if recall["refs"]:
@@ -190,21 +265,24 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
                 plaintiff_points=payload.plaintiff_points,
                 recall_context=recall["context"],
             )
-            final = None
-            while True:
-                try:
-                    event = next(gen)
-                except StopIteration:
-                    break
+
+            def emit(event):
+                # moot_finished 里带着完整 transcript，落库要用，所以边推边留一份
                 if event.get("event") == "moot_finished":
-                    final = event
+                    final_holder["event"] = event
                 events.put(event)
+
+            if _pump(gen, stop_ev, emit, counter):
+                return  # 被中止：不落库、不回写
+
             # 庭审记录持久化（case_id 为空 = 纯独立演练，不挂任何案件）
+            final = final_holder.get("event")
             if final:
                 _save_rounds(db, cid, final.get("rounds", []), "standalone")
         except Exception as e:
             events.put({"event": "moot_error", "error": str(e)})
         finally:
+            _release_stop(cid)
             events.put(None)
 
     threading.Thread(target=work, daemon=True).start()

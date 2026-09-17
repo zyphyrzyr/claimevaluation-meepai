@@ -305,6 +305,15 @@ export const mootApi = {
   /** 独立模式：手动组料纯演练，不回写评分 */
   runStandalone: (payload: StandaloneMootPayload, onEvent: (e: any) => void) =>
     ssePost('/moot/standalone', payload, onEvent),
+  /**
+   * 中止进行中的庭审。
+   *
+   * 语义是「作废」：当前这轮说完就停，不回写系数、不落库。对没在跑的庭审
+   * 调用返回 stopped=false（不是错误），所以前端不必判断按钮该不该出现，
+   * 点了也不会炸。
+   */
+  stop: (caseId: string) =>
+    request<{ stopped: boolean; detail?: string }>(`/moot/${caseId}/stop`, { method: 'POST' }),
 }
 
 /** 通用 SSE 读取：把流按 \n\n 切分，逐条回调（与后端 `data: ` 约定一致） */

@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import Workbench from './pages/Workbench'
 import CaseWorkbench from './pages/CaseWorkbench'
-import MootCourt from './pages/MootCourt'
 import KnowledgeBase from './pages/KnowledgeBase'
 import Settings from './pages/Settings'
 import AdvisorPanel from './components/AdvisorPanel'
@@ -12,8 +11,10 @@ import LoginModal from './components/LoginModal'
 import { useAuth } from './auth/AuthProvider'
 import { humanError } from './api'
 
-// 模拟法庭不再有全局入口：只能从个案工作台启动（案件详情「仅开始模拟法庭」/
-// 评估详情与评估结果的「启动模拟法庭」），三条入口都落在 /cases/:id/moot。
+// 模拟法庭不再有全局入口、也不再有独立路由：三条入口（案件详情「仅开始模拟法庭」/
+// 评估详情的模拟法庭轴 / 评估结果的「启动模拟法庭」）全部落在个案工作台内部，
+// 用 ?tab=run&axis=eval-moot 定位、就地开庭。旧书签 /cases/:id/moot 会命中兜底路由
+// 回到案件列表——那是刻意的：那一页会把整个页面刷成暗色，与评估详情割裂。
 // 「高级设置」同理移出导航：那一页是部署方的运维台（供应商切换 + 连通性自检），
 // 摆给客户看只会暴露成本档位与密钥掩码。它与 /settings 路由都还在，知道地址就能进。
 const navItems = [
@@ -103,7 +104,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/workbench" replace />} />
             <Route path="/workbench" element={<Workbench />} />
             <Route path="/cases/:id" element={<CaseWorkbench />} />
-            <Route path="/cases/:id/moot" element={<MootCourt />} />
+            {/* /cases/:id/moot 已下架：庭审并入个案工作台的「评估详情 - 模拟法庭」轴 */}
             <Route path="/knowledge" element={<KnowledgeBase />} />
             {/* 保留但不在导航中：部署方运维入口（供应商切换 + 连通性自检） */}
             <Route path="/settings" element={<Settings />} />
