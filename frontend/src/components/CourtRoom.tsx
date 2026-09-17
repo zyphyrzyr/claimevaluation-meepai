@@ -89,6 +89,17 @@ function splitClaim(content: string): { claim: string; rest: string } {
   return { claim: m[1], rest: m[2] }
 }
 
+/**
+ * 法官节点要求结构化输出，模型偶尔会返回解析不了的 JSON，此时 round 的 content
+ * 就是那个 dict 的字符串形式（`{error: JSON 解析失败, raw: '...'}`）。
+ * 把它当成一句「正常发言」铺开，既难看又误导（用户会以为法官真说了这些）。
+ * 识别出来单独降级呈现——仍然如实展示，只是不冒充发言。
+ */
+function isRawDump(content: string): boolean {
+  const s = (content ?? '').trim()
+  return s.startsWith('{') && /error['"]?\s*[:：]/.test(s.slice(0, 160))
+}
+
 function SpeakingDots({ label }: { label: string }) {
   return (
     <div className="flex items-center gap-1.5 pt-1 text-[11px] text-muted">
@@ -182,7 +193,8 @@ export default function CourtRoom({
         >
           <AnimatePresence initial={false}>
             {items.map((r, i) => {
-              const { claim, rest } = splitClaim(r.content ?? '')
+              const raw = isRawDump(r.content ?? '')
+              const { claim, rest } = raw ? { claim: '', rest: '' } : splitClaim(r.content ?? '')
               return (
                 <motion.div
                   key={`${role}-${i}`}
@@ -204,6 +216,16 @@ export default function CourtRoom({
                   {rest && (
                     <div className="mt-1 text-[13px] leading-[1.9] text-muted whitespace-pre-wrap">
                       {rest}
+                    </div>
+                  )}
+                  {raw && (
+                    <div className="mt-1.5 rounded-lg border border-line bg-canvas px-3 py-2">
+                      <div className="text-[10px] text-muted mb-1">
+                        模型原始返回（未能解析成结构化归纳）
+                      </div>
+                      <pre className="text-[11px] leading-relaxed text-muted whitespace-pre-wrap break-all font-mono max-h-40 overflow-auto">
+                        {r.content}
+                      </pre>
                     </div>
                   )}
                 </motion.div>
@@ -248,8 +270,15 @@ export default function CourtRoom({
         </div>
         <div className="flex items-start gap-1.5">
           {MOOT_STEPS.map((s) => {
+            // 当前步只在「还在跑」时才闪；跑完了第 5 步也算已完成，否则最后一步会永远在闪
             const state =
-              currentStep > s.n ? 'done' : currentStep === s.n && currentStep > 0 ? 'active' : 'todo'
+              currentStep > s.n
+                ? 'done'
+                : currentStep === s.n && currentStep > 0
+                  ? running
+                    ? 'active'
+                    : 'done'
+                  : 'todo'
             return (
               <div key={s.n} className="flex-1 min-w-0">
                 <div
