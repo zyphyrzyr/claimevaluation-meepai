@@ -27,7 +27,7 @@ from routers.report import _content_disposition
 EAST_ASIA = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}eastAsia"
 
 SAMPLE = """\
-# 主诉评估决策备忘录：测试案
+# 主诉评估结果：测试案
 
 > 案由：商标侵权 ｜ 业务目标：要钱 ｜ 评估模型：v4 二维主诉决策模型
 
@@ -53,7 +53,7 @@ SAMPLE = """\
 
 ---
 
-> 本备忘录由 Soft IP 主诉评估系统生成。
+> 本评估结果由 Soft IP 主诉评估系统生成。
 """
 
 
@@ -96,7 +96,7 @@ class TestMarkdownMapping:
             hit = next(p for p in _paragraphs(docx_bytes) if p.text.strip().startswith(prefix))
             return hit.runs[0].font.size.pt
 
-        assert size_of("主诉评估决策备忘录") > size_of("一、") > size_of("权利基础（")
+        assert size_of("主诉评估结果") > size_of("一、") > size_of("权利基础（")
 
     def test_inline_bold_is_parsed(self, docx_bytes):
         """
@@ -164,12 +164,12 @@ class TestContentDisposition:
     def test_rfc5987_and_ascii_fallback_both_present(self):
         from urllib.parse import unquote
 
-        header = _content_disposition("某某商标案-决策备忘录.docx")
+        header = _content_disposition("某某商标案-评估结果.docx")
         assert "filename*=UTF-8''" in header
         assert 'filename="' in header
         # 中文名确实被编码进去了，且能原样解回来
         encoded = header.split("filename*=UTF-8''")[1]
-        assert unquote(encoded) == "某某商标案-决策备忘录.docx"
+        assert unquote(encoded) == "某某商标案-评估结果.docx"
 
     def test_ascii_fallback_drops_rather_than_mangles(self):
         """
@@ -178,11 +178,11 @@ class TestContentDisposition:
         「E2E-版本-决策备忘录」替换成下划线会变成 E2E-__-_____ 这种
         谁都不想看到的东西，丢掉则是干净的 E2E.docx。
         """
-        assert _content_disposition("E2E-版本-决策备忘录.docx").startswith(
+        assert _content_disposition("E2E-版本-评估结果.docx").startswith(
             'attachment; filename="E2E.docx"')
 
     def test_pure_chinese_name_still_gets_a_usable_fallback(self):
-        header = _content_disposition("决策备忘录.docx")
+        header = _content_disposition("评估结果.docx")
         assert 'filename="report.docx"' in header
 
     def test_illegal_filename_chars_are_stripped(self):
@@ -231,39 +231,15 @@ class TestExportEndpoints:
         with TestClient(app) as c:
             yield c
 
-    def test_memo_export_returns_docx(self, client, case_id):
-        resp = client.get(f"/api/report/{case_id}/memo.docx")
+    def test_result_export_returns_docx(self, client, case_id):
+        resp = client.get(f"/api/report/{case_id}/result.docx")
         assert resp.status_code == 200
         assert resp.content[:2] == self.DOCX_MAGIC
         assert "wordprocessingml" in resp.headers["content-type"]
 
-    def test_memo_header_carries_utf8_filename(self, client, case_id):
-        header = client.get(f"/api/report/{case_id}/memo.docx").headers["content-disposition"]
+    def test_result_header_carries_utf8_filename(self, client, case_id):
+        header = client.get(f"/api/report/{case_id}/result.docx").headers["content-disposition"]
         assert "filename*=UTF-8''" in header
-
-    def test_export_uses_the_snapshot_when_version_given(self, client, case_id):
-        """
-        对外发出的必须是定稿那一份。
-
-        传了 version 还导当前状态，等于把「当时定稿的内容」偷偷换成了
-        「现在又跑一次的结果」——收件人手里的版本对不上存档的版本。
-        """
-        from core.database import Report, SessionLocal
-        db = SessionLocal()
-        try:
-            db.add(Report(case_id=case_id, report_type="memo", version=1,
-                          markdown_content="# 定稿版内容\n\n当时定稿的那一份。"))
-            db.commit()
-        finally:
-            db.close()
-
-        resp = client.get(f"/api/report/{case_id}/memo.docx?version=1")
-        assert resp.status_code == 200
-        text = "\n".join(p.text for p in Document(io.BytesIO(resp.content)).paragraphs)
-        assert "当时定稿的那一份" in text
-
-    def test_unknown_version_is_404(self, client, case_id):
-        assert client.get(f"/api/report/{case_id}/memo.docx?version=99").status_code == 404
 
     def test_transcript_export_requires_a_moot(self, client, case_id):
         """没跑过庭审就导出，应当是明确 404 而不是一份空文档"""

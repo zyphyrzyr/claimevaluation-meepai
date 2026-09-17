@@ -16,8 +16,10 @@ from .service import (
     entry_to_dict,
     chunk_text,
     info,
+    orphan_chunk_ids,
+    heal_orphan_vectors,
 )
-from .vector_store import store_backend_name
+from .vector_store import store_backend_name, store_degraded_reason
 
 __all__ = [
     "add_knowledge",
@@ -30,5 +32,8 @@ __all__ = [
     "entry_to_dict",
     "chunk_text",
     "info",
+    "orphan_chunk_ids",
+    "heal_orphan_vectors",
     "store_backend_name",
+    "store_degraded_reason",
 ]

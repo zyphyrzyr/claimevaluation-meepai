@@ -123,27 +123,34 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ node, guidance }),
     }),
+  // 评估三态控制（暂停 / 恢复 / 终止 / 状态查询）
+  pauseEvaluation: (id: string) =>
+    request<{ ok: boolean; paused: boolean }>(`/evaluation/${id}/pause`, { method: 'POST' }),
+  stopEvaluation: (id: string) =>
+    request<{ ok: boolean; stopped: boolean }>(`/evaluation/${id}/stop`, { method: 'POST' }),
+  getRunState: (id: string) =>
+    request<{ run: string }>(`/evaluation/${id}/run-state`),
   mootHistory: (id: string) => request<any>(`/moot/${id}`),
   /** 审计轨迹：观点注入、节点重跑、自动召回等留痕（此前只落库、无出口） */
   audit: (id: string) => request<any[]>(`/evaluation/${id}/audit`),
-  memo: (id: string) => request<any>(`/report/${id}/memo`),
-  snapshot: (id: string) => request<any>(`/report/${id}/snapshot`, { method: 'POST' }),
-  versions: (id: string) => request<any[]>(`/report/${id}/versions`),
-  version: (id: string, version: number) => request<any>(`/report/${id}/versions/${version}`),
-  transcript: (id: string) => request<any>(`/report/${id}/transcript`),
 }
 
 /**
- * 输出物导出（Word）
+ * 输出物导出
  *
  * 用普通链接下载而不是 fetch + blob：走 fetch 的话中文文件名要靠前端自己
  * 从 Content-Disposition 里解析，而 header 里的 RFC 5987 编码各家浏览器
  * 处理不一致，很容易下载出一串 %E5%86%B3%E7%AD%96… 的名字。交给浏览器
  * 原生下载最稳。
+ *
+ * 注：「决策备忘录」页面与其定稿快照（memo / snapshot / versions / transcript
+ * 四个端点）已整体下架——需要历史定稿的场景已不存在，导出改为直接给当前状态。
  */
 export const exportUrls = {
-  memoDocx: (id: string, version?: number) =>
-    `${BASE}/report/${id}/memo.docx${version ? `?version=${version}` : ''}`,
+  /** 评估结果 Word（内容源与结果页同源：同一份 markdown） */
+  resultDocx: (id: string) => `${BASE}/report/${id}/result.docx`,
+  /** 评估结果 PDF（与 Word 同源，便于直接转发与打印） */
+  resultPdf: (id: string) => `${BASE}/report/${id}/result.pdf`,
   transcriptDocx: (id: string) => `${BASE}/report/${id}/transcript.docx`,
   transcriptPdf: (id: string) => `${BASE}/report/${id}/transcript.pdf`,
 }
@@ -194,7 +201,7 @@ export interface StandaloneMootPayload {
 }
 
 export const mootApi = {
-  /** 内嵌模式：案件内压力测试（系数回写 + 决策合成重算） */
+  /** 内嵌模式：案件内庭审对抗（系数回写 + 决策合成重算） */
   runEmbedded: (caseId: string, onEvent: (e: any) => void) =>
     ssePost(`/moot/${caseId}/run`, {}, onEvent),
   /** 独立模式：手动组料纯演练，不回写评分 */
@@ -202,13 +209,9 @@ export const mootApi = {
     ssePost('/moot/standalone', payload, onEvent),
 }
 
-/** SSE：启动评估并逐事件回调 */
-export async function runEvaluation(
-  caseId: string,
-  onEvent: (e: EvalEvent) => void,
-): Promise<void> {
-  const resp = await fetch(`${BASE}/evaluation/${caseId}/run`, { method: 'POST' })
-  if (!resp.ok || !resp.body) throw new Error(`评估启动失败: ${resp.status}`)
+/** 通用 SSE 读取：把流按 \n\n 切分，逐条回调（与后端 `data: ` 约定一致） */
+async function readSSE(resp: Response, onEvent: (e: any) => void): Promise<void> {
+  if (!resp.body) throw new Error('无响应流')
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -227,6 +230,35 @@ export async function runEvaluation(
   }
 }
 
+/** SSE：启动评估并逐事件回调 */
+export async function runEvaluation(
+  caseId: string,
+  onEvent: (e: EvalEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch(`${BASE}/evaluation/${caseId}/run`, { method: 'POST', signal })
+  if (!resp.ok || !resp.body) throw new Error(`评估启动失败: ${resp.status}`)
+  await readSSE(resp, onEvent)
+}
+
+/**
+ * SSE：恢复评估。
+ * - 后端已持有活跃流（同一标签页未刷新）：仅发信号、不返回流（返回 200 JSON），
+ *   现有流会承接后续事件，无需本地再读。
+ * - 流已断开（刷新页面后）：后端返回新的 SSE 流，本函数继续消费。
+ */
+export async function resumeEvaluation(
+  caseId: string,
+  onEvent: (e: EvalEvent) => void,
+): Promise<void> {
+  const resp = await fetch(`${BASE}/evaluation/${caseId}/resume`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`恢复评估失败: ${resp.status}`)
+  const ct = resp.headers.get('content-type') || ''
+  if (ct.includes('text/event-stream') && resp.body) {
+    await readSSE(resp, onEvent)
+  }
+}
+
 // ============================================================
 // 知识库（P3 RAG：全局经验库 / 案件材料库双集合分库）
 // ============================================================
@@ -240,7 +272,6 @@ export interface KnowledgeEntryItem {
   title: string
   content?: string
   snippet?: string
-  stale: boolean
   chunk_count: number
   created_at: string
 }
@@ -334,8 +365,25 @@ export interface PingResult {
   skipped?: string
 }
 
+/**
+ * 运行模式摘要（页脚那一行用）。
+ *
+ * 刻意不含任何密钥信息，连掩码都没有——它只需要回答「跑的是真模型还是演示数据」。
+ */
+export interface RunModeInfo {
+  mock: boolean
+  provider_id: string
+  provider_label: string
+  base_url: string
+  strong_model: string
+  fast_model: string
+  /** 真实模式下这个为 false 表示一调就炸（缺 LLM_API_KEY），页脚要据此报警 */
+  key_configured: boolean
+}
+
 export const settingsApi = {
   providers: () => request<SettingsSnapshot>('/settings/providers'),
+  mode: () => request<RunModeInfo>('/settings/mode'),
   select: (provider_id: string) =>
     request<{ ok: boolean; provider_id: string; warnings: string[] }>('/settings/provider', {
       method: 'POST',

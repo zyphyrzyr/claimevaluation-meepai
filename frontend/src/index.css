@@ -21,6 +21,8 @@
   --warning: #e37318;
   --danger: #d54941;
   --info: #0594fa;
+  /* 危险「描边」：比 --danger-soft 深一档，用于终止确认条这类需要明确边界但又不刺眼的边框 */
+  --danger-line: #f0c9c6;
   /* 语义浅底（档位/红线 badge 背景） */
   --success-soft: #e8f6ef;
   --warning-soft: #fdf0e6;
@@ -43,6 +45,7 @@
   --success-soft: rgba(43, 164, 113, 0.16);
   --warning-soft: rgba(227, 115, 24, 0.18);
   --danger-soft: rgba(213, 73, 65, 0.18);
+  --danger-line: rgba(213, 73, 65, 0.35);
   --info-soft: rgba(5, 148, 250, 0.16);
   --brand-soft: rgba(190, 124, 255, 0.14);
   --brand-2-soft: rgba(93, 214, 255, 0.16);

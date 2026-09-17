@@ -93,6 +93,45 @@ def active_downstream(node: str, goal_type: str) -> List[str]:
 EventCallback = Optional[Callable[[Dict[str, Any]], None]]
 
 
+class StopRun(Exception):
+    """暂停检查点检测到「终止」信号时抛出，由 run_all 的调用方干净收尾。"""
+
+
+class PauseControl:
+    """暂停/终止信号载体。
+
+    - pause / abort 为 threading.Event，由外部端点置位；
+    - pause_point() 在节点与步骤边界调用：终止即抛 StopRun，暂停则阻塞等待。
+    """
+
+    def __init__(self, pause=None, abort=None):
+        self.pause = pause
+        self.abort = abort
+
+    def is_abort(self) -> bool:
+        return bool(self.abort and self.abort.is_set())
+
+    def is_pause(self) -> bool:
+        return bool(self.pause and self.pause.is_set())
+
+    def pause_point(self, on_event: EventCallback) -> None:
+        """暂停/终止检查点。
+
+        - 命中终止：抛 StopRun（调用方负责清场）。
+        - 命中暂停：发 flow_paused 并阻塞，直到暂停被清除；恢复时发 flow_resumed。
+        注意：flow_paused / flow_resumed 只在「状态切换」那一刻各发一次。
+        """
+        if self.is_abort():
+            raise StopRun
+        if self.is_pause():
+            _emit(on_event, "flow_paused", "", label="评估已暂停", status="paused")
+            while self.is_pause() and not self.is_abort():
+                time.sleep(0.25)
+            if self.is_abort():
+                raise StopRun
+            _emit(on_event, "flow_resumed", "", label="评估已恢复", status="running")
+
+
 def _emit(cb: EventCallback, event: str, node: str, **extra) -> None:
     if cb:
         cb({"event": event, "node": node, "label": NODE_LABELS.get(node, node), **extra})
@@ -191,10 +230,12 @@ def _use_mock() -> bool:
 
 
 class Orchestrator:
-    def __init__(self, ctx: CaseContext, on_event: EventCallback = None):
+    def __init__(self, ctx: CaseContext, on_event: EventCallback = None,
+                 pause_event=None, abort_event=None):
         self.ctx = ctx
         self.on_event = on_event
         self.mock = _use_mock()
+        self.control = PauseControl(pause_event, abort_event)
 
     # -------------------------------------------------- 各节点执行
 
@@ -282,6 +323,7 @@ class Orchestrator:
                f"证据完整度 {_fmt_score(ctx.evidence_completeness)}% · "
                f"参考材料 {len(ctx.injected_knowledge or [])} 条 · "
                f"用户观点 {len(ctx.user_viewpoints or [])} 条"))
+        self.control.pause_point(cb)
         if self.mock:
             _step(cb, node, f"生成{label}判断（当前为模拟数据，未调用模型）")
         else:
@@ -292,6 +334,7 @@ class Orchestrator:
                 model = "—"
             _step(cb, node,
                   f"调用模型 {model} 做{label}分析，要求返回结论、优势与风险清单")
+        self.control.pause_point(cb)
         try:
             result = fn(self.ctx, use_mock=self.mock)
             failed = "error" in result
@@ -302,6 +345,7 @@ class Orchestrator:
                   f"{label}结论已解析：得分 {_fmt_score(result.get('score'))}",
                   status="failed" if failed else "ok",
                   detail=(str(result.get("analysis") or result.get("error") or ""))[:400])
+            self.control.pause_point(cb)
         except Exception as e:  # 失败态：不静默落默认分
             self.ctx.set_dimension(node, {}, status="failed", error=str(e))
             _step(cb, node, f"{label}分析失败：{e}", status="failed")
@@ -395,6 +439,7 @@ class Orchestrator:
                 continue
             _mcp(cb, "business", "企查查", sentence,
                  detail=_qcc_stage_detail(key, data))
+            self.control.pause_point(cb)
         _step(cb, "business",
               "企查查返回结果已并入回款能力计算（本地规则，不消耗模型调用）")
 
@@ -545,6 +590,8 @@ class Orchestrator:
         return self.ctx
 
     def run_node(self, node: str) -> None:
+        # 节点边界检查点：暂停则在此挂起（当前节点尚未开始），终止则抛出
+        self.control.pause_point(self.on_event)
         started = time.time()
         _emit(self.on_event, "node_started", node)
         if node == "evidence_review":

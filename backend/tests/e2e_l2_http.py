@@ -1,6 +1,6 @@
 """
 L2 全链路 E2E（HTTP + SSE 脚本）
-覆盖：三案由×双目标矩阵、SSE 事件契约、节点重跑、顾问闭环、内嵌法庭回写、独立模式隔离、版本快照
+覆盖：三案由×双目标矩阵、SSE 事件契约、节点重跑、顾问闭环、内嵌法庭回写、独立模式隔离、评估结果导出
 前置：后端 http://localhost:8000 运行中（USE_MOCK=True）
 运行：backend/ 目录 python tests/e2e_l2_http.py
 
@@ -27,6 +27,12 @@ def req(path, method="GET", body=None, raw=False, timeout=180):
     resp = urllib.request.urlopen(r, timeout=timeout)
     text = resp.read().decode()
     return text if raw else json.loads(text)
+
+
+def req_bytes(path, timeout=180):
+    """取原始响应体与响应头——导出端点返回的是二进制，不能按 JSON 解"""
+    resp = urllib.request.urlopen(f"{BASE}{path}", timeout=timeout)
+    return resp.read(), dict(resp.headers)
 
 
 def sse(path, body=None, timeout=180):
@@ -299,36 +305,35 @@ def test_moot():
           f"final {before_s['scores']['final']} → {after_s['scores']['final']}")
 
 
-def test_versioning():
+def test_result_export():
     print("\n" + "=" * 70)
-    print("六、报告版本化")
+    print("六、评估结果导出（Word / PDF）")
     print("=" * 70)
-    case = new_case("E2E-版本", "商标侵权", "要钱", CASES["商标侵权"][0],
+    case = new_case("E2E-导出", "商标侵权", "要钱", CASES["商标侵权"][0],
                     CASES["商标侵权"][1])
     cid = case["id"]
     sse(f"/evaluation/{cid}/run")
 
-    v1 = req(f"/report/{cid}/snapshot", "POST", {})
-    sse(f"/moot/{cid}/run")           # 触发分数变化
-    v2 = req(f"/report/{cid}/snapshot", "POST", {})
+    docx, h1 = req_bytes(f"/report/{cid}/result.docx")
+    check("Word 导出返回 docx", docx[:2] == b"PK", f"{len(docx)} 字节")
+    check("Word 文件名带 UTF-8 转义",
+          "filename*=UTF-8''" in h1.get("Content-Disposition", ""),
+          h1.get("Content-Disposition", ""))
 
-    versions = req(f"/report/{cid}/versions")
-    nums = sorted(v["version"] for v in versions)
-    check("版本号自增", nums == [1, 2], f"{nums}")
+    pdf, h2 = req_bytes(f"/report/{cid}/result.pdf")
+    check("PDF 导出返回 pdf", pdf[:4] == b"%PDF", f"{len(pdf)} 字节")
+    check("PDF 文件名带 UTF-8 转义",
+          "filename*=UTF-8''" in h2.get("Content-Disposition", ""),
+          h2.get("Content-Disposition", ""))
 
-    d1 = req(f"/report/{cid}/versions/1")
-    d2 = req(f"/report/{cid}/versions/2")
-    m1, m2 = d1.get("markdown") or "", d2.get("markdown") or ""
-    check("两版内容可分别读取", bool(m1) and bool(m2),
-          f"v1 {len(m1)} 字 / v2 {len(m2)} 字")
-    check("两版内容有差异（庭审回写后应变化）", m1 != m2,
-          f"v1 {len(m1)} 字 / v2 {len(m2)} 字，相同={m1 == m2}")
-
-    try:
-        req(f"/report/{cid}/versions/99")
-        check("读取不存在版本返回 404", False, "未抛错")
-    except urllib.error.HTTPError as e:
-        check("读取不存在版本返回 404", e.code == 404, f"{e.code}")
+    # 「决策备忘录」页面与定稿快照已整体下架，这些端点必须不再存在——
+    # 留着半死不活的旧端点，等于给了「还能用」的错误预期。
+    for dead, label in (("memo", "备忘录数据"), ("versions", "版本列表")):
+        try:
+            req(f"/report/{cid}/{dead}")
+            check(f"已下架端点 /{dead} 返回 404", False, "仍可访问")
+        except urllib.error.HTTPError as e:
+            check(f"已下架端点 /{dead} 返回 404", e.code == 404, f"{e.code}")
 
 
 def main():
@@ -346,7 +351,7 @@ def main():
     test_rerun()
     test_advisor_loop()
     test_moot()
-    test_versioning()
+    test_result_export()
 
     print("\n" + "=" * 70)
     print("评测汇总")

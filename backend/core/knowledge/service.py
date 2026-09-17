@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..database import KnowledgeEntry, generate_id
 from .embeddings import embed_texts, embed_query, use_mock_embedding
-from .vector_store import get_store, store_backend_name
+from .vector_store import get_store, store_backend_name, store_degraded_reason
 
 CHUNK_SIZE = 400       # 字符
 CHUNK_OVERLAP = 60
@@ -91,7 +91,6 @@ def entry_to_dict(entry: KnowledgeEntry, with_content: bool = False) -> Dict[str
         "source_type": entry.source_type,
         "source_type_label": SOURCE_TYPE_LABELS.get(entry.source_type, entry.source_type),
         "title": entry.title,
-        "stale": entry.stale,
         "created_at": entry.created_at.isoformat() if entry.created_at else "",
         "chunk_count": len(chunk_text(entry.content)),
     }
@@ -212,8 +211,50 @@ def ingest_case_materials(db: Session, case_id: str, evidence_texts: str) -> int
     return count
 
 
-def info() -> Dict[str, Any]:
-    return {
+def info(db: Optional[Session] = None) -> Dict[str, Any]:
+    """
+    知识库自述。
+
+    传了 db 就顺带算一次孤儿向量块数量——这是「DB 行与向量库不一致」的唯一
+    可观测信号。不一致本身不会报错：孤儿块占掉 store.query 的 top_k 名额之后
+    被 _dedupe_join 静默丢弃，表现只是「检索结果莫名变少」，不主动算就永远看不见。
+    """
+    d: Dict[str, Any] = {
         "backend": store_backend_name(),
         "embedding": "bge-m3(硅基流动)" if not use_mock_embedding() else "mock-hash-256d（离线）",
+        # 正常为 None；有值说明当前跑在兜底存储上，检索查不到既有内容
+        "degraded_reason": store_degraded_reason(),
     }
+    if db is not None:
+        store = get_store()
+        d["total_chunks"] = store.total_chunks()
+        d["orphan_chunks"] = len(orphan_chunk_ids(db, store))
+        # 期望值按内容现算：两者差得远说明向量库与 DB 已经不一致
+        d["expected_chunks"] = sum(
+            len(chunk_text(c)) for (c,) in db.query(KnowledgeEntry.content).all())
+    return d
+
+
+def orphan_chunk_ids(db: Session, store=None) -> List[str]:
+    """
+    找出「向量库里还在、对应条目却已被删掉」的块。
+
+    块 id 的构造是 f"{entry_id}:{i}"（见 add_knowledge），所以 entry_id 直接取
+    冒号前缀即可，不必读 metadata——少一次序列化，也顺带兼容兜底存储。
+
+    为什么值得专门找：删条目有两条路径，只有 service.delete_knowledge 会同时
+    清 DB 行与向量块。SQL 直删、脚本在降级存储上跑、进程删到一半崩掉，
+    都只清了 DB 行——留下的孤儿块不报错、不可见，只是悄悄挤占检索名额。
+    """
+    store = store or get_store()
+    live = {row[0] for row in db.query(KnowledgeEntry.id).all()}
+    return [cid for cid in store.list_ids() if cid.split(":", 1)[0] not in live]
+
+
+def heal_orphan_vectors(db: Session, store=None) -> Dict[str, Any]:
+    """删除孤儿向量块。返回 {"removed": n, "chunks": [...]}（供启动自愈与维护脚本调用）"""
+    store = store or get_store()
+    chunks = orphan_chunk_ids(db, store)
+    if chunks:
+        store.delete(chunks)
+    return {"removed": len(chunks), "chunks": chunks}

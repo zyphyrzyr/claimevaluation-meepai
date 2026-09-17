@@ -89,7 +89,7 @@ PRESETS: Dict[str, ProviderPreset] = {
         notes="两个坑：① Kimi 已把 max_tokens 标为弃用，必须用 max_completion_tokens。"
               "填错不报错，只会回落到默认 131072，而它的限流按这个值预扣额度，"
               "低额度账号会莫名 429。② moonshot-v1 全系列与 kimi-k2.5 已于 "
-              "2026-08-31 下线，填这些名字只会拿到 404。账号需先充值激活（最低 $1）。",
+              "2026-08-31 下线，填这些名字只会拿到 404。",
     ),
     "openai": ProviderPreset(
         id="openai",

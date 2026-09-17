@@ -228,3 +228,48 @@ class TestExportEndpoints:
     def test_transcript_header_carries_utf8_filename(self, client, moot_case):
         header = client.get(f"/api/report/{moot_case}/transcript.pdf").headers["content-disposition"]
         assert "filename*=UTF-8''" in header
+
+    # ---------------- 评估结果导出（Word/PDF 同源） ----------------
+
+    def test_result_export_returns_pdf(self, client, case_id):
+        resp = client.get(f"/api/report/{case_id}/result.pdf")
+        assert resp.status_code == 200
+        assert resp.content[:4] == self.PDF_MAGIC
+        assert resp.headers["content-type"] == PDF_MIME
+        assert len(resp.content) > 1000, "导出的 PDF 不应是空壳"
+
+    def test_result_pdf_filename_uses_new_wording(self, client, case_id):
+        """
+        文案已从「决策备忘录」统一为「评估结果」：文件名必须跟着改。
+
+        用 quote() 现算期望值而不是手写 %E5%86%B3…——手抄的编码一旦抄错，
+        测试会因为「字符串对不上」而绿/红，却和真正的行为无关。
+        """
+        from urllib.parse import quote
+        header = client.get(f"/api/report/{case_id}/result.pdf").headers["content-disposition"]
+        assert "filename*=UTF-8''" in header
+        assert quote("评估结果") in header
+        assert quote("决策备忘录") not in header
+
+    def test_result_pdf_body_uses_new_title(self, client, case_id):
+        """正文 H1 与页脚也不能再出现旧叫法——用户拿到的是文档，不是按钮文案"""
+        text = _text(client.get(f"/api/report/{case_id}/result.pdf").content)
+        assert "主诉评估结果" in text
+        assert "决策备忘录" not in text
+
+    def test_result_export_works_without_moot(self, client, case_id):
+        """没跑过模拟法庭也能导出（与庭审记录导出不同，后者无庭审应 404）"""
+        assert client.get(f"/api/report/{case_id}/result.pdf").status_code == 200
+        assert client.get(f"/api/report/{case_id}/result.docx").status_code == 200
+
+    def test_removed_memo_endpoints_are_gone(self, client, case_id):
+        """
+        备忘录数据与版本快照端点已随页面下架，必须 404。
+
+        留着「还能访问但界面没入口」的旧端点，等于给后续维护者一个错误预期，
+        也会让前端误以为还能接。
+        """
+        assert client.get(f"/api/report/{case_id}/memo").status_code == 404
+        assert client.get(f"/api/report/{case_id}/versions").status_code == 404
+        assert client.get(f"/api/report/{case_id}/versions/1").status_code == 404
+        assert client.post(f"/api/report/{case_id}/snapshot").status_code == 404

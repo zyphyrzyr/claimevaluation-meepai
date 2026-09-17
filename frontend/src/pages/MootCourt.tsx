@@ -117,7 +117,7 @@ export default function MootCourt() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-medium text-fg flex items-center gap-2">
-            模拟法庭 · 对抗压力测试
+            模拟法庭 · 庭审对抗
             {isStandalone && (
               <span className="text-xs font-normal text-brand bg-brand/10 border border-brand/30 px-2 py-0.5 rounded-full">
                 独立演练 · 本案
@@ -166,9 +166,11 @@ export default function MootCourt() {
         <div className="bg-[var(--warning-soft)] text-[var(--warning)] border border-[var(--warning-soft)] rounded-lg p-4 text-sm">
           该案件尚未完成主诉评估。模拟法庭（内嵌模式）需要先完成评估，
           <Link to={`/cases/${id}`} className="underline font-medium">去评估</Link>
-          ；或使用
-          <Link to="/moot" className="underline font-medium">独立演练模式</Link>
-          直接开庭。
+          ；也可
+          <Link to={`/cases/${id}/moot?mode=standalone`} className="underline font-medium">
+            以本案案情直接开庭
+          </Link>
+          （不评估、不回写评分）。
         </div>
       )}
 
@@ -184,7 +186,7 @@ export default function MootCourt() {
             {judge.judge_summary ? (
               <p className="text-sm leading-relaxed text-muted">{judge.judge_summary}</p>
             ) : (
-              <p className="text-sm text-muted">（历史庭审记录，法官归纳详见备忘录）</p>
+              <p className="text-sm text-muted">（历史庭审记录，未保存当时的法官归纳）</p>
             )}
             {judge.weak_points?.length > 0 && (
               <div className="mt-4">
@@ -254,9 +256,6 @@ export default function MootCourt() {
             className="text-brand hover:underline font-medium"
           >
             返回个案工作台 →
-          </Link>
-          <Link to={`/cases/${id}/report`} className="text-muted hover:underline">
-            查看决策备忘录
           </Link>
         </div>
       )}

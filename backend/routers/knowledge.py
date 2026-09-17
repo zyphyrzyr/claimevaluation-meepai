@@ -22,8 +22,10 @@ router = APIRouter()
 
 
 @router.get("/info")
-def kb_info():
-    return info()
+def kb_info(db: Session = Depends(get_db)):
+    # 带上 db：顺带返回孤儿向量块数量，让「DB 行与向量库不一致」这个
+    # 本来完全不可见的故障状态变成可观测的（前端取不到时自己会忽略）。
+    return info(db)
 
 
 # ---------------------------------------------------------- 条目 CRUD

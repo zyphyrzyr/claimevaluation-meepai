@@ -134,11 +134,19 @@ class MootRound(Base):
 
 
 class Report(Base):
+    """
+    历史文档快照表。
+
+    注：「决策备忘录」页面与它的定稿快照机制已整体下架，本表**不再写入**，
+    但表与既有数据都保留（用户确认过：以后想看历史定稿仍在库里）。
+    新建案不会再产生记录，旧的 v1/v2 也不会被清理。
+    """
+
     __tablename__ = "reports"
 
     id = Column(String(20), primary_key=True, default=generate_id)
     case_id = Column(String(20), ForeignKey("cases.id"))
-    report_type = Column(String(50), default="memo")   # memo（决策备忘录）/ drill（演练报告）/ transcript（庭审记录）
+    report_type = Column(String(50), default="memo")   # memo（评估结果定稿）/ drill（演练报告）/ transcript（庭审记录）
     version = Column(Integer, default=1)               # 定稿快照版本
     markdown_content = Column(Text)
     file_uri = Column(String(500))                     # 导出的 Word/PDF 路径
@@ -157,8 +165,11 @@ class KnowledgeEntry(Base):
     source_type = Column(String(10))                   # A 证据文档 / B 手动粘贴 / C 观点沉淀 / D 独立建库
     title = Column(String(200))
     content = Column(Text)
-    stale = Column(Boolean, default=False)             # 知识库健康检查：与权威源冲突标"待更新"
     created_at = Column(DateTime, default=datetime.now)
+    # 原先这里有一个 stale 列（「与权威源冲突标待更新」）。它从未被写出过：
+    # 全项目没有任何一处把它置 True，因为系统里并不存在「权威源」这个概念。
+    # 后端一路把它返回给前端，前端从不渲染——一个永远亮不起来的灯是死代码，
+    # 故连同列一并移除（见 scripts/drop_kb_stale_column.py）。
 
 
 class AuditEvent(Base):

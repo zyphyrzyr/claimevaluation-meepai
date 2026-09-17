@@ -37,6 +37,23 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 @app.on_event("startup")
 def startup():
     init_db()
+    # 启动自愈：进程刚起来时不可能有任何运行中的评估，凡是 case.status 还停在
+    # evaluating 的都是上一轮被重启/异常打断留下的僵尸状态，按实际产出修正。
+    # 不修的话案件会永远显示「评估中」，且 run-state 会据此谎报 running、点暂停报 404。
+    try:
+        from core.database import SessionLocal
+        db = SessionLocal()
+        try:
+            fixed = evaluation.heal_stuck_evaluations(db)
+        finally:
+            db.close()
+        if fixed:
+            print(f"[startup] 修正 {len(fixed)} 个残留的 evaluating 僵尸状态：")
+            for it in fixed:
+                print(f"  · {it['case_id']}  {it['name']}  {it['from']} → {it['to']}")
+    except Exception as e:
+        # 自愈失败不该挡住服务启动
+        print(f"[startup] 僵尸状态自愈跳过：{e}")
 
 
 @app.get("/api/health")
