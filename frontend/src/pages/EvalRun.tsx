@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useMemo, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { STEP_MOTION } from '../lib/motion'
 import { cn } from '../lib/utils'
@@ -7,7 +7,8 @@ import { Card } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { ScoreBadge } from '../components/ui/ScoreBadge'
 import { StepperNode } from '../components/ui/StepperNode'
-import { EvalTrace } from '../components/EvalTrace'
+import { buildTrace } from '../components/EvalTrace'
+import RunControlBar from '../components/RunControlBar'
 import MootPanel, {
   type MootJudgeInfo,
   type MootScoresUpdated,
@@ -137,6 +138,106 @@ function scaleLabel(s?: string) {
   return s === 'high' ? '高' : s === 'medium' ? '中' : s === 'low' ? '低' : (s ?? '—')
 }
 
+function fmtDur(ms?: number): string {
+  if (!ms || ms < 0) return ''
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+/**
+ * 单个节点完成后：在结果卡内折叠展示本次评估的过程（步骤/耗时），默认折叠。
+ * 运行中节点由 nodeCard 内联实时步骤，这里只补「已完成」的回看。
+ * traceEvents 仅在当次会话评估时被捕获；从历史结果进入则为空，组件返回 null。
+ */
+function NodeProcess({
+  node,
+  traceEvents,
+  states,
+}: {
+  node: string
+  traceEvents: EvalEvent[]
+  states: Record<string, NodeState>
+}) {
+  const groups = useMemo(() => buildTrace(traceEvents, states), [traceEvents, states])
+  const g = groups.find((x) => x.node === node)
+  const [open, setOpen] = useState(false)
+  if (!g || g.items.length === 0) return null
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-xs text-muted">
+          过程 · 已完成 {g.items.length} 步{g.durationMs ? ` · 累计 ${fmtDur(g.durationMs)}` : ''}
+        </span>
+        <span className="flex-1" />
+        <span className="text-xs text-muted">{open ? '收起' : '展开回看'}</span>
+      </button>
+      {open && (
+        <ul className="mt-2 space-y-1.5">
+          {g.items.map((it, i) => (
+            <li key={i} className="text-sm">
+              <div className="flex gap-2 items-start">
+                {it.kind === 'mcp' ? (
+                  <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded border border-line text-[11px] text-muted">
+                    {it.vendor ?? '外部数据'}
+                  </span>
+                ) : (
+                  <span className="shrink-0 mt-[7px] w-1.5 h-1.5 rounded-full bg-line" />
+                )}
+                <span className={cn('text-muted', it.kind === 'mcp' && 'text-fg')}>{it.text}</span>
+              </div>
+              {it.detail && (
+                <p className="text-xs text-muted mt-0.5 ml-[14px] whitespace-pre-line">{it.detail}</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 参考材料准备（__recall__）是全局过程，不在某个轴内：在工作区内容顶部内联一条轻量提示，
+ * 替代原独立「评估过程」卡片里的同名分组。
+ */
+function InlineRecall({
+  traceEvents,
+  states,
+}: {
+  traceEvents: EvalEvent[]
+  states: Record<string, NodeState>
+}) {
+  const groups = useMemo(() => buildTrace(traceEvents, states), [traceEvents, states])
+  const g = groups.find((x) => x.node === '__recall__')
+  const [open, setOpen] = useState(false)
+  if (!g || g.items.length === 0) return null
+  return (
+    <div className="mb-4 rounded-xl border border-line bg-surface px-5 py-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-sm font-medium text-fg">参考材料准备</span>
+        <span className="text-xs text-muted">已自动召回 {g.items.length} 条</span>
+        <span className="flex-1" />
+        <span className="text-xs text-muted">{open ? '收起' : '展开'}</span>
+      </button>
+      {open && (
+        <ul className="mt-2 space-y-1.5">
+          {g.items.map((it, i) => (
+            <li key={i} className="text-sm text-muted">{it.text}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /**
  * 评估详情（运行/完成时间线）。运行时状态由父级 CaseWorkbench 持有并下发，
  * 本组件只负责渲染；节点级重跑与「查看完整评估结果」通过回调上抛。
@@ -164,6 +265,16 @@ export default function EvalRun({
   onMootPaceChange,
   onMootTogglePause,
   onMootStep,
+  /** 评估运行控制条（暂停/继续/终止）透传：从父级 CaseWorkbench 移入轴标题栏右侧 */
+  runDone,
+  runTotal,
+  onRunPause,
+  onRunResume,
+  onRunStop,
+  /** 评估结果加载失败信息（容器层静默失败兜底）；非空时展示错误与重试 */
+  resultError,
+  /** 重试加载评估结果 */
+  onRetryResult,
 }: {
   caseId: string
   result: any
@@ -194,6 +305,16 @@ export default function EvalRun({
   onMootTogglePause: () => void
   /** 模拟法庭播放节奏控制：单步（立即放出下一轮，暂停时也有效） */
   onMootStep: () => void
+  /** 评估运行控制条（暂停/继续/终止）透传 */
+  runDone: number
+  runTotal: number
+  onRunPause: () => void
+  onRunResume: () => void
+  onRunStop: () => void
+  /** 评估结果加载失败信息（容器层静默失败兜底）；非空时展示错误与重试 */
+  resultError?: string | null
+  /** 重试加载评估结果 */
+  onRetryResult?: () => void
 }) {
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
@@ -222,6 +343,24 @@ export default function EvalRun({
   // 例外：模拟法庭轴。独立演练不要求先跑评估，未评估的案件也要能就地开庭——
   // 若这里一并挡掉，「仅开始模拟法庭」这条入口对草稿案件就是死的。
   if (!result && phase === 'prep' && activeAxis !== 'eval-moot') {
+    // 评估结果没加载出来：区分「真没评估过」与「加载失败」。失败要明确报错 + 给重试，
+    // 否则就会表现为「所有评估都空详情」且控制台毫无痕迹。
+    if (resultError) {
+      return (
+        <div className="bg-[var(--danger-soft)] border border-[var(--danger)] rounded-xl p-8 text-center">
+          <p className="text-[var(--danger)] text-sm mb-3 font-medium">评估结果加载失败</p>
+          <p className="text-muted text-sm mb-4">{resultError}</p>
+          {onRetryResult && (
+            <button
+              onClick={onRetryResult}
+              className="bg-fg hover:opacity-90 text-canvas px-6 py-2.5 rounded-lg text-sm font-medium transition-colors"
+            >
+              重试加载
+            </button>
+          )}
+        </div>
+      )
+    }
     return (
       <div className="bg-surface border border-line rounded-xl p-8 text-center">
         <p className="text-muted text-sm mb-4">
@@ -339,9 +478,20 @@ export default function EvalRun({
         <p className="text-sm text-muted">正在处理这一步，稍等片刻…</p>
       )
     } else if (!d) {
-      body = <p className="text-sm text-muted">等前面的环节完成后会自动开始</p>
+      // 评估进行中：该环节还没轮到（不再误显示「待前面评估完成后自动开始」）
+      // 评估已完成却仍无结果：说明本次未产出该环节，可重跑，而非「等前面」
+      body = phase === 'running' || phase === 'paused'
+        ? <p className="text-sm text-muted">等待前序环节…</p>
+        : <p className="text-sm text-muted">本次未产出该环节结果（可在本轴重跑）</p>
     } else {
-      body = extra
+      body = (
+        <>
+          {extra}
+          {phase === 'done' && (
+            <NodeProcess node={node} traceEvents={traceEvents} states={states} />
+          )}
+        </>
+      )
     }
 
     return <StepperNode status={status} label={label} right={right}>{body}</StepperNode>
@@ -794,13 +944,11 @@ export default function EvalRun({
           </p>
         </div>
       )}
-      {/* 评估过程时间线：进行中实时追加、跑完可折叠回看。
-          只在「本次会话真的捕获到事件」时占位——刷新页面后事件流为空，
-          此时摊一个「没有捕获到过程记录」的空盒子只会白占地方、还显得像出错。 */}
+      {/* 评估过程不再用独立卡片：参考材料准备（__recall__）内联为一条轻量提示，
+          各节点的过程在对应结果卡内折叠展示（见 NodeProcess）。仅当本次会话真的
+          捕获到事件时才占位，刷新后事件流为空则整体不占地方。 */}
       {traceEvents.length > 0 && (
-        <div className="mb-4">
-          <EvalTrace events={traceEvents} states={states} phase={phase} />
-        </div>
+        <InlineRecall traceEvents={traceEvents} states={states} />
       )}
       {/* 窄屏兜底：左侧导航列在 xl 以下隐藏，用横向分段控件补上切换入口，否则其余轴无法访问 */}
       <div className="flex flex-wrap gap-2 mb-4 xl:hidden">
@@ -826,6 +974,39 @@ export default function EvalRun({
 
       {error && (
         <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm mb-4">{error}</div>
+      )}
+
+      {/* 案件已评估、但后端没返回任何维度结果：多半是被「编辑案件 / 仅开始模拟法庭」
+          误清空，或评估中途异常未落库。明确提示，而不是让每个节点都显示「未产出」。 */}
+      {result &&
+        ['completed', 'partial', 'blocked', 'aborted'].includes(result.status) &&
+        phase !== 'running' &&
+        phase !== 'paused' &&
+        (!result.dimension_results ||
+          Object.keys(result.dimension_results).length === 0) && (
+          <div className="bg-[var(--warning-soft)] border border-[var(--warning)] rounded-lg p-3 mb-4 text-sm">
+            <div className="font-medium text-[var(--warning)]">该案件的评估结果数据缺失</div>
+            <p className="text-muted mt-1">
+              后端未返回任何维度结果。可在对应轴点「重跑」，或重新启动评估以恢复本案结论。
+            </p>
+          </div>
+        )}
+
+      {/* 极端情形：本次会话内评估已跑完（phase=done），但最后一次结果刷新失败、
+          且 result 仍为空。上方「未开始评估」分支只覆盖 phase=prep，这里补一层。 */}
+      {resultError && !result && phase === 'done' && (
+        <div className="bg-[var(--danger-soft)] border border-[var(--danger)] rounded-lg p-3 mb-4 text-sm">
+          <div className="font-medium text-[var(--danger)]">评估结果加载失败</div>
+          <p className="text-muted mt-1">{resultError}</p>
+          {onRetryResult && (
+            <button
+              onClick={onRetryResult}
+              className="mt-2 text-xs bg-fg hover:opacity-90 text-canvas rounded px-3 py-1.5"
+            >
+              重试加载
+            </button>
+          )}
+        </div>
       )}
 
       {/* 单块逐步：一次只渲染 activeGroup，切换走 STEP_MOTION（与案件详情一致）。
@@ -858,7 +1039,20 @@ export default function EvalRun({
                 </div>
               )}
               <span className="flex-1 h-px bg-line" />
-              {result?.scores?.final != null && (
+              {/* 运行控制条：评估进行中/暂停时挂到轴标题栏右侧（用户要求从页面顶部移入此处）；
+                  完成后让位给「查看完整评估结果」。 */}
+              {(phase === 'running' || phase === 'paused') && (
+                <RunControlBar
+                  className="shrink-0"
+                  phase={phase === 'paused' ? 'paused' : 'running'}
+                  done={runDone}
+                  total={runTotal}
+                  onPause={onRunPause}
+                  onResume={onRunResume}
+                  onStop={onRunStop}
+                />
+              )}
+              {result?.scores?.final != null && phase !== 'running' && phase !== 'paused' && (
                 <button
                   type="button"
                   onClick={onViewResult}

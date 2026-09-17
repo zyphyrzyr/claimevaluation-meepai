@@ -5,7 +5,6 @@ import EvalRun, { EVAL_AXES, NODE_ORDER, type MootState } from './EvalRun'
 import DecisionDashboard, { RESULT_SECTIONS } from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
-import RunControlBar from '../components/RunControlBar'
 import { useAuth } from '../auth/AuthProvider'
 
 type Tab = 'detail' | 'run' | 'result'
@@ -73,6 +72,10 @@ export default function CaseWorkbench() {
   const [finished, setFinished] = useState('')
   const [injectedInfo, setInjectedInfo] = useState('')
   const [result, setResult] = useState<any>(null)
+  // 评估结果加载失败信息：此前 result 请求失败被 .catch(() => {}) 静默吞掉，
+  // 一旦失败 result 永远停在 null、界面空白且无任何报错，正是「所有评估都空详情」的元凶。
+  // 这里把失败暴露出来，并提供重试入口。
+  const [resultError, setResultError] = useState<string | null>(null)
   const [evalError, setEvalError] = useState('')
   // 评估过程事件流（node_step / mcp_call / 节点起止）：提升到容器层，理由同 states——
   // 标签切换会让子组件卸载，过程记录不能跟着丢。
@@ -118,6 +121,17 @@ export default function CaseWorkbench() {
     (n) => states[n] && states[n] !== 'running' && states[n] !== 'waiting',
   ).length
 
+  // 拉取评估结果：成功才写 result，失败把原因存进 resultError（不再静默吞掉）。
+  // 任何一次失败都会让界面从「悄悄空白」变成「明确报错 + 可重试」，根因一眼可见。
+  const loadResult = () => {
+    if (!id) return
+    setResultError(null)
+    api
+      .result(id)
+      .then((r) => setResult(r))
+      .catch((e) => setResultError(humanError(e) || '评估结果加载失败，请重试'))
+  }
+
   const loadDetail = () => {
     if (!id) return
     api
@@ -125,6 +139,7 @@ export default function CaseWorkbench() {
       .then((d) => {
         setDetail(d)
         setResult(null)
+        setResultError(null)
         setPhase('prep')
         setStates({})
         setFinished('')
@@ -145,7 +160,7 @@ export default function CaseWorkbench() {
     if (!detail || defaultChosen) return
     setDefaultChosen(true)
     if (id && EVALUATED_STATUSES.includes(detail.status)) {
-      api.result(id).then(setResult).catch(() => {})
+      loadResult()
       // 已跑过的庭审：把历史记录填回场上，否则进来只看到「未进行」但系数已经回写过
       api
         .mootHistory(id)
@@ -191,7 +206,13 @@ export default function CaseWorkbench() {
 
   const refreshResult = () => {
     if (!id) return
-    api.result(id).then(setResult).catch(() => {})
+    api
+      .result(id)
+      .then((r) => {
+        setResult(r)
+        setResultError(null)
+      })
+      .catch((e) => setResultError(humanError(e) || '评估结果加载失败'))
   }
 
   const onEvent = (e: EvalEvent) => {
@@ -599,17 +620,6 @@ export default function CaseWorkbench() {
           )}
           {activeTab === 'run' && (
             <>
-              {(phase === 'running' || phase === 'paused') && (
-                <RunControlBar
-                  className="mb-4"
-                  phase={phase === 'paused' ? 'paused' : 'running'}
-                  done={doneCount}
-                  total={NODE_ORDER.length}
-                  onPause={pauseEval}
-                  onResume={resumeEval}
-                  onStop={stopEval}
-                />
-              )}
               <EvalRun
               caseId={id!}
               result={result}
@@ -629,9 +639,16 @@ export default function CaseWorkbench() {
               onMootTogglePause={toggleMootPause}
               onMootStep={mootStep}
               traceEvents={traceEvents}
+              runDone={doneCount}
+              runTotal={NODE_ORDER.length}
+              onRunPause={pauseEval}
+              onRunResume={resumeEval}
+              onRunStop={stopEval}
               // finished 只在 SSE 事件里填过，刷新页面后为空；
               // 因此再兜一层后端结果状态，保证「终止后刷新」仍能说清为什么没有结果。
               voided={finished === 'aborted' || result?.status === 'aborted'}
+              resultError={resultError}
+              onRetryResult={loadResult}
             />
             </>
           )}
