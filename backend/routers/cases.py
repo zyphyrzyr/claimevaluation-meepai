@@ -535,6 +535,25 @@ async def update_draft(
         db.add(Party(case_id=case.id, role=p["role"],
                      name=p["name"], party_type=p["party_type"]))
 
+    # 关键修复：_build_context 会重建一个空 context，若直接落库会把已有评估结果整笔抹掉
+    # （「编辑案件」「仅开始模拟法庭」都会走这条 PUT，正是 8d9bcc0c 等案例结果被清空的根因）。
+    # 只让「案件输入」字段随编辑更新，把「评估产出 + 用户输入」从旧 context 搬回新 ctx。
+    old_ctx = CaseContext.from_dict(case.context_json or {})
+    _CTX_PRESERVE = (
+        # 决策层产出
+        "dimension_results", "scores", "confidence", "red_flags", "recommendation",
+        "defendant_profile", "recovery_ability",
+        # 证据盘点产出（重跑会整体重算覆盖，编辑不该清掉）
+        "evidence_matrix", "gap_list", "extra_evidence",
+        "evidence_completeness", "evidence_note",
+        # 模拟法庭
+        "moot_transcript", "correction_coeff",
+        # 用户输入（编辑案件不应丢失用户注入的观点/知识、追问历史、审计轨迹）
+        "injected_knowledge", "user_viewpoints", "advisor_messages", "audit_trail",
+    )
+    for _f in _CTX_PRESERVE:
+        setattr(ctx, _f, getattr(old_ctx, _f))
+
     case.context_json = ctx.to_dict()
     db.commit()
 
