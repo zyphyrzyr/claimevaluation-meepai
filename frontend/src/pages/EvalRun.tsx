@@ -7,12 +7,13 @@ import { Card } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { ScoreBadge } from '../components/ui/ScoreBadge'
 import { StepperNode } from '../components/ui/StepperNode'
-import { ConclusionCard } from '../components/ui/ConclusionCard'
 import { EvalTrace } from '../components/EvalTrace'
 import type { EvalEvent } from '../api'
+import { Basis, BasisList, sevPill, SEV_LABEL, signalMeaning } from '../components/Basis'
 
 // 流程顺序与后端 NODE_ORDER 对齐（orchestrator.py）
-const NODE_ORDER = [
+// 导出给 CaseWorkbench：运行控制条用它算「第 N / 7 步」，避免两边各写一份顺序而走歪。
+export const NODE_ORDER = [
   'evidence_review', 'red_gate', 'rights', 'infringement', 'procedure', 'business', 'synthesize',
 ]
 const NODE_LABELS: Record<string, string> = {
@@ -50,11 +51,10 @@ export const EVAL_AXES: {
   { id: 'eval-legal', label: '法律可行性', axis: '法律可行性', nodes: ['rights', 'infringement', 'procedure'], cols: 'lg:grid-cols-3' },
   { id: 'eval-business', label: '业务预期', axis: '业务预期', nodes: ['business'], cols: '' },
   { id: 'eval-synth', label: '决策合成', axis: '决策合成', nodes: ['synthesize'], cols: '' },
-  // 模拟法庭不在自动流程里（手动 opt-in 的压力测试），nodes 空 = 无 chip，选中时走专属面板分支
+  // 模拟法庭不在自动流程里（手动 opt-in 的庭审对抗），nodes 空 = 无 chip，选中时走专属面板分支
   { id: 'eval-moot', label: '模拟法庭（可选）', axis: '模拟法庭', nodes: [], cols: '' },
 ]
 
-const SEV_LABEL: Record<string, string> = { pass: '通过', warning: '警示', block: '拦截' }
 const RISK_LABEL: Record<string, string> = { high: '高', medium: '中', low: '低', none: '无' }
 
 // 企查查各阶段的界面名。后端 key 形如 "A_主体锁定"、"E_人员风险扫描"，
@@ -112,7 +112,7 @@ function scaleLabel(s?: string) {
 
 /**
  * 评估详情（运行/完成时间线）。运行时状态由父级 CaseWorkbench 持有并下发，
- * 本组件只负责渲染；节点级重跑与「查看决策仪表盘」通过回调上抛。
+ * 本组件只负责渲染；节点级重跑与「查看完整评估结果」通过回调上抛。
  *
  * 呈现方式是「单块逐步」：一次只渲染 EVAL_AXES 里的一个轴，切换动画与案件详情共用
  * lib/motion.ts 的 STEP_MOTION。当前步由父级持有（activeAxis），因为左侧导航列在父级手上。
@@ -131,11 +131,12 @@ export default function EvalRun({
   onRerun,
   onStartMoot,
   traceEvents,
+  voided,
 }: {
   caseId: string
   result: any
   states: Record<string, NodeState>
-  phase: 'prep' | 'running' | 'done'
+  phase: 'prep' | 'running' | 'paused' | 'done'
   finished: string
   error: string
   /** 当前展示的轴（EVAL_AXES 的 id） */
@@ -145,10 +146,12 @@ export default function EvalRun({
   onStart?: () => void
   onViewResult: () => void
   onRerun: (node: string, guidance: string) => Promise<void>
-  /** 启动模拟法庭压力测试：跳转 /cases/{id}/moot 内嵌模式（SSE 逐轮直播在那一页） */
+  /** 启动模拟法庭：跳转 /cases/{id}/moot 内嵌模式（SSE 逐轮直播在那一页） */
   onStartMoot: () => void
   /** 评估过程事件流（node_step / mcp_call / 节点起止），由父级持有，避免切标签时丢失 */
   traceEvents: EvalEvent[]
+  /** 本次评估被「终止」作废：已完成的节点结果已全部清空，需提示用户可重新评估 */
+  voided?: boolean
 }) {
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
@@ -158,7 +161,7 @@ export default function EvalRun({
     result?.thresholds ?? { go: 78, patch: 62, quadrant_mid: 78, power_mean_p: -0.5 }
   const goalType: string = result?.goal_type ?? '要钱'
   const blocked = Boolean(result?.dimension_results?.red_gate?.result?.blocked)
-  // 模拟法庭状态（与决策仪表盘同口径：correction_coeff 存在且 ≠1 视为已回写）
+  // 模拟法庭状态（与评估结果页同口径：correction_coeff 存在且 ≠1 视为已回写）
   const mootCoeff = result?.correction_coeff
   const mootDone = mootCoeff != null && mootCoeff !== 1
 
@@ -300,30 +303,6 @@ export default function EvalRun({
     return <StepperNode status={status} label={label} right={right}>{body}</StepperNode>
   }
 
-  // 单维度分数小卡（结论页/决策合成内复用）
-  const ScoreCell = ({ label, score, t }: { label: string; score: number | null | undefined; t: Thresholds }) => (
-    <div className="rounded-lg border border-line bg-canvas p-3">
-      <div className="text-xs text-muted mb-1">{label}</div>
-      <ScoreBadge score={score} t={t} />
-    </div>
-  )
-
-  // 判断依据通用区块：标题 + 一段解释。用于回答「这个结论是从哪来的」，
-  // 四类来源固定为「证据依据 / 规则与算法依据 / 外部数据依据 / 模型判断」。
-  const Basis = ({ title, children }: { title: string; children: ReactNode }) => (
-    <div className="border-l-2 border-line pl-3">
-      <div className="text-xs font-medium text-fg mb-0.5">{title}</div>
-      <div className="text-sm text-muted leading-relaxed">{children}</div>
-    </div>
-  )
-
-  const BasisList = ({ children }: { children: ReactNode }) => (
-    <div className="mt-3 pt-3 border-t border-line space-y-3">
-      <div className="text-xs text-muted">判断依据</div>
-      {children}
-    </div>
-  )
-
   const ev = result?.evidence ?? {}
   const matrix: any[] = ev.matrix ?? []
   const gaps: any[] = ev.gap_list ?? []
@@ -361,9 +340,9 @@ export default function EvalRun({
     )
   }
 
-  // 三个法律维度的依据区块：证据要件 → 评分口径 → 参考材料。
-  // categories 传该维度真正依赖的证据类别，避免三个维度写同一段套话。
-  // 刻意不在这里列企查查数据：它只影响业务预期，放进「判断依据」会让人误以为它改变了法律判断。
+  // 三个法律维度的依据区块，只回答两件事：本维度依赖哪些证据要件、本维度为什么得这个分。
+  // 幂平均的完整口径与「参考材料」清单各自只讲一次（前者在决策合成分，后者在证据盘点列明细），
+  // 四个维度不再各抄一遍，界面因此干净很多。
   const legalBasis = (label: string, score: any, categories: string[] = []) => {
     const corr = result?.correction_coeff
     return (
@@ -372,22 +351,10 @@ export default function EvalRun({
           <EvItems categories={categories} />
         </Basis>
         <Basis title="评分依据">
-          {label}得分 {fmtNum(score)} 分。它与权利基础、侵权认定、诉讼程序三个维度的得分一起，
-          经幂平均（p = {thresholds.power_mean_p ?? -0.5}，对低分更敏感）合成「法律可行性」
-          {corr != null && corr !== 1
-            ? `，再乘上模拟法庭给出的修正系数 ${corr}。`
-            : '；目前还没跑模拟法庭，因此不乘修正系数（按 1.0 计入）。'}
-          用幂平均而不是普通算术平均的原因是：三个维度里只要有一个明显偏低，整体就会被拉下来，
-          不会被另外两个高分「平均」掉——这与法官对「任一要件不成立即败诉」的直觉一致。
+          {label}得分 {fmtNum(score)} 分，与另外两个法律维度一起经「幂平均」合成法律可行性
+          {corr != null && corr !== 1 ? `，再乘上模拟法庭给出的修正系数 ${corr}` : ''}
+          。合成口径、以及「为什么用幂平均而不是算术平均」，统一在「决策合成」里说明，这里不再重复。
         </Basis>
-        {recalled.length > 0 && (
-          <Basis title="参考材料">
-            系统按案由与案情自动召回了 {recalled.length} 条相关材料并注入到本维度，包括
-            {recalled.slice(0, 3).map((m: any) => m.title).join('、')}
-            {recalled.length > 3 ? ` 等` : ''}。它们的作用是给模型提供同类案件的裁判尺度，属于辅助参考，
-            不替代对本案证据的核对。
-          </Basis>
-        )}
       </BasisList>
     )
   }
@@ -494,7 +461,7 @@ export default function EvalRun({
               <ul className="space-y-1.5">
                 {blockers.map((h: any) => (
                   <li key={h.rule_code} className="text-sm flex gap-2">
-                    <span className={`sev-${h.severity} font-medium shrink-0 w-10`}>{SEV_LABEL[h.severity] ?? h.severity}</span>
+                    <span className={cn('shrink-0 self-start mt-0.5 w-12 text-center px-1 rounded text-xs', sevPill(h.severity))}>{SEV_LABEL[h.severity] ?? h.severity}</span>
                     <span className="text-muted"><b className="text-fg">{h.rule_name}</b>：{h.result}。{h.reason}</span>
                   </li>
                 ))}
@@ -528,7 +495,7 @@ export default function EvalRun({
             <ul className="space-y-1.5 mt-2">
               {(r.hits ?? []).map((h: any) => (
                 <li key={h.rule_code} className="text-sm flex gap-2">
-                  <span className={`sev-${h.severity} font-medium shrink-0 w-10`}>{SEV_LABEL[h.severity] ?? h.severity}</span>
+                  <span className={cn('shrink-0 self-start mt-0.5 w-12 text-center px-1 rounded text-xs', sevPill(h.severity))}>{SEV_LABEL[h.severity] ?? h.severity}</span>
                   <span className="text-muted"><b className="text-fg">{h.rule_name}</b>：{h.result}。{h.reason}</span>
                 </li>
               ))}
@@ -609,11 +576,12 @@ export default function EvalRun({
                 <EvItems categories={['损害赔偿证据']} />
               </Basis>
               <Basis title="规则与算法依据">
-                判赔区间不是拍脑袋给的：以本案由的<b>法定赔偿区间</b>为边界、以<b>类案判赔水平</b>为锚，
-                再结合案情里的侵权规模推出 P10 / P50 / P90 三个分位点。
-                「回报倍数」= P50 判赔额 ÷ 预估总成本（律师费、诉讼费、公证取证费等，按 8–15 万估）。
-                这一维度得 {fmtNum(r.score)} 分，会与回款能力一起经幂平均合成「业务预期」。
-                这两者是短板效应：判得再多，收不回来也白搭；能收回来但判得太少，同样不划算。
+                判赔区间不是拍脑袋给的：先以本案由的<b>法定赔偿区间</b>划定上下边界，
+                再参考<b>同类案件的判赔水平</b>定出中位锚点，最后结合案情里交代的侵权规模，
+                推出「偏保守 / 最可能 / 顺利」三种情形各自对应的判赔额。
+                「回报倍数」＝最可能的判赔额 ÷ 预估总成本（律师费、诉讼费、公证取证费等，按 8–15 万估）。
+                这一维度得 {fmtNum(r.score)} 分，会与回款能力一起经幂平均合成「业务预期」——
+                判得再多、收不回来也白搭；收得回来但判得太少，同样不划算，所以两者取的是短板。
               </Basis>
               {(qccMetrics.damages_adjustment || (qccMetrics.time_extra_months ?? 0) > 0) && (
                 <Basis title="外部数据依据">
@@ -641,10 +609,8 @@ export default function EvalRun({
             )}
             <p className="text-sm text-muted mt-2 leading-relaxed">
               {r.recovery_ability != null
-                ? `赢了官司不等于拿得到钱。系统按被告的工商状态与涉诉记录判断，胜诉后实际能够收回款项的可能性约为 ${fmtNum(r.recovery_ability)}%。`
+                ? `赢了官司不等于拿得到钱。系统按被告的工商状态与涉诉记录，判断胜诉后实际能够收回款项的可能性约为 ${fmtNum(r.recovery_ability)}%。`
                 : '缺少被告的企业画像，这一步无法给出回款结论，业务预期会因此标记为未完成。'}
-              {r.green_flags?.length > 0 && ` 有利的一面是${r.green_flags.join('、')}。`}
-              {r.red_flags?.length > 0 && ` 需要警惕的是${r.red_flags.join('、')}。`}
             </p>
             <BasisList>
               <Basis title="外部数据依据">
@@ -656,21 +622,40 @@ export default function EvalRun({
                 这一步全程不调用大模型，所以不消耗模型额度。
               </Basis>
               <Basis title="规则与算法依据">
-                分数来自一张写死的规则表，同样材料重跑结果稳定：
-                基准 50% 起算，再逐项按倍数调整——失信被执行 ×0.1、被执行 3 次以上 ×0.3、终本案件 3 件以上 ×0.4、
-                严重违法 ×0.7、经营异常 ×0.8、实控人失信 ×0.6；上市公司 ×1.3、有公开财务数据 ×1.2、
-                实控人有可追溯资产 ×1.15。注销、清算、破产重整任一出现则直接归零——主体都不存在了，判决无从执行。
-                连乘后截断到 0–100%，得到 {fmtNum(r.recovery_ability)}%。
+                这一步不靠模型判断，而是套用一张固定的规则表——同一份材料无论跑多少次，结果都完全一样。
+                算法从「回款前景中性」的 50% 起算：被告每出现一项不利迹象就往下调
+                （失信、多次被执行、终本案件、经营异常、核心资产被冻结质押等），
+                每出现一项有利迹象就往上调（上市公司、财务公开、实际控制人有可追溯资产等）；
+                一旦出现注销、清算或破产重整，则因主体已不存在、判决无从执行，回款直接归零。
+                全部迹象叠加、并截断在 0–100% 之间后，就得到本步的回款可能性。
               </Basis>
               <Basis title="风险与利好信号">
                 {r.red_flags?.length > 0 || r.green_flags?.length > 0 ? (
-                  <>
-                    {r.red_flags?.length > 0 && <div>风险信号（{r.red_flags.length} 项）：{r.red_flags.join('、')}</div>}
-                    {r.green_flags?.length > 0 && <div>利好信号（{r.green_flags.length} 项）：{r.green_flags.join('、')}</div>}
-                    这些信号直接对应上面的规则表：每命中一项就乘一次对应倍数，因此信号越多、分数偏离基准 50% 越远。
-                  </>
+                  <div className="space-y-1.5">
+                    <div>
+                      本次一共命中 {r.red_flags?.length ?? 0} 项不利迹象、{r.green_flags?.length ?? 0} 项有利迹象，逐项含义如下：
+                    </div>
+                    <ul className="space-y-1">
+                      {(r.red_flags ?? []).map((f: string, i: number) => (
+                        <li key={`r${i}`} className="flex gap-2 items-start">
+                          <span className="shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--danger)]" />
+                          <span>{signalMeaning(f, 'red')}</span>
+                        </li>
+                      ))}
+                      {(r.green_flags ?? []).map((f: string, i: number) => (
+                        <li key={`g${i}`} className="flex gap-2 items-start">
+                          <span className="shrink-0 mt-1.5 w-1.5 h-1.5 rounded-full bg-[var(--success)]" />
+                          <span>{signalMeaning(f, 'green')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div>
+                      把这些迹象综合折算之后，本次胜诉后的回款可能性约为{' '}
+                      <b className="text-fg">{fmtNum(r.recovery_ability)}%</b>。
+                    </div>
+                  </div>
                 ) : (
-                  '本次没有命中任何风险或利好信号，因此分数停留在基准 50% 附近——既没有明显收款障碍，也没有额外加分项。'
+                  '本次没有命中任何明显的不利或有利迹象，因此回款可能性停留在中性水平附近——既没有明显的收款障碍，也没有额外的加分项。'
                 )}
               </Basis>
             </BasisList>
@@ -705,92 +690,46 @@ export default function EvalRun({
       case 'synthesize': {
         const syn = d.result ?? {}
         const dimScore = (n: string) => result?.dimension_results?.[n]?.result?.score
-        const legalParts: [string, any][] = [
-          ['权利基础', dimScore('rights')],
-          ['侵权认定', dimScore('infringement')],
-          ['诉讼程序', dimScore('procedure')],
-        ]
-        const bizParts: [string, any][] =
-          goalIsMoney
-            ? [['判赔规模', dimScore('damages')], ['回款能力', dimScore('recovery')]]
-            : [['判例价值', dimScore('precedent')]]
         return (
           <div>
             <p className="text-sm text-muted leading-relaxed">
-              把前面各个环节的结论汇总成一句话：法律上站不站得住、经济上划不划算，两者共同决定要不要起诉。
+              这一步不重新判断案情，只是把前面已经算出的分数按固定公式合成两步：先分别聚合出「法律可行性」
+              与「业务预期」，再把两者合成本案的<b className="text-fg">主诉决策分</b>
+              {syn.scores?.final != null ? ` ${fmtNum(syn.scores?.final)} 分` : ''}。
+              结论建议、置信度、二维矩阵与节点级重跑都在「评估结果」里，这里只保留合成算法的推导过程。
             </p>
-            <div className="grid grid-cols-3 gap-3 mt-3">
-              <ScoreCell label="法律可行性" score={syn.scores?.legal_feasibility} t={t} />
-              <ScoreCell label="业务预期" score={syn.scores?.business_expectation} t={t} />
-              <ScoreCell label="主诉决策分" score={syn.scores?.final} t={t} />
-            </div>
-            <div className="text-sm text-muted mt-2">
-              置信度 <b className="text-fg">{fmtNum(syn.confidence)}%</b>
-              <span className="text-xs">
-                （由证据完整度决定，与得分分开计算——证据越全，这个结论越值得信）
-              </span>
-            </div>
             {syn.missing?.length > 0 && (
-              <div className="text-sm text-[var(--warning)] mt-1">
+              <div className="text-sm text-[var(--warning)] mt-2">
                 未产出维度：{syn.missing.join('、')}。这些维度没有拿到分数，因此不会参与合成，
                 结论的完整度会因此打折。
               </div>
             )}
-            {/* 方案A：模拟法庭状态行 —— 未进行给入口（跳内嵌模式），已回写显示系数 */}
-            <div className="text-sm text-muted mt-2 flex items-center gap-2 flex-wrap">
-              {mootDone ? (
-                <span>模拟法庭已回写 · 修正系数 <b className="text-fg">{mootCoeff}</b></span>
-              ) : (
-                <span>模拟法庭未进行 · 修正系数 1.0（法律可行性暂未修正）</span>
-              )}
-              {!mootDone && result?.scores?.final != null && (
-                <button
-                  type="button"
-                  onClick={onStartMoot}
-                  className="text-xs font-medium text-muted hover:text-fg transition-colors"
-                >
-                  启动压力测试 →
-                </button>
-              )}
-            </div>
-            <ConclusionCard
-              recommendation={syn.recommendation?.recommendation}
-              reason={syn.recommendation?.reason}
-              level={syn.recommendation?.level}
-            />
             <BasisList>
               <Basis title="评分依据">
-                这一步不重新判断案情，只是把前面已经算出的分数按固定公式合起来。先算「法律可行性」：
-                {legalParts.map(([label, s], i) => (
-                  <span key={label}>{i > 0 ? '、' : ''}{label} {fmtNum(s)} 分</span>
-                ))}
-                三个维度经<b>幂平均</b>（p = {t.power_mean_p ?? -0.5}，对低分更敏感）合成
-                {mootDone
-                  ? `，再乘上模拟法庭给出的修正系数 ${mootCoeff}`
-                  : '（尚未跑模拟法庭，按系数 1.0 计入）'}
-                ，得到 {fmtNum(syn.scores?.legal_feasibility)} 分。
-                <br />
-                再算「业务预期」：
-                {goalIsMoney
-                  ? <>判赔规模 {fmtNum(dimScore('damages'))} 分与回款能力 {fmtNum(dimScore('recovery'))} 分同样经幂平均合成</>
-                  : <>「要名」目标下直接取判例价值 {fmtNum(dimScore('precedent'))} 分</>}
-                ，得到 {fmtNum(syn.scores?.business_expectation)} 分。
-                <br />
-                最后「主诉决策分」= 法律可行性与业务预期的幂平均 = {fmtNum(syn.scores?.final)} 分。
-                用幂平均而非算术平均是为了体现短板效应：法律上站得住但收不回钱，或反过来，都不足以支撑起诉决策。
-              </Basis>
-              <Basis title="证据依据">
-                本次证据完整度为 {ev.completeness ?? 0}%，
-                {gaps.length > 0
-                  ? `还有 ${gaps.length} 项缺口未补齐。补齐后不仅各维度得分可能上升，置信度也会同步提高。`
-                  : '要件齐备，没有发现明显缺口。'}
-                {recalled.length > 0 && ` 另外，评估全程自动召回了 ${recalled.length} 条相关材料作为辅助参考。`}
-              </Basis>
-              <Basis title="结论口径">
-                结论按固定档位给出，不以分数线性外推：
-                主诉决策分 ≥ {t.go} 分建议优先启动；≥ {t.patch} 分建议补齐短板后再启动；
-                低于 {t.patch} 分则暂缓。
-                {blocked && ' 若存在程序性红线，无论分数高低都先解决红线问题——这条规则优先于评分。'}
+                <div className="space-y-1.5">
+                  <div>下面三步用到的都是前面节点已经算出的分数，逐步读法：</div>
+                  <div>
+                    <b className="text-fg">法律可行性</b>：把权利基础 {fmtNum(dimScore('rights'))} 分、
+                    侵权认定 {fmtNum(dimScore('infringement'))} 分、诉讼程序 {fmtNum(dimScore('procedure'))} 分，
+                    三者经<b>幂平均</b>合成
+                    {mootDone
+                      ? `，再乘上模拟法庭给出的修正系数 ${mootCoeff}`
+                      : '（尚未跑模拟法庭，按系数 1.0 计入）'}
+                    ，得 {fmtNum(syn.scores?.legal_feasibility)} 分。
+                    用幂平均而不是算术平均，是为了体现短板效应：三个维度里只要有一个明显偏低，整体就会被拉下来，
+                    不会被另外两个的高分「平均」掉——这与法官「任一要件不成立即败诉」的直觉一致。
+                  </div>
+                  <div>
+                    <b className="text-fg">业务预期</b>：
+                    {goalIsMoney
+                      ? `判赔规模 ${fmtNum(dimScore('damages'))} 分与回款能力 ${fmtNum(dimScore('recovery'))} 分，同样经幂平均合成，得 ${fmtNum(syn.scores?.business_expectation)} 分。它同样是短板效应：判得再多、收不回来也白搭；收得回来但判得太少，同样不划算。`
+                      : `「要名」目标下不看钱，直接取判例价值 ${fmtNum(dimScore('precedent'))} 分——衡量的是规则影响力。`}
+                  </div>
+                  <div>
+                    <b className="text-fg">主诉决策分</b>：把法律可行性与业务预期再经一次幂平均，得{' '}
+                    {fmtNum(syn.scores?.final)} 分。法律上站得住但收不回钱，或反过来，都不足以支撑起诉。
+                  </div>
+                </div>
               </Basis>
             </BasisList>
           </div>
@@ -803,6 +742,14 @@ export default function EvalRun({
 
   return (
     <>
+      {voided && (
+        <div className="bg-[var(--danger-soft)] border border-[var(--danger)] rounded-lg p-3 mb-4 text-sm">
+          <div className="font-medium text-[var(--danger)]">本次评估已终止并作废</div>
+          <p className="text-muted mt-1">
+            终止时所有已完成的节点结果均未保留，案件已回到未评估状态。可点击上方「开始评估」重新启动。
+          </p>
+        </div>
+      )}
       {/* 评估过程时间线：进行中实时追加、跑完可折叠回看。
           只在「本次会话真的捕获到事件」时占位——刷新页面后事件流为空，
           此时摊一个「没有捕获到过程记录」的空盒子只会白占地方、还显得像出错。 */}
@@ -873,12 +820,12 @@ export default function EvalRun({
                   onClick={onViewResult}
                   className="shrink-0 text-xs font-medium text-muted hover:text-fg transition-colors"
                 >
-                  查看决策仪表盘 →
+                  查看完整评估结果 →
                 </button>
               )}
             </div>
             {activeGroup.id === 'eval-moot' ? (
-              // 模拟法庭（可选）：不在自动流程里的压力测试入口，选中此轴时渲染专属面板
+              // 模拟法庭（可选）：不在自动流程里的庭审对抗入口，选中此轴时渲染专属面板
               <div className="rounded-xl border border-line bg-canvas p-5 space-y-4">
                 <div className="flex items-center gap-2 text-sm">
                   <span
@@ -896,14 +843,14 @@ export default function EvalRun({
                   )}
                 </div>
                 <p className="text-sm text-muted">
-                  评估完成后的对抗压力测试：五步庭审对抗 → 法官归纳修正系数 → 回写并重算决策合成。未进行时法律可行性按系数 1.0 计算。
+                  评估完成后的庭审对抗演练：五步庭审对抗 → 法官归纳修正系数 → 回写并重算决策合成。未进行时法律可行性按系数 1.0 计算。
                 </p>
                 {result?.scores?.final != null ? (
                   <button
                     onClick={onStartMoot}
                     className="bg-fg hover:opacity-90 text-canvas rounded-lg px-4 py-2 text-sm font-medium transition-colors"
                   >
-                    启动模拟法庭压力测试 →
+                    启动模拟法庭 →
                   </button>
                 ) : (
                   <p className="text-xs text-muted">完成主诉评估后可启动（红线拦截同样不可启动）</p>

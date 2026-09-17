@@ -11,6 +11,8 @@ interface Props {
   busy: boolean
   /** 多个控件并排成组时不画分隔线，由外层统一加 */
   compact?: boolean
+  /** 触发按钮形态：pill（默认，卡片内）/ link（文字行内，如结果页的纯文字小节） */
+  variant?: 'pill' | 'link'
   onRerun: (guidance: string) => Promise<RerunResult>
 }
 
@@ -21,7 +23,7 @@ interface Props {
  * 引导会注入 user_viewpoints，自动影响后续所有节点，而不只是本节点。
  * 这是「人机协作」区别于「重新跑一遍全流程」的关键：改一处，只重算受影响的下游。
  */
-export default function RerunControl({ label, hint, busy, compact, onRerun }: Props) {
+export default function RerunControl({ label, hint, busy, compact, variant = 'pill', onRerun }: Props) {
   const [open, setOpen] = useState(false)
   const [guidance, setGuidance] = useState('')
   const [result, setResult] = useState<RerunResult | null>(null)
@@ -46,7 +48,11 @@ export default function RerunControl({ label, hint, busy, compact, onRerun }: Pr
         <button
           onClick={() => setOpen(true)}
           disabled={busy}
-          className="text-xs text-muted hover:text-fg border border-line hover:border-fg px-2.5 py-1 rounded-md transition-colors disabled:opacity-40"
+          className={
+            variant === 'link'
+              ? 'text-xs text-muted hover:text-fg underline underline-offset-2 transition-colors disabled:opacity-40'
+              : 'text-xs text-muted hover:text-fg border border-line hover:border-fg px-2.5 py-1 rounded-md transition-colors disabled:opacity-40'
+          }
         >
           {busy ? '重跑中…' : `重跑「${label}」`}
         </button>

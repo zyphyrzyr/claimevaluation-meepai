@@ -3,7 +3,7 @@ import { tierOf } from '../../lib/tiers'
 import { tierVar } from '../../theme/tokens'
 import { cn } from '../../lib/utils'
 
-/** 分数进度条（横向，照档位上色；供仪表盘/对比视图复用） */
+/** 分数进度条（横向，照档位上色；供结果页/对比视图复用） */
 export function ScoreBar({
   score,
   t,

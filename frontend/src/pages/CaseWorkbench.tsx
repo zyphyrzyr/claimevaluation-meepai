@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { api, runEvaluation, type EvalEvent } from '../api'
-import EvalRun, { EVAL_AXES } from './EvalRun'
-import DecisionDashboard from './DecisionDashboard'
+import { api, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
+import EvalRun, { EVAL_AXES, NODE_ORDER } from './EvalRun'
+import DecisionDashboard, { RESULT_SECTIONS } from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
+import RunControlBar from '../components/RunControlBar'
 
 type Tab = 'detail' | 'run' | 'result'
 
@@ -16,7 +17,8 @@ const TABS: { key: Tab; label: string }[] = [
 
 // 评估已跑过（或正在跑）的状态：不应再显示"尚未开始评估"。
 // 注意：红线拦截 blocked 也在此列——它已有结果（硬门禁命中、流程终止），只是 final 为 null。
-const EVALUATED_STATUSES = ['evaluating', 'partial', 'completed', 'blocked']
+// aborted = 用户手动终止并作废，仍视为"已触发过评估"（显示作废态而非空白）。
+const EVALUATED_STATUSES = ['evaluating', 'partial', 'completed', 'blocked', 'aborted']
 
 const STATUS_BADGE: Record<string, { text: string; dot: string }> = {
   draft: { text: '草稿', dot: 'bg-muted' },
@@ -25,6 +27,7 @@ const STATUS_BADGE: Record<string, { text: string; dot: string }> = {
   partial: { text: '部分完成', dot: 'bg-warning' },
   completed: { text: '已完成', dot: 'bg-success' },
   blocked: { text: '红线拦截', dot: 'bg-danger' },
+  aborted: { text: '已作废', dot: 'bg-danger' },
 }
 
 /**
@@ -47,7 +50,9 @@ export default function CaseWorkbench() {
   const [refreshTick, setRefreshTick] = useState(0)
 
   // 评估运行时状态提升到容器层：确保 SSE 流不会被「标签切换」触发的子组件卸载中断
-  const [phase, setPhase] = useState<'prep' | 'running' | 'done'>('prep')
+  const [phase, setPhase] = useState<'prep' | 'running' | 'paused' | 'done'>('prep')
+  // 终止评估时持有的 AbortController：终止后主动切断本地读流
+  const abortRef = useRef<AbortController | null>(null)
   const [states, setStates] = useState<Record<string, any>>({})
   const [finished, setFinished] = useState('')
   const [injectedInfo, setInjectedInfo] = useState('')
@@ -62,6 +67,15 @@ export default function CaseWorkbench() {
   const evalReady = Boolean(result) || phase !== 'prep'
   // 当前展示的轴（单块逐步）：点击左侧导航 = 切换 activeAxis，与案件详情的 activeStep 同构
   const [activeAxis, setActiveAxis] = useState(EVAL_AXES[0].id)
+  // 评估结果当前展示的块（可视化结果 / 详细结果），与上面两个同为「单块逐步」模型
+  const [resultSection, setResultSection] = useState(RESULT_SECTIONS[0].id)
+
+  // 已完成节点数（运行控制条显示「第 N / 7 步」用）。
+  // 只排除「没轮到 / 正在跑」两种，其余状态无论 ok/partial/failed/blocked/stale 都算已出结果，
+  // 后端将来新增终态名不用回来改这里。
+  const doneCount = NODE_ORDER.filter(
+    (n) => states[n] && states[n] !== 'running' && states[n] !== 'waiting',
+  ).length
 
   const loadDetail = () => {
     if (!id) return
@@ -91,6 +105,22 @@ export default function CaseWorkbench() {
     setDefaultChosen(true)
     if (id && EVALUATED_STATUSES.includes(detail.status)) {
       api.result(id).then(setResult).catch(() => {})
+    }
+    // 刷新页面时若后端评估仍在跑/已暂停（case.status 仍是 evaluating），
+    // 重新接上 SSE 流并同步 phase，否则会丢失进度与「暂停/恢复」控制权。
+    if (id && detail.status === 'evaluating') {
+      api.getRunState(id).then((s) => {
+        if (s.run === 'running' || s.run === 'paused') {
+          setActiveTab('run')
+          setPhase(s.run === 'paused' ? 'paused' : 'running')
+          resumeEvaluation(id, onEvent).catch(() => {})
+        } else if (s.run === 'interrupted') {
+          // 上一轮评估的进程已经没了（服务重启或运行中异常），状态已被后端自愈修正。
+          // 这里绝不能进 running 态：否则会挂出暂停/终止控制条，而一点暂停就是 404。
+          setActiveTab('run')
+          refreshDetailOnly()
+        }
+      }).catch(() => {})
     }
   }, [detail, defaultChosen, id])
 
@@ -125,6 +155,15 @@ export default function CaseWorkbench() {
       setPhase('done')
       refreshResult()
       refreshDetailOnly()
+    } else if (e.event === 'flow_paused') {
+      setPhase('paused')
+    } else if (e.event === 'flow_resumed') {
+      setPhase('running')
+    } else if (e.event === 'flow_aborted') {
+      setFinished('aborted')
+      setPhase('done')
+      refreshResult()
+      refreshDetailOnly()
     } else if (e.event === 'flow_error') {
       setEvalError(e.error ?? '未知错误')
     }
@@ -138,11 +177,62 @@ export default function CaseWorkbench() {
     setInjectedInfo('')
     setStates({})
     setTraceEvents([])
+    const ac = new AbortController()
+    abortRef.current = ac
     setPhase('running')
     setActiveTab('run')
     setDetail((d: any) => (d ? { ...d, status: 'evaluating' } : d))
     refreshResult()
-    runEvaluation(id, onEvent).catch((e) => setEvalError(String(e)))
+    runEvaluation(id, onEvent, ac.signal).catch((e) => setEvalError(String(e)))
+  }
+
+  /**
+   * 前端 phase 与后端实际运行不一致时的兜底同步。
+   *
+   * 触发场景：页面以为在跑（phase='running'，控制条已挂出），但后端 RUNS 里早没有
+   * 对应句柄了——上一轮运行已结束、或服务重启过。此时 pause/resume 会返回 404/409。
+   * 与其把裸 JSON 甩给用户，不如重新问一次真实状态并把 phase 摆正。
+   */
+  const syncPhaseFromBackend = async () => {
+    if (!id) return
+    try {
+      const s = await api.getRunState(id)
+      if (s.run === 'running' || s.run === 'paused') {
+        setPhase(s.run === 'paused' ? 'paused' : 'running')
+      } else {
+        // 没有可操控的运行了：退出运行态，控制条随之消失
+        setPhase('done')
+        refreshDetailOnly()
+      }
+    } catch {
+      setPhase('done')
+    }
+    refreshResult()
+  }
+
+  // 暂停：后端在当前检查点挂起（已完成节点保留），前端切到 paused 态
+  const pauseEval = () => {
+    if (!id) return
+    setEvalError('')
+    api.pauseEvaluation(id).catch(() => {
+      setEvalError('评估已不在运行中（可能已结束或服务重启过），已为你同步为实际状态')
+      syncPhaseFromBackend()
+    })
+  }
+  // 恢复：清后端暂停信号；若本标签页没有活跃流（刷新后）则顺带重接连流
+  const resumeEval = () => {
+    if (!id) return
+    setEvalError('')
+    resumeEvaluation(id, onEvent).catch(() => {
+      setEvalError('评估已不在运行中（可能已结束或服务重启过），已为你同步为实际状态')
+      syncPhaseFromBackend()
+    })
+  }
+  // 终止：后端立即中止并清空本次结果（全部作废）；同时切断本地读流
+  const stopEval = () => {
+    if (!id) return
+    api.stopEvaluation(id).catch((e) => setEvalError(String(e)))
+    abortRef.current?.abort()
   }
 
   const rerunNode = async (node: string, guidance: string) => {
@@ -194,8 +284,8 @@ export default function CaseWorkbench() {
           两种驱动模式共用同一个受控组件，只是喂进去的 active / onSelect 不同：
           · 案件详情：单块逐步表单 → active=activeStep，点击=切换显示哪一块（不滚动）
           · 评估详情：单块逐步（切轴） → active=activeAxis，点击=切换展示哪一个轴（不滚动）
-          两者都用 STEP_MOTION 做切换动画，交互完全一致；左侧列只负责定位与高亮。
-          评估结果标签暂无章节结构，保留空列占位，避免切换标签时内容横向位移。 */}
+          · 评估结果：单块逐步（切块） → active=resultSection，点击=切换「可视化结果/详细结果」
+          三者都用 STEP_MOTION 做切换动画，交互完全一致；左侧列只负责定位与高亮。 */}
       <div className="hidden xl:block">
         {activeTab === 'detail' && (
           <SectionNav
@@ -210,6 +300,14 @@ export default function CaseWorkbench() {
             sections={EVAL_AXES}
             active={activeAxis}
             onSelect={setActiveAxis}
+            className={NAV_STICKY}
+          />
+        )}
+        {activeTab === 'result' && (
+          <SectionNav
+            sections={RESULT_SECTIONS}
+            active={resultSection}
+            onSelect={setResultSection}
             className={NAV_STICKY}
           />
         )}
@@ -272,7 +370,19 @@ export default function CaseWorkbench() {
             />
           )}
           {activeTab === 'run' && (
-            <EvalRun
+            <>
+              {(phase === 'running' || phase === 'paused') && (
+                <RunControlBar
+                  className="mb-4"
+                  phase={phase === 'paused' ? 'paused' : 'running'}
+                  done={doneCount}
+                  total={NODE_ORDER.length}
+                  onPause={pauseEval}
+                  onResume={resumeEval}
+                  onStop={stopEval}
+                />
+              )}
+              <EvalRun
               caseId={id!}
               result={result}
               states={states}
@@ -286,9 +396,18 @@ export default function CaseWorkbench() {
               onRerun={rerunNode}
               onStartMoot={() => navigate(`/cases/${id}/moot`)}
               traceEvents={traceEvents}
+              // finished 只在 SSE 事件里填过，刷新页面后为空；
+              // 因此再兜一层后端结果状态，保证「终止后刷新」仍能说清为什么没有结果。
+              voided={finished === 'aborted' || result?.status === 'aborted'}
+            />
+            </>
+          )}
+          {activeTab === 'result' && (
+            <DecisionDashboard
+              activeSection={resultSection}
+              onSectionChange={setResultSection}
             />
           )}
-          {activeTab === 'result' && <DecisionDashboard />}
         </div>
 
         {injectedInfo && (
