@@ -2,12 +2,13 @@
 案件管理路由：建案（案情+案由+业务目标+被告信息+观点注入）、列表、详情
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core.case_context import CaseContext
@@ -46,6 +47,34 @@ class CaseOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CaseRow(CaseOut):
+    """列表行：在基础字段上补当事人。
+
+    当事人存在 parties 表（按 case_id 拆开），不在 cases 表里；而搜索要按原被告匹配，
+    结果里也必须看得见——否则搜「顾家家居」搜到了，用户看不出匹配在哪一行。
+    没有当事人记录的案件这两个字段是 None（早期草稿与 E2E 测试案有不少这种情况）。
+    """
+    plaintiff: Optional[str] = None
+    defendant: Optional[str] = None
+
+
+class CasePage(BaseModel):
+    """分页信封。
+
+    列表不再是裸数组：全库已有 279 个案件，裸数组会逼着前端一口气全渲染，
+    既没有「第几页」的概念，服务端也失去了只取一页的余地。
+    """
+    items: List[CaseRow]
+    total: int
+    page: int
+    page_size: int
+
+
+# 每页条数上限：前端会传 10 / 20 / 50，这里再兜一道，避免有人手拼 URL 拉全库
+DEFAULT_PAGE_SIZE = 10
+MAX_PAGE_SIZE = 50
 
 
 @router.get("/meta")
@@ -361,12 +390,62 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
                    parse_summary=_build_parse_summary(file_records, zip_summaries))
 
 
-@router.get("", response_model=List[CaseOut])
-def list_cases(db: Session = Depends(get_db)):
-    cases = db.query(Case).order_by(Case.created_at.desc()).all()
-    return [CaseOut(id=c.id, name=c.name, cause_type=c.cause_type,
-                    goal_type=c.goal_type, status=c.status,
-                    created_at=c.created_at.isoformat()) for c in cases]
+@router.get("", response_model=CasePage)
+def list_cases(q: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
+               db: Session = Depends(get_db)):
+    """案件列表（分页 + 关键词搜索）。
+
+    q 按空格分词，**词与词之间是 AND**（每个词都得命中），每个词匹配
+    案件名称或该案下任一当事人名称——所以「栖木 顾家」能直接定位到那件案子。
+
+    为什么必须走子查询而不是只匹配名称：当事人落在 parties 表，而案件名称里**不一定**
+    写着当事人（全库只有个位数案件名含「诉」字），靠名称推断当事人的路子不成立——
+    截图里「栖木家居有限公司诉顾家家居股份有限公司…」这种是少数。
+    """
+    page = max(1, page)
+    page_size = min(MAX_PAGE_SIZE, max(1, page_size))
+
+    query = db.query(Case)
+    for term in (q or "").split():
+        like = f"%{term}%"
+        query = query.filter(or_(
+            Case.name.ilike(like),
+            Case.id.in_(db.query(Party.case_id).filter(Party.name.ilike(like))),
+        ))
+
+    total = query.count()
+    # 页码越界自愈：删掉最后一页仅剩的几条后，前端手上的页码会指向不存在的页。
+    # 这里夹到最后一页并把它回给前端，前端据此同步页码——比让前端算「该不该退一页」可靠。
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    # 次级排序键不能省：同一天建案的很多（E2E-* 系列全落在 9/1），
+    # 相同 created_at 之间顺序不稳定，翻页时会重复出现某些行、又漏掉另一些。
+    rows = (query.order_by(Case.created_at.desc(), Case.id.desc())
+            .offset((page - 1) * page_size).limit(page_size).all())
+
+    # 本页当事人的一次取完，别在循环里逐案查（N+1）
+    names: Dict[str, Dict[str, List[str]]] = {}
+    ids = [c.id for c in rows]
+    if ids:
+        for p in db.query(Party).filter(Party.case_id.in_(ids)).all():
+            if not p.name:
+                continue
+            slot = names.setdefault(p.case_id, {"plaintiff": [], "defendant": []})
+            if p.role in slot:
+                slot[p.role].append(p.name)
+
+    items = []
+    for c in rows:
+        slot = names.get(c.id, {})
+        items.append(CaseRow(
+            id=c.id, name=c.name, cause_type=c.cause_type,
+            goal_type=c.goal_type, status=c.status,
+            created_at=c.created_at.isoformat(),
+            # 一个案子可能有多个原告/被告，顿号连起来给前端一行显示
+            plaintiff="、".join(slot.get("plaintiff") or []) or None,
+            defendant="、".join(slot.get("defendant") or []) or None,
+        ))
+    return CasePage(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/{case_id}")

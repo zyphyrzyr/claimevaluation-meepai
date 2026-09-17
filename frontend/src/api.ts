@@ -16,6 +16,18 @@ export interface CaseItem {
   status: string
   created_at: string
   parse_summary?: ParseSummary
+  /** 原告（多个用「、」连接）。当事人存在 parties 表，未登记时为 null */
+  plaintiff?: string | null
+  /** 被告（多个用「、」连接）。未登记时为 null */
+  defendant?: string | null
+}
+
+/** 案件列表分页信封（全库已有数百个案件，服务端分页 + 搜索） */
+export interface CasePage {
+  items: CaseItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface EvidenceFileMeta {
@@ -74,7 +86,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   meta: () => request<{ cause_types: string[]; goal_types: string[] }>('/cases/meta'),
-  listCases: () => request<CaseItem[]>('/cases'),
+  /**
+   * 案件列表（服务端分页 + 关键词搜索）。
+   *
+   * q 按空格分词、多词 AND，匹配案件名称或原被告——搜索一定是**全库**搜，
+   * 不是只搜当前页，否则「翻页」和「搜索」两个语义会互相打架。
+   */
+  listCases: (params?: { q?: string; page?: number; page_size?: number }) => {
+    const s = new URLSearchParams()
+    if (params?.q) s.set('q', params.q)
+    if (params?.page) s.set('page', String(params.page))
+    if (params?.page_size) s.set('page_size', String(params.page_size))
+    const qs = s.toString()
+    return request<CasePage>(`/cases${qs ? `?${qs}` : ''}`)
+  },
   createCase: (payload: CaseCreatePayload | FormData) =>
     request<CaseItem>('/cases', {
       method: 'POST',
