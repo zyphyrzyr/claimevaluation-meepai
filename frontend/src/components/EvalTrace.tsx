@@ -110,13 +110,15 @@ export function EvalTrace({
 }: {
   events: EvalEvent[]
   states: Record<string, NodeState>
-  phase: 'prep' | 'running' | 'done'
+  phase: 'prep' | 'running' | 'paused' | 'done'
 }) {
   const groups = useMemo(() => buildTrace(events, states), [events, states])
   const [collapsed, setCollapsed] = useState<boolean | null>(null)
   const [openNodes, setOpenNodes] = useState<Record<string, boolean>>({})
 
   const runningNode = groups.find((g) => g.status === 'running')?.node ?? ''
+  // 暂停 != 结束：流程还挂起在检查点上，随时会继续，所以按「进行中」处理（面板保持展开）
+  const ongoing = phase === 'running' || phase === 'paused'
   // 进行中默认展开面板；跑完默认收起（想回看再点开），用户手动操作后不再自动切换
   const isCollapsed = collapsed ?? phase === 'done'
 
@@ -142,6 +144,8 @@ export function EvalTrace({
         <span className="text-sm font-medium text-fg">评估过程</span>
         {phase === 'running' ? (
           <span className="text-xs text-[var(--info)]">进行中 · 已在 {groups.length} 个环节留下记录</span>
+        ) : phase === 'paused' ? (
+          <span className="text-xs text-[var(--warning)]">已暂停 · 已在 {groups.length} 个环节留下记录</span>
         ) : (
           <span className="text-xs text-muted">
             共 {total} 步
@@ -155,7 +159,7 @@ export function EvalTrace({
       {!isCollapsed && (
         <div className="px-5 pb-4 space-y-1">
           {groups.map((g) => {
-            const open = openNodes[g.node] ?? (phase === 'running' && g.node === runningNode)
+            const open = openNodes[g.node] ?? (ongoing && g.node === runningNode)
             return (
               <div key={g.node} className="border-t border-line pt-3 first:border-t-0">
                 <button

@@ -91,6 +91,20 @@ class CaseContext:
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def reset_evaluation(self) -> None:
+        """评估被「终止」时调用：清空本次已产出的决策层结果，使案件回到未评估状态。
+
+        只清决策层输出（维度结果/分数/置信度/红线/建议/被告画像），
+        不动证据盘点等输入性字段——重跑时会整体重算覆盖。
+        """
+        self.dimension_results = {}
+        self.scores = {}
+        self.confidence = None
+        self.red_flags = []
+        self.recommendation = {}
+        self.defendant_profile = {}
+        self.recovery_ability = None
+
     def mark_stale(self, nodes: List[str], reason: str = "") -> None:
         for node in nodes:
             if node in self.dimension_results:

@@ -22,6 +22,48 @@ from core.orchestrator import (Orchestrator, NODE_ORDER, NODE_LABELS,
 router = APIRouter()
 
 
+class RunController:
+    """单次评估运行的可控句柄（模块级 RUNS 按 case_id 持有）。
+
+    - events：后端向 SSE 推送的事件队列（暂停/恢复/终止都经它通知前端）
+    - pause / abort：前端端点置位的 threading.Event
+    - status：running / paused / aborted / completed / partial / blocked
+    - stream_open：当前是否有活跃的 SSE 消费者（用于 /resume 决定是否重开流）
+    """
+
+    def __init__(self):
+        self.events: "queue.Queue" = queue.Queue()
+        self.pause = threading.Event()
+        self.abort = threading.Event()
+        self.status = "running"
+        self.stream_open = False
+
+
+# case_id -> 运行中的评估句柄。同一时刻每案至多一个运行实例。
+RUNS: dict[str, RunController] = {}
+
+
+def derive_status_from_ctx(ctx: CaseContext) -> str:
+    """按 ctx 里真实存在的产出推导评估终态。
+
+    判定口径与 work() 收尾处一致（final / recommendation.level），只多一条：
+    完全没有产出时退回 pending，而不是 partial——否则一个从没跑出东西的案件
+    会被标成「部分完成」，比留在 evaluating 更误导。
+
+    用途：终止、异常、进程重启都可能让流程没走到收尾，此时 case.status 会停在
+    'evaluating' 变成僵尸。修它不能靠猜，只能看 ctx 里到底有没有东西。
+    """
+    has_output = any(
+        (d or {}).get("status") in ("ok", "partial", "failed", "blocked")
+        for d in (ctx.dimension_results or {}).values()
+    )
+    if not has_output:
+        return "pending"
+    if ctx.recommendation.get("level") == "block":
+        return "blocked"
+    return "completed" if ctx.scores.get("final") is not None else "partial"
+
+
 def _load_ctx(case: Case) -> CaseContext:
     ctx = CaseContext.from_dict(case.context_json or {})
     ctx.case_id = case.id
@@ -57,6 +99,31 @@ def _save_ctx(db: Session, case: Case, ctx: CaseContext) -> None:
             version=(latest.version + 1) if latest else 1,
         ))
     db.commit()
+
+
+def heal_stuck_evaluations(db: Session) -> list[dict]:
+    """启动自愈：把进程外遗留的 'evaluating' 僵尸状态按实际产出修正。
+
+    为什么可以在启动时断定它们全是僵尸：评估跑在工作线程里，进程一重启线程就没了，
+    而 case.status 是持久化的镜像、不会自己回滚。所以「刚启动的进程里仍有
+    case.status == 'evaluating'」本身是自相矛盾的——不是修不修的问题，它一定是错的。
+
+    不这么做的话，案件会永远显示「评估中」徽标，且前端 run-state 会据此
+    谎报 running、挂出暂停/终止控制条，一点就是 404。
+    """
+    fixed: list[dict] = []
+    stuck = db.query(Case).filter(Case.status == "evaluating").all()
+    for case in stuck:
+        try:
+            new_status = derive_status_from_ctx(_load_ctx(case))
+        except Exception:
+            continue          # 上下文都读不出来就别乱改，留给人工判断
+        fixed.append({"case_id": case.id, "name": case.name,
+                      "from": "evaluating", "to": new_status})
+        case.status = new_status
+    if fixed:
+        db.commit()
+    return fixed
 
 
 @router.get("/nodes")
@@ -118,7 +185,7 @@ def _auto_recall(db: Session, case: Case, ctx: CaseContext) -> int:
 
 @router.post("/{case_id}/run")
 def run_evaluation(case_id: str, db: Session = Depends(get_db)):
-    """启动完整评估，SSE 推送节点进度。
+    """启动完整评估，SSE 推送节点进度（支持暂停/恢复/终止）。
 
     2026-09-03 方案 B：材料注入后台化——启动时先执行自动召回
     （确定性查询词 + 双库语义检索），命中写入 ctx.injected_knowledge
@@ -127,41 +194,152 @@ def run_evaluation(case_id: str, db: Session = Depends(get_db)):
     case = db.query(Case).filter(Case.id == case_id).first()
     if not case:
         raise HTTPException(404, "案件不存在")
+    existing = RUNS.get(case_id)
+    if existing and existing.status in ("running", "paused"):
+        raise HTTPException(409, "评估正在进行中，请先暂停/终止或等待完成")
 
     ctx = _load_ctx(case)
-    events: queue.Queue = queue.Queue()
+    ctrl = RunController()
+    RUNS[case_id] = ctrl
 
     def work():
         try:
             case.status = "evaluating"
             db.commit()
             recalled = _auto_recall(db, case, ctx)
-            events.put({"event": "recall_done", "node": "",
-                        "label": f"已自动召回 {recalled} 条参考材料注入评估节点",
-                        "status": "ok"})
-            orch = Orchestrator(ctx, on_event=events.put)
+            ctrl.events.put({"event": "recall_done", "node": "",
+                             "label": f"已自动召回 {recalled} 条参考材料注入评估节点",
+                             "status": "ok"})
+            orch = Orchestrator(ctx, on_event=ctrl.events.put,
+                               pause_event=ctrl.pause, abort_event=ctrl.abort)
             orch.run_all()
-            case.status = "completed" if ctx.scores.get("final") is not None else "partial"
+            # run_all 正常结束：非终止路径
+            final = ctx.scores.get("final")
+            case.status = "completed" if final is not None else "partial"
             if ctx.recommendation.get("level") == "block":
                 case.status = "blocked"
-            _save_ctx(db, case, ctx)
-            events.put({"event": "flow_finished", "node": "",
-                        "label": "", "status": case.status})
+            ctrl.status = case.status
+            ctrl.events.put({"event": "flow_finished", "node": "",
+                             "label": "", "status": case.status})
+        except StopRun:
+            # 终止信号：清空本次已产出结果（全部作废），状态置 aborted
+            ctx.reset_evaluation()
+            case.status = "aborted"
+            ctrl.status = "aborted"
+            ctrl.events.put({"event": "flow_aborted", "node": "",
+                             "label": "评估已终止并作废", "status": "aborted"})
         except Exception as e:
-            events.put({"event": "flow_error", "node": "", "label": "", "error": str(e)})
+            # 关键：不能把 case.status 留在 evaluating。这一轮已经死了，进程内
+            # 再没有任何人会去改它，前端就会永远看到「评估进行中」＋点暂停报 404。
+            # 按 ctx 里已有的产出落一个诚实的终态。
+            ctrl.status = "failed"
+            try:
+                case.status = derive_status_from_ctx(ctx)
+                db.commit()
+            except Exception:
+                pass
+            ctrl.events.put({"event": "flow_error", "node": "", "label": "", "error": str(e)})
         finally:
-            events.put(None)
+            try:
+                _save_ctx(db, case, ctx)
+            except Exception:
+                pass
+            RUNS.pop(case_id, None)
+            ctrl.events.put(None)
 
     threading.Thread(target=work, daemon=True).start()
 
     def stream():
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        ctrl.stream_open = True
+        try:
+            while True:
+                item = ctrl.events.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            ctrl.stream_open = False
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.post("/{case_id}/pause")
+def pause_evaluation(case_id: str):
+    """暂停：置 pause 信号，编排器在下一个检查点挂起（线程保持、几乎不耗算力）。"""
+    ctrl = RUNS.get(case_id)
+    if not ctrl:
+        raise HTTPException(404, "当前没有进行中的评估")
+    ctrl.pause.set()
+    if ctrl.status == "running":
+        ctrl.status = "paused"
+    return {"ok": True, "paused": ctrl.pause.is_set()}
+
+
+@router.post("/{case_id}/resume")
+def resume_evaluation(case_id: str):
+    """恢复：清除 pause 信号并（按需）重开 SSE 流。
+
+    - 若已有活跃流（同一标签页未刷新）：仅发信号，不返回新流，避免事件被两个消费者瓜分。
+    - 若无活跃流（刷新页面后）：返回新的 SSE 流，承接后续事件。
+    """
+    ctrl = RUNS.get(case_id)
+    if not ctrl:
+        raise HTTPException(409, "没有可恢复的评估")
+    ctrl.pause.clear()
+    if ctrl.status == "paused":
+        ctrl.status = "running"
+
+    if ctrl.stream_open:
+        return {"ok": True, "reconnected": False}
+
+    def stream():
+        ctrl.stream_open = True
+        try:
+            while True:
+                item = ctrl.events.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            ctrl.stream_open = False
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.post("/{case_id}/stop")
+def stop_evaluation(case_id: str):
+    """终止：置 abort 信号（若在暂停中同时解除阻塞），编排器在下一个检查点抛出 StopRun 收尾。"""
+    ctrl = RUNS.get(case_id)
+    if not ctrl:
+        return {"ok": True, "stopped": False}  # 幂等：无可终止的运行
+    ctrl.abort.set()
+    ctrl.pause.clear()
+    return {"ok": True, "stopped": True}
+
+
+@router.get("/{case_id}/run-state")
+def evaluation_run_state(case_id: str, db: Session = Depends(get_db)):
+    """查询当前评估运行状态，供前端刷新页面后同步。
+
+    注意 run 的取值口径：**RUNS 是唯一「可实际操作」的真相**——pause / resume /
+    stop 都只看它。所以这里绝不能拿持久化的 case.status 冒充 running：那份镜像会
+    因为进程重启或异常而停在 evaluating，一旦据此谎报 running，前端就会显示
+    「评估进行中」并挂出控制条，用户一点暂停就撞 404（本 bug 的原始形态）。
+
+    DB 是 evaluating 而 RUNS 里没有句柄 = 上一轮的进程已经没了 → 如实报 interrupted。
+    """
+    ctrl = RUNS.get(case_id)
+    if ctrl:
+        return {"run": ctrl.status}
+    case = db.query(Case).filter(Case.id == case_id).first()
+    s = case.status if case else None
+    if s == "evaluating":
+        return {"run": "interrupted"}
+    if s in ("completed", "partial", "blocked"):
+        return {"run": "done"}
+    if s == "aborted":
+        return {"run": "aborted"}
+    return {"run": "none"}
 
 
 @router.get("/{case_id}/result")
