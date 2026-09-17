@@ -1,8 +1,12 @@
 """
-决策备忘录生成器（P2）
-- generate_memo：从 CaseContext 生成结构化决策备忘录（markdown + 一页纸摘要）
-- 报告版本化：定稿快照存 Report 表（version 递增，v1/v2 并存）
-输出物形态（§8）：决策备忘录 + 向上汇报一页纸摘要 + 庭审记录
+评估结果文档生成器（P2）
+
+- generate_memo：从 CaseContext 生成结构化的评估结果文档（markdown + 一页纸摘要）
+  这个 markdown 是结果页「下载评估结果」的内容源，Word 与 PDF 都由它转换而来。
+
+注：函数名沿用 generate_memo 与「备忘录」时期的命名，但对外文案已统一为「评估结果」。
+页面层的「决策备忘录」及其定稿快照机制（v1/v2 版本对比）已整体下架，
+本生成器与 Report 表被保留：前者供导出复用，后者保留历史数据不再写入。
 """
 
 from typing import Any, Dict, List
@@ -165,12 +169,12 @@ def build_one_pager(case_name: str, ctx: CaseContext) -> Dict[str, Any]:
 # ============================================================
 
 def render_memo_markdown(data: Dict[str, Any]) -> str:
-    """决策备忘录 → Markdown（Word 导出的内容源，P4 接 html-to-docx）"""
+    """评估结果文档 → Markdown（Word / PDF 导出的共同内容源，见 core/docx_export、core/pdf_export）"""
     s = data["scores"]
     rec = data["recommendation"]
     sec = _Sections()
     lines = []
-    lines.append(f"# 主诉评估决策备忘录：{data['case_name']}")
+    lines.append(f"# 主诉评估结果：{data['case_name']}")
     lines.append("")
     lines.append(f"> 案由：{data['cause_type']} ｜ 业务目标：{data['goal_type']} ｜ "
                  f"评估模型：v4 二维主诉决策模型")
@@ -280,7 +284,7 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("> 本备忘录由 Soft IP 主诉评估系统生成，AI 辅助评估结果仅供内部决策参考，不构成正式法律意见。")
+    lines.append("> 本评估结果由 Soft IP 主诉评估系统生成，AI 辅助评估结果仅供内部决策参考，不构成正式法律意见。")
     return "\n".join(lines)
 
 
