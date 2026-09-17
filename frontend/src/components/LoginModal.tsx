@@ -83,111 +83,119 @@ export default function LoginModal({
     <AnimatePresence>
       {open && (
         <>
+          {/* 外壳兼作遮罩：**居中交给 flex，动画只留给内层卡片**。
+              这两件事以前压在同一元素上，而 motion 的 y 动画会写成内联
+              transform，把 Tailwind 的 -translate-x-1/2 整条覆盖掉——
+              结果只剩 left/top:50%，弹窗左上角落在页面正中（右下偏半个身位）。
+              顺带用 p-4 + overflow-y-auto 兜住矮窗口：能滚，不会顶出屏幕。 */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/30 z-[60]"
-          />
-          <motion.div
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 12 }}
-            transition={{ duration: 0.18 }}
-            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[22rem] bg-canvas border border-line rounded-lg shadow-2xl z-[61] p-6"
+            className="fixed inset-0 bg-black/30 z-[60] flex items-center justify-center p-4 overflow-y-auto"
           >
-            <div className="flex items-center justify-between mb-1">
-              <h2 className="text-base font-medium text-fg">
-                {mode === 'login' ? '登录' : '注册'}
-              </h2>
-              <button onClick={onClose} aria-label="关闭" className="text-muted hover:text-fg text-lg leading-none">
-                ✕
-              </button>
-            </div>
-
-            {reason && <p className="text-xs text-muted mb-4">{reason}</p>}
-            {!reason && <div className="mb-4" />}
-
-            <form onSubmit={submit} className="space-y-3">
-              <div>
-                <label className="block text-xs text-muted mb-1">邮箱</label>
-                <input
-                  ref={emailRef}
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  required
-                  className="w-full px-3 py-2 text-sm rounded-md border border-line bg-surface text-fg outline-none focus:border-[var(--brand)]"
-                />
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 12 }}
+              transition={{ duration: 0.18 }}
+              // 嵌套之后必须挡住冒泡，否则点卡片会被外壳当成「点外部关闭」
+              onClick={(e) => e.stopPropagation()}
+              className="w-[22rem] max-w-full bg-canvas border border-line rounded-lg shadow-2xl p-6"
+            >
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="text-base font-medium text-fg">
+                  {mode === 'login' ? '登录' : '注册'}
+                </h2>
+                <button onClick={onClose} aria-label="关闭" className="text-muted hover:text-fg text-lg leading-none">
+                  ✕
+                </button>
               </div>
 
-              {mode === 'register' && (
+              {reason && <p className="text-xs text-muted mb-4">{reason}</p>}
+              {!reason && <div className="mb-4" />}
+
+              <form onSubmit={submit} className="space-y-3">
                 <div>
-                  <label className="block text-xs text-muted mb-1">
-                    称呼 <span className="text-muted/70">（选填）</span>
-                  </label>
+                  <label className="block text-xs text-muted mb-1">邮箱</label>
                   <input
-                    type="text"
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="怎么称呼你"
+                    ref={emailRef}
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    required
                     className="w-full px-3 py-2 text-sm rounded-md border border-line bg-surface text-fg outline-none focus:border-[var(--brand)]"
                   />
                 </div>
-              )}
 
-              <div>
-                <label className="block text-xs text-muted mb-1">密码</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === 'register' ? '至少 6 位' : ''}
-                  required
-                  className="w-full px-3 py-2 text-sm rounded-md border border-line bg-surface text-fg outline-none focus:border-[var(--brand)]"
-                />
+                {mode === 'register' && (
+                  <div>
+                    <label className="block text-xs text-muted mb-1">
+                      称呼 <span className="text-muted/70">（选填）</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      placeholder="怎么称呼你"
+                      className="w-full px-3 py-2 text-sm rounded-md border border-line bg-surface text-fg outline-none focus:border-[var(--brand)]"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs text-muted mb-1">密码</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={mode === 'register' ? '至少 6 位' : ''}
+                    required
+                    className="w-full px-3 py-2 text-sm rounded-md border border-line bg-surface text-fg outline-none focus:border-[var(--brand)]"
+                  />
+                </div>
+
+                {error && (
+                  <p className="text-xs text-[var(--danger)] bg-[var(--danger-soft)] border border-[var(--danger-line)] rounded px-2 py-1.5">
+                    {error}
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="w-full py-2 text-sm rounded-md bg-[var(--brand)] text-white disabled:opacity-40"
+                >
+                  {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并登录'}
+                </button>
+              </form>
+
+              <div className="mt-4 text-xs text-muted text-center">
+                {mode === 'login' ? (
+                  <>
+                    还没有账号？
+                    <button onClick={() => setMode('register')} className="text-fg underline ml-1">
+                      注册一个
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    已经有账号？
+                    <button onClick={() => setMode('login')} className="text-fg underline ml-1">
+                      去登录
+                    </button>
+                  </>
+                )}
               </div>
 
-              {error && (
-                <p className="text-xs text-[var(--danger)] bg-[var(--danger-soft)] border border-[var(--danger-line)] rounded px-2 py-1.5">
-                  {error}
-                </p>
-              )}
-
-              <button
-                type="submit"
-                disabled={busy}
-                className="w-full py-2 text-sm rounded-md bg-[var(--brand)] text-white disabled:opacity-40"
-              >
-                {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并登录'}
-              </button>
-            </form>
-
-            <div className="mt-4 text-xs text-muted text-center">
-              {mode === 'login' ? (
-                <>
-                  还没有账号？
-                  <button onClick={() => setMode('register')} className="text-fg underline ml-1">
-                    注册一个
-                  </button>
-                </>
-              ) : (
-                <>
-                  已经有账号？
-                  <button onClick={() => setMode('login')} className="text-fg underline ml-1">
-                    去登录
-                  </button>
-                </>
-              )}
-            </div>
-
-            <p className="mt-3 text-[11px] text-muted text-center leading-relaxed">
-              未登录也能浏览公共示例案件与经验库，
-              <br />
-              登录后才能建自己的案件、跑评估。
-            </p>
+              <p className="mt-3 text-[11px] text-muted text-center leading-relaxed">
+                未登录也能浏览公共示例案件与经验库，
+                <br />
+                登录后才能建自己的案件、跑评估。
+              </p>
+            </motion.div>
           </motion.div>
         </>
       )}

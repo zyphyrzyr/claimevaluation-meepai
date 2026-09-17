@@ -86,7 +86,8 @@ export default function App() {
           ))}
         </nav>
 
-        {/* 左下角登录态：mt-auto 把它压到底部（aside 是 h-screen flex-col） */}
+        {/* 左下角登录态：块自己用 top-[75vh] 定位在侧栏 3/4 高度处
+            （aside 是 sticky，正是它的包含块），不占文档流、也不贴底 */}
         <SidebarUser
           user={auth.user}
           loading={auth.loading}
