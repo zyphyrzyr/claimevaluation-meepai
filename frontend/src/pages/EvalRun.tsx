@@ -53,13 +53,18 @@ const rerunNodeOf = (node: string) => RERUN_AS[node] ?? node
 export interface MootState {
   /** 内嵌 = 评估后压力测试（系数回写）；独立演练 = 纯演练不回写 */
   mode: 'embedded' | 'standalone'
+  /** 模型已生成的全部轮次（raw）：节奏控制缓冲区的"源" */
   rounds: MootRound[]
+  /** 已揭示（显示）的轮次：缓冲区按 pace 从 rounds 里逐条放出，CourtRoom 只渲染这些 */
+  shownRounds: MootRound[]
   running: boolean
   /** 本次被用户中止：保留已说轮次，但不回写、不落库 */
   stopped: boolean
   judge: MootJudgeInfo | null
   scoresUpdated: MootScoresUpdated | null
   error: string
+  /** 播放节奏：speed = 每轮揭示间隔（毫秒），paused = 暂停揭示（模型仍在跑） */
+  pace: { speed: number; paused: boolean }
 }
 
 export const EVAL_AXES: {
@@ -156,6 +161,9 @@ export default function EvalRun({
   moot,
   traceEvents,
   voided,
+  onMootPaceChange,
+  onMootTogglePause,
+  onMootStep,
 }: {
   caseId: string
   result: any
@@ -180,6 +188,12 @@ export default function EvalRun({
   traceEvents: EvalEvent[]
   /** 本次评估被「终止」作废：已完成的节点结果已全部清空，需提示用户可重新评估 */
   voided?: boolean
+  /** 模拟法庭播放节奏控制：调速度 */
+  onMootPaceChange: (speed: number) => void
+  /** 模拟法庭播放节奏控制：暂停/继续揭示 */
+  onMootTogglePause: () => void
+  /** 模拟法庭播放节奏控制：单步（立即放出下一轮，暂停时也有效） */
+  onMootStep: () => void
 }) {
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
@@ -858,7 +872,8 @@ export default function EvalRun({
               // 模拟法庭（可选）：就地开庭，状态全在父级（切轴不丢场）
               <MootPanel
                 mode={moot.mode}
-                rounds={moot.rounds}
+                rounds={moot.shownRounds}
+                rawRounds={moot.rounds}
                 running={moot.running}
                 stopped={moot.stopped}
                 judge={moot.judge}
@@ -870,6 +885,10 @@ export default function EvalRun({
                 onStart={onStartMoot}
                 onStop={onStopMoot}
                 caseId={caseId}
+                pace={moot.pace}
+                onPaceChange={onMootPaceChange}
+                onTogglePause={onMootTogglePause}
+                onStep={onMootStep}
               />
             ) : activeGroup.id === 'eval-business' ? (
               // 业务预期：总览卡已删（目标见头部 chip、子维度见小标题），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）

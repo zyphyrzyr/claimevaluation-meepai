@@ -42,11 +42,13 @@ const NAV_STICKY = 'mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]'
 const EMPTY_MOOT: MootState = {
   mode: 'embedded',
   rounds: [],
+  shownRounds: [],
   running: false,
   stopped: false,
   judge: null,
   scoresUpdated: null,
   error: '',
+  pace: { speed: 2500, paused: false },
 }
 
 export default function CaseWorkbench() {
@@ -79,6 +81,26 @@ export default function CaseWorkbench() {
   // 模拟法庭运行时状态：同样必须在容器层。评估详情是「单块逐步」渲染，
   // 切一次轴就卸载一次 EvalRun——庭审跑到一半切去看法律可行性，回来就空了。
   const [moot, setMoot] = useState<MootState>(EMPTY_MOOT)
+
+  // 揭示缓冲区：模型已生成的轮次存进 moot.rounds（raw），按 pace 逐条放出到
+  // shownRounds 供 CourtRoom 渲染。这样"模型生成"与"屏幕显示"解耦——调慢速度、
+  // 暂停、单步都不影响后端运行，只影响播放节奏，留出阅读思考时间。
+  // paceRef 把最新的暂停状态喂给定时器 tick（定时器只在 speed 变化时重建）。
+  const paceRef = useRef({ speed: EMPTY_MOOT.pace.speed, paused: EMPTY_MOOT.pace.paused })
+  useEffect(() => {
+    paceRef.current = moot.pace
+  }, [moot.pace])
+  useEffect(() => {
+    const id = setInterval(() => {
+      setMoot((prev) => {
+        if (paceRef.current.paused) return prev
+        if (prev.shownRounds.length >= prev.rounds.length) return prev
+        const next = prev.rounds[prev.shownRounds.length]
+        return { ...prev, shownRounds: [...prev.shownRounds, next] }
+      })
+    }, moot.pace.speed)
+    return () => clearInterval(id)
+  }, [moot.pace.speed])
 
   // 评估详情是否已经有可展示的轴：未评估时 EvalRun 只渲染一张「尚未开始评估」卡片，
   // 此时不给左侧导航，避免出现点不动的死链接。（与 EvalRun 的空状态判定同源）
@@ -135,6 +157,7 @@ export default function CaseWorkbench() {
               : {
                   ...m,
                   rounds: h.transcript,
+                  shownRounds: h.transcript,
                   judge: {
                     correction_coefficient: h.correction_coeff,
                     defense_strength: 0,
@@ -342,6 +365,20 @@ export default function CaseWorkbench() {
     if (!id) return
     mootApi.stop(id).catch(() => {})
   }
+
+  /** 播放节奏：调速度（毫秒/轮） */
+  const setMootPace = (speed: number) =>
+    setMoot((m) => ({ ...m, pace: { ...m.pace, speed } }))
+  /** 播放节奏：暂停/继续揭示（模型仍在跑） */
+  const toggleMootPause = () =>
+    setMoot((m) => ({ ...m, pace: { ...m.pace, paused: !m.pace.paused } }))
+  /** 播放节奏：单步，立即放出下一轮（暂停时也有效） */
+  const mootStep = () =>
+    setMoot((m) => {
+      if (m.shownRounds.length >= m.rounds.length) return m
+      const next = m.rounds[m.shownRounds.length]
+      return { ...m, shownRounds: [...m.shownRounds, next] }
+    })
 
   const rerunNode = async (node: string, guidance: string) => {
     if (!id) return
@@ -588,6 +625,9 @@ export default function CaseWorkbench() {
               onStartMoot={() => startMoot('embedded')}
               onStopMoot={stopMoot}
               moot={moot}
+              onMootPaceChange={setMootPace}
+              onMootTogglePause={toggleMootPause}
+              onMootStep={mootStep}
               traceEvents={traceEvents}
               // finished 只在 SSE 事件里填过，刷新页面后为空；
               // 因此再兜一层后端结果状态，保证「终止后刷新」仍能说清为什么没有结果。

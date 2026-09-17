@@ -4,14 +4,18 @@ import { cn } from '../lib/utils'
 import type { MootRound } from '../api'
 
 /**
- * 庭审现场：原告居左、法官居中、被告居右的三栏剧场（浅色，与评估详情同底色）。
+ * 庭审现场（浅色，与评估详情同底色）。
+ *
+ * 布局：顶部「席位条」把身份只画一次（原告/法官/被告，当前发言方高亮），
+ * 下面一条**单一宽时间线**按既定顺序排开七轮发言——彻底取代早期「三栏各自滚动」。
+ * 这样：窄→单列不再三等分；长→一条自上而下扫读，不再三道高瘦滚动条；
+ * 挤→身份在顶部、逐轮是带「第 n 轮 · 步骤 · 角色」标签的独立卡片。
  *
  * 两条设计约束：
- *  1. **不切全局主题**。早期版本由页面 setTheme('theater') 把整个 <html> 刷成暗色，
- *     视觉上像跳去了另一个站点。现在庭审区与评估详情同用 token 浅色，
- *     剧场感靠「席位 + 发言气泡 + 进度条」表达，不靠反色。
- *  2. **状态全部受控**。轮次、进行中、是否已中止都由父级（CaseWorkbench）持有，
- *     这里只渲染——切换评估轴会卸载子组件，状态放在本组件里会整场丢。
+ *  1. 不切全局主题（与早期反色剧场不同），剧场感靠席位高亮 + 角色色 + 入场动画。
+ *  2. 状态全部受控：轮次由父级（CaseWorkbench）持有，这里只渲染。
+ *     rounds = 已揭示（显示）的轮次；rawCount = 模型已生成的全部轮次，
+ *     二者之差用来提示「模型已生成 X/7 · 正在陆续显示」，把播放与生成解耦。
  */
 
 /** 七轮发言的既定顺序（后端 procedure 固定）：下一轮还没到时，用它标出「谁在说话」 */
@@ -76,6 +80,9 @@ const ROLE_META: Record<
   },
 }
 
+/** 席位条三个角色的顺序：原告居左、法官居中、被告居右，呼应舞台对峙 */
+const SEAT_ORDER = ['plaintiff', 'judge', 'defendant']
+
 /**
  * 首句当「主张」加粗：庭审发言普遍是「先抛结论、再展开理由」，
  * 把第一句单独拎出来，扫一眼就能抓住这一轮在争什么；剩下的正文用更松的行距铺开。
@@ -121,133 +128,35 @@ export default function CourtRoom({
   rounds,
   running,
   stopped = false,
+  rawCount,
 }: {
   rounds: MootRound[]
   running: boolean
   /** 本次庭审被中止：不再等下一轮，但已说过的轮次保留在场上 */
   stopped?: boolean
+  /** 模型已生成的全部轮次数（含尚未揭示的）；用于「正在陆续显示」提示 */
+  rawCount?: number
 }) {
-  const leftRef = useRef<HTMLDivElement>(null)
-  const centerRef = useRef<HTMLDivElement>(null)
-  const rightRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
-  // 新回合入场后，三栏各自滚动到底部
+  // 新回合入场后，时间线滚动到底部
   useEffect(() => {
-    const scroll = (el?: HTMLDivElement | null) => {
-      if (!el) return
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    }
-    scroll(leftRef.current)
-    scroll(centerRef.current)
-    scroll(rightRef.current)
+    if (!scrollRef.current) return
+    scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [rounds.length])
 
-  const grouped: Record<string, MootRound[]> = {
-    plaintiff: rounds.filter((r) => r.role === 'plaintiff'),
-    defendant: rounds.filter((r) => r.role === 'defendant'),
-    judge: rounds.filter((r) => r.role === 'judge'),
-  }
-
-  // 当前进行到的步骤：已发言轮次里最大的 step；一轮未出时是 0（进度条全灰）
+  // 当前进行到的步骤：已显示轮次里最大的 step；一轮未出时是 0（进度条全灰）
   const currentStep = rounds.reduce((mx, r) => Math.max(mx, r.step ?? 0), 0)
   // 正在说话的人：下一轮的发言方。最后一轮说完（rounds 已满）时不再显示
   const next = running && rounds.length < MOOT_TOTAL_ROUNDS ? SPEAK_ORDER[rounds.length] : null
-
-  const Seat = ({
-    role,
-    items,
-    scrollRef,
-  }: {
-    role: string
-    items: MootRound[]
-    scrollRef: React.RefObject<HTMLDivElement>
-  }) => {
-    const meta = ROLE_META[role] ?? ROLE_META.plaintiff
-    const speaking = next?.role === role
-    return (
-      <div className="flex flex-col min-h-0 rounded-xl border border-line bg-canvas overflow-hidden">
-        {/* 席位条：谁坐在这 + 说了几轮 */}
-        <div className="shrink-0 px-3.5 py-2.5 border-b border-line flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span
-              className={cn(
-                'shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-medium',
-                meta.avatarCls,
-              )}
-            >
-              {meta.avatar}
-            </span>
-            <span className="text-xs font-medium text-fg truncate">{meta.title}</span>
-            <span className="text-[10px] text-muted truncate hidden sm:inline">· {meta.seat}</span>
-          </div>
-          <span className={cn('shrink-0 text-[10px] tabular-nums', meta.nameCls)}>
-            {items.length > 0 ? `${items.length} 轮` : '未发言'}
-          </span>
-        </div>
-
-        {/* 发言区：空态压到 150px，别让未开庭的页面顶出一大片空白 */}
-        <div
-          ref={scrollRef}
-          className="flex-1 overflow-y-auto p-3 space-y-2.5 min-h-0"
-          style={{ maxHeight: 420 }}
-        >
-          <AnimatePresence initial={false}>
-            {items.map((r, i) => {
-              const raw = isRawDump(r.content ?? '')
-              const { claim, rest } = raw ? { claim: '', rest: '' } : splitClaim(r.content ?? '')
-              return (
-                <motion.div
-                  key={`${role}-${i}`}
-                  initial={{ opacity: 0, ...meta.from }}
-                  animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
-                  transition={{ type: 'spring', stiffness: 260, damping: 24 }}
-                  className="rounded-xl border border-line bg-surface px-3.5 py-3"
-                  style={{ borderLeftWidth: 3, borderLeftColor: meta.accent }}
-                >
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <span className={cn('text-[11px] font-medium', meta.nameCls)}>
-                      {r.role_name || meta.title}
-                    </span>
-                    <span className="text-[10px] text-muted">{r.step_name}</span>
-                  </div>
-                  {claim && (
-                    <div className="text-[13px] font-medium text-fg leading-relaxed">{claim}</div>
-                  )}
-                  {rest && (
-                    <div className="mt-1 text-[13px] leading-[1.9] text-muted whitespace-pre-wrap">
-                      {rest}
-                    </div>
-                  )}
-                  {raw && (
-                    <div className="mt-1.5 rounded-lg border border-line bg-canvas px-3 py-2">
-                      <div className="text-[10px] text-muted mb-1">
-                        模型原始返回（未能解析成结构化归纳）
-                      </div>
-                      <pre className="text-[11px] leading-relaxed text-muted whitespace-pre-wrap break-all font-mono max-h-40 overflow-auto">
-                        {r.content}
-                      </pre>
-                    </div>
-                  )}
-                </motion.div>
-              )
-            })}
-          </AnimatePresence>
-
-          {items.length === 0 && (
-            <div className="h-[150px] flex items-center justify-center text-xs text-muted">
-              等待发言
-            </div>
-          )}
-
-          {speaking && <SpeakingDots label="发言中…" />}
-        </div>
-      </div>
-    )
-  }
+  // 是否还有"正在发言"的下一轮（时间线底部的发言指示器用）
+  const speaking = next != null
+  // 每个角色已显示的轮数（席位条上的「n 轮」）
+  const countOf = (role: string) => rounds.filter((r) => r.role === role).length
 
   return (
     <div className="rounded-2xl border border-line bg-canvas overflow-hidden">
-      {/* 顶部：五步进度 + 轮次计数。进度的「当前步」= 已发言轮次里最大的 step */}
+      {/* 顶部：五步进度 + 轮次计数。进度的「当前步」= 已显示轮次里最大的 step */}
       <div className="px-4 pt-4 pb-3 border-b border-line">
         <div className="flex items-center justify-between gap-3 mb-2.5">
           <h2 className="text-sm font-medium text-fg">庭审现场</h2>
@@ -301,6 +210,12 @@ export default function CourtRoom({
             )
           })}
         </div>
+        {/* 播放滞后提示：模型已生成的比显示的多，说明正在缓冲播放 */}
+        {running && rawCount != null && rawCount > rounds.length && (
+          <div className="mt-2 text-[10px] text-muted">
+            模型已生成 {rawCount}/{MOOT_TOTAL_ROUNDS} · 正在陆续显示
+          </div>
+        )}
       </div>
 
       {stopped && (
@@ -309,11 +224,94 @@ export default function CourtRoom({
         </div>
       )}
 
-      {/* 三栏剧场：法官居中，两侧原被告对峙 */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.05fr_1fr] gap-3 p-4">
-        <Seat role="plaintiff" items={grouped.plaintiff} scrollRef={leftRef} />
-        <Seat role="judge" items={grouped.judge} scrollRef={centerRef} />
-        <Seat role="defendant" items={grouped.defendant} scrollRef={rightRef} />
+      {/* 席位条：身份只出现一次，当前发言方高亮（实心底色），并显示该角色已说轮数 */}
+      <div className="flex gap-2 px-4 pt-3">
+        {SEAT_ORDER.map((role) => {
+          const meta = ROLE_META[role]
+          const speaking = next?.role === role
+          const c = countOf(role)
+          return (
+            <div
+              key={role}
+              className={cn(
+                'flex-1 flex items-center gap-2 px-3 py-2 rounded-xl border transition-colors',
+                speaking ? 'border-fg bg-surface' : 'border-line',
+              )}
+            >
+              <span
+                className={cn(
+                  'shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-medium',
+                  meta.avatarCls,
+                )}
+              >
+                {meta.avatar}
+              </span>
+              <div className="min-w-0">
+                <div className={cn('text-xs font-medium truncate', meta.nameCls)}>{meta.title}</div>
+                <div className="text-[10px] text-muted">
+                  {speaking ? '发言中' : c > 0 ? `${c} 轮` : '未发言'}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* 中央剧本：单一宽时间线，按既定顺序自上而下铺开所有已揭示轮次 */}
+      <div
+        ref={scrollRef}
+        className="px-4 py-3 max-h-[460px] overflow-y-auto space-y-2.5 min-h-0"
+      >
+        <AnimatePresence initial={false}>
+          {rounds.map((r, i) => {
+            const meta = ROLE_META[r.role] ?? ROLE_META.plaintiff
+            const raw = isRawDump(r.content ?? '')
+            const { claim, rest } = raw ? { claim: '', rest: '' } : splitClaim(r.content ?? '')
+            return (
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ type: 'spring', stiffness: 260, damping: 24 }}
+                className="rounded-xl border border-line bg-surface px-3.5 py-3"
+                style={{ borderLeftWidth: 3, borderLeftColor: meta.accent }}
+              >
+                <div className="flex items-center gap-2 mb-1.5">
+                  <span className={cn('text-[11px] font-medium', meta.nameCls)}>
+                    {r.role_name || meta.title}
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    第 {i + 1} 轮 · {r.step_name}
+                  </span>
+                </div>
+                {claim && (
+                  <div className="text-[13px] font-medium text-fg leading-relaxed">{claim}</div>
+                )}
+                {rest && (
+                  <div className="mt-1 text-[13px] leading-[1.9] text-muted whitespace-pre-wrap">
+                    {rest}
+                  </div>
+                )}
+                {raw && (
+                  <div className="mt-1.5 rounded-lg border border-line bg-canvas px-3 py-2">
+                    <div className="text-[10px] text-muted mb-1">
+                      模型原始返回（未能解析成结构化归纳）
+                    </div>
+                    <pre className="text-[11px] leading-relaxed text-muted whitespace-pre-wrap break-all font-mono max-h-40 overflow-auto">
+                      {r.content}
+                    </pre>
+                  </div>
+                )}
+              </motion.div>
+            )
+          })}
+        </AnimatePresence>
+
+        {rounds.length === 0 && (
+          <div className="py-10 text-center text-xs text-muted">等待开庭…</div>
+        )}
+
+        {speaking && <SpeakingDots label="发言中…" />}
       </div>
     </div>
   )

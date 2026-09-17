@@ -35,9 +35,17 @@ export interface MootScoresUpdated {
   correction_coeff?: number
 }
 
+/** 播放速度档位（每轮揭示间隔，毫秒）。中档 2500ms 为默认。 */
+export const MOOT_PACE_OPTIONS: { label: string; speed: number }[] = [
+  { label: '慢', speed: 4000 },
+  { label: '中', speed: 2500 },
+  { label: '快', speed: 1200 },
+]
+
 export default function MootPanel({
   mode,
   rounds,
+  rawRounds,
   running,
   stopped = false,
   judge,
@@ -49,9 +57,16 @@ export default function MootPanel({
   onStart,
   onStop,
   caseId,
+  pace,
+  onPaceChange,
+  onTogglePause,
+  onStep,
 }: {
   mode: 'embedded' | 'standalone'
+  /** 已揭示（显示）的轮次：CourtRoom 渲染这些 */
   rounds: MootRound[]
+  /** 模型已生成的全部轮次：用于「重新开庭/下载」判定与播放滞后提示 */
+  rawRounds: MootRound[]
   running: boolean
   stopped?: boolean
   judge: MootJudgeInfo | null
@@ -65,10 +80,19 @@ export default function MootPanel({
   onStart: () => void
   onStop: () => void
   caseId?: string
+  /** 播放节奏状态 */
+  pace: { speed: number; paused: boolean }
+  onPaceChange: (speed: number) => void
+  onTogglePause: () => void
+  onStep: () => void
 }) {
   const isStandalone = mode === 'standalone'
   const coeff = judge?.correction_coefficient ?? savedCoeff
   const mootDone = coeff != null && coeff !== 1
+  // 播放是否还有未揭示的轮次（模型已生成但屏幕还没放出）
+  const pending = rawRounds.length > rounds.length
+  // 法官归纳/判决书只在「跑完且播放排空」后出现，避免正文还没放完就提前弹出总结
+  const showJudge = Boolean(judge) && !running && !pending
 
   return (
     <div className="space-y-4">
@@ -114,7 +138,7 @@ export default function MootPanel({
                 disabled={!canStart}
                 className="bg-fg hover:opacity-90 text-canvas rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {rounds.length ? '重新开庭' : '开庭'}
+                {rawRounds.length ? '重新开庭' : '开庭'}
               </button>
             )}
             {running && (
@@ -132,18 +156,65 @@ export default function MootPanel({
           </div>
         </div>
 
+        {/* 播放节奏控制：进行中或仍有未揭示轮次时显示 */}
+        {(running || pending) && (
+          <div className="flex items-center gap-2 mt-3 pt-3 border-t border-line flex-wrap">
+            <span className="text-xs text-muted">播放</span>
+            {MOOT_PACE_OPTIONS.map((p) => {
+              const on = pace.speed === p.speed
+              return (
+                <button
+                  key={p.speed}
+                  type="button"
+                  onClick={() => onPaceChange(p.speed)}
+                  className={cn(
+                    'text-xs px-2.5 py-1 rounded-lg border transition-colors',
+                    on
+                      ? 'border-fg bg-surface text-fg font-medium'
+                      : 'border-line text-muted hover:text-fg',
+                  )}
+                >
+                  {p.label}
+                </button>
+              )
+            })}
+            <button
+              type="button"
+              onClick={onTogglePause}
+              className={cn(
+                'text-xs px-2.5 py-1 rounded-lg border transition-colors',
+                pace.paused
+                  ? 'border-fg bg-surface text-fg font-medium'
+                  : 'border-line text-muted hover:text-fg',
+              )}
+            >
+              {pace.paused ? '继续' : '暂停'}
+            </button>
+            <button
+              type="button"
+              onClick={onStep}
+              className="text-xs px-2.5 py-1 rounded-lg border border-line text-muted hover:text-fg transition-colors"
+            >
+              单步
+            </button>
+            {pace.paused && (
+              <span className="text-[10px] text-muted">已暂停 · 模型仍在跑，恢复后按节奏补齐</span>
+            )}
+          </div>
+        )}
+
         {!canStart && !running && canStartHint && (
           <p className="text-xs text-muted mt-2">{canStartHint}</p>
         )}
 
-        {!isStandalone && !running && rounds.length === 0 && (
+        {!isStandalone && !running && rawRounds.length === 0 && (
           <p className="text-xs text-muted mt-2 leading-relaxed">
             评估完成后的庭审对抗演练：五步七轮对抗 → 法官归纳修正系数 → 回写并重算决策合成。
             未进行时法律可行性按系数 1.0 计算。
           </p>
         )}
 
-        {rounds.length > 0 && !running && caseId && (
+        {rawRounds.length > 0 && !running && caseId && (
           <div className="flex gap-3 mt-3 pt-3 border-t border-line text-xs">
             <a href={exportUrls.transcriptDocx(caseId)} className="text-muted hover:text-fg transition-colors">
               下载庭审记录 Word
@@ -159,10 +230,10 @@ export default function MootPanel({
         <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm">{error}</div>
       )}
 
-      <CourtRoom rounds={rounds} running={running} stopped={stopped} />
+      <CourtRoom rounds={rounds} rawCount={rawRounds.length} running={running} stopped={stopped} />
 
-      {/* 法官归纳：判决书样式。只在跑完（或载入历史记录）时出现，进行中不抢戏 */}
-      {judge && !running && (
+      {/* 法官归纳：判决书样式。只在跑完（或载入历史记录）且播放排空后出现，进行中不抢戏 */}
+      {showJudge && (
         <div className="rounded-2xl border border-line bg-canvas overflow-hidden">
           <div className="px-4 py-3 border-b border-line flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
@@ -171,32 +242,32 @@ export default function MootPanel({
               </span>
               <span className="text-sm font-medium text-fg truncate">法官归纳 · 判决书</span>
             </div>
-            {judge.correction_coefficient != null && (
+            {judge!.correction_coefficient != null && (
               <span className="shrink-0 text-xs text-muted tabular-nums">
-                修正系数 {judge.correction_coefficient}
+                修正系数 {judge!.correction_coefficient}
               </span>
             )}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-[1.55fr_1fr] gap-5 p-4">
             <div className="min-w-0">
-              {judge.judge_summary ? (
+              {judge!.judge_summary ? (
                 <p className="text-sm leading-[1.9] text-muted whitespace-pre-wrap">
-                  {judge.judge_summary}
+                  {judge!.judge_summary}
                 </p>
               ) : (
                 <p className="text-sm text-muted">
-                  {judge.from_history
+                  {judge!.from_history
                     ? '这场庭审是从历史记录回填的，当时只存了修正系数，没有存法官归纳正文。'
                     : '本次模型没有产出可读的法官归纳（返回值无法解析），因此修正系数按 1.0 计入、评分未修正。可重新开庭再试一次。'}
                 </p>
               )}
 
-              {judge.weak_points?.length > 0 && (
+              {judge!.weak_points?.length > 0 && (
                 <div className="mt-4">
                   <div className="text-xs font-medium text-[var(--danger)] mb-1.5">原告薄弱点</div>
                   <ul className="space-y-1">
-                    {judge.weak_points.map((w, i) => (
+                    {judge!.weak_points.map((w, i) => (
                       <li key={i} className="text-[13px] text-muted leading-relaxed flex gap-2">
                         <span className="shrink-0 text-line">·</span>
                         <span>{w}</span>
@@ -205,11 +276,11 @@ export default function MootPanel({
                   </ul>
                 </div>
               )}
-              {judge.focus_points?.length > 0 && (
+              {judge!.focus_points?.length > 0 && (
                 <div className="mt-3">
                   <div className="text-xs font-medium text-[var(--success)] mb-1.5">补强建议</div>
                   <ul className="space-y-1">
-                    {judge.focus_points.map((f, i) => (
+                    {judge!.focus_points.map((f, i) => (
                       <li key={i} className="text-[13px] text-muted leading-relaxed flex gap-2">
                         <span className="shrink-0 text-line">·</span>
                         <span>{f}</span>
@@ -224,23 +295,23 @@ export default function MootPanel({
               <div className="rounded-xl border border-line bg-surface p-4 text-center">
                 <div className="text-xs text-muted">修正系数（{isStandalone ? '仅演练' : '回写评分'}）</div>
                 <div className="text-3xl font-medium text-fg mt-1.5 tabular-nums">
-                  {judge.correction_coefficient ?? '—'}
+                  {judge!.correction_coefficient ?? '—'}
                 </div>
                 <div className="text-[10px] text-muted mt-1.5">范围 0.70 – 1.30</div>
               </div>
 
-              {judge.defense_strength > 0 && (
+              {judge!.defense_strength > 0 && (
                 <div className="rounded-xl border border-line bg-surface p-4">
                   <div className="text-xs text-muted">被告抗辩强度</div>
                   <div className="mt-2 flex items-center gap-3">
                     <div className="flex-1 h-1.5 bg-line rounded-full overflow-hidden">
                       <div
                         className="h-full bg-fg rounded-full"
-                        style={{ width: `${judge.defense_strength}%` }}
+                        style={{ width: `${judge!.defense_strength}%` }}
                       />
                     </div>
                     <span className="text-sm font-medium text-fg tabular-nums">
-                      {judge.defense_strength}
+                      {judge!.defense_strength}
                     </span>
                   </div>
                 </div>
