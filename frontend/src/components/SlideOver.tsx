@@ -65,6 +65,11 @@ export default function SlideOver({
     }
   }, [open])
 
+  // 抽屉是纯客户端构件：portal 必须有 DOM。服务端渲染时直接返回空，
+  // 否则任何用到本组件的页面一进 renderToString 就抛 document is not defined。
+  // （守卫放在全部 Hook 之后，不破坏 Hook 顺序。）
+  if (typeof document === 'undefined') return null
+
   return createPortal(
     <AnimatePresence>
       {open && (

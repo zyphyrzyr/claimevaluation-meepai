@@ -39,6 +39,14 @@ class _BaseStore:
               top_k: int = 5) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    def list_ids(self) -> List[str]:
+        """列出全部块 id。给孤儿块清理这类维护动作使用。"""
+        raise NotImplementedError
+
+    def total_chunks(self) -> int:
+        """块总数。用于把「向量库 vs DB」的不一致做成可观测的自述指标。"""
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------- ChromaDB 后端
 
@@ -79,6 +87,14 @@ class _ChromaStore(_BaseStore):
             out.append({"id": cid, "document": doc, "metadata": meta,
                         "score": 1.0 - float(dist)})   # cosine 距离 → 相似度
         return out
+
+    def list_ids(self):
+        # include=[] 表示只要 id，不带向量与文档——清理孤儿块时不需要正文，
+        # 几百个块每个背着 256 维向量序列化一遍纯属浪费。
+        return list(self._col.get(include=[])["ids"])
+
+    def total_chunks(self):
+        return self._col.count()
 
 
 # ---------------------------------------------------------- numpy/内存降级后端
@@ -132,21 +148,68 @@ class _FallbackStore(_BaseStore):
         hits.sort(key=lambda h: h["score"], reverse=True)
         return hits[:top_k]
 
+    def list_ids(self):
+        return list(self._data)
 
-def get_store() -> _BaseStore:
-    """单例向量存储（线程安全）"""
-    global _store_instance
+    def total_chunks(self):
+        return len(self._data)
+
+
+# 降级原因。None 表示用的是 chromadb（正常）；有值表示当前在兜底存储上跑。
+# 「装上但打不开」和「没装」后果完全不同，所以要把原因留下来——
+# 否则应用在空库上跑了半个月都没人知道。
+_degraded_reason: Optional[str] = None
+
+
+def get_store(strict: bool = False) -> _BaseStore:
+    """
+    单例向量存储（线程安全）。
+
+    strict=True 时，若 chromadb 已安装却打不开，**直接抛错而不是降级**。
+    维护脚本必须用 strict：否则它的删除会落在一个空的兜底存储上静默变成空操作，
+    脚本打印「删除成功」，真实向量库却什么也没变，留下的孤儿块还要花很久才发现。
+    """
+    global _store_instance, _degraded_reason
     with _store_lock:
         if _store_instance is None:
-            if _chroma_available():
+            if not _chroma_available():
+                _degraded_reason = "未安装 chromadb（属正常降级）"
+                _store_instance = _FallbackStore()
+            else:
                 try:
                     _store_instance = _ChromaStore()
-                except Exception:
+                    _degraded_reason = None
+                except Exception as e:
+                    _degraded_reason = f"{type(e).__name__}: {e}"
+                    raise_msg = (
+                        "chromadb 已安装但无法打开向量库，已拒绝以降级存储继续。"
+                        f"原因：{e}\n"
+                        "最常见的是另一个进程正持有该目录——后端 uvicorn 在跑时，"
+                        "第二个进程打不开同一个 chroma 目录。维护脚本请先停掉后端再执行。"
+                    )
+                    if strict:
+                        raise RuntimeError(raise_msg) from e
+                    # 应用侧不能因为向量库打不开就整个服务起不来，仍降级，
+                    # 但必须把这件事喊出来：降级后检索查的是空库，
+                    # 接口全部正常返回、只是永远搜不到东西，静默下去极难排查。
+                    print("\n" + "!" * 72)
+                    print("[vector_store] !! chromadb 打不开，已降级为内存兜底存储")
+                    print(f"[vector_store] !! 原因：{e}")
+                    print("[vector_store] !! 后果：向量检索将查不到既有内容（接口仍正常返回）")
+                    print("!" * 72 + "\n")
                     _store_instance = _FallbackStore()
-            else:
-                _store_instance = _FallbackStore()
+        elif strict and _degraded_reason and "未安装" not in _degraded_reason:
+            # 实例已在本进程里建过一次降级实例，strict 调用同样不能放过
+            raise RuntimeError(
+                f"向量库处于降级状态，拒绝执行维护动作：{_degraded_reason}")
         return _store_instance
 
 
 def store_backend_name() -> str:
     return "chromadb" if isinstance(get_store(), _ChromaStore) else "fallback-cosine"
+
+
+def store_degraded_reason() -> Optional[str]:
+    """当前降级原因；None 表示正常跑在 chromadb 上。"""
+    get_store()
+    return _degraded_reason

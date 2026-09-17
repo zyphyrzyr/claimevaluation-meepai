@@ -1,10 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { KnowledgeEntryItem, SearchHit, knowledgeApi } from '../api'
+import SlideOver from '../components/SlideOver'
+import { fmtDateTime, relativeTime } from '../lib/time'
 
 /**
  * 全局经验库（§7 RAG 双集合分库之一）
- * 来源 B 手动录入 / D 独立建库；案件材料库在各案件评估准备页管理
- * 支持语义检索演示（与评估链路同一召回通道）
+ * 来源 B 手动录入 / C 观点沉淀 / D 独立建库；案件材料库在各案件评估准备页自动入库
+ *
+ * 版式：列表是主体，检索是列表的控制器，新增收进抽屉。
+ *
+ * 早先这里是「左卡新增 + 右卡检索 + 下方列表」三块并列，那套排法来自 P3 阶段——
+ * 当时的目标是**证明召回通道能跑通**，所以版式按「两个并列的演示单元」来排。
+ * 现在通道早就是系统关键路径（评估启动即自动召回），这一页的真实职责变成了
+ * 「管理一批资料」，三块并列就暴露出两个问题：
+ *   1. 检索结果和条目列表本来就是同一批东西的两个视图，拆成两张卡会互相顶位置——
+ *      命中一多，下面的列表就被顶下去；
+ *   2. 录入是低频动作（一次办案沉淀一两条），却常年占掉半屏。
+ * 所以检索并入工具条、新增收进抽屉，整页只留一个列表。
  */
 
 const SOURCE_BADGE: Record<string, string> = {
@@ -13,17 +25,29 @@ const SOURCE_BADGE: Record<string, string> = {
   D: 'bg-[var(--brand-soft)] text-[var(--brand)]',
 }
 
+// 筛选条上按来源统计的顺序即此；A（证据文档）永远是 scope=case，不会出现在本页
+const SOURCE_LABEL: Record<string, string> = {
+  B: '手动录入',
+  C: '观点沉淀',
+  D: '独立建库',
+}
+
 export default function KnowledgeBase() {
   const [entries, setEntries] = useState<KnowledgeEntryItem[]>([])
   const [info, setInfo] = useState<{ backend: string; embedding: string } | null>(null)
-  const [title, setTitle] = useState('')
-  const [content, setContent] = useState('')
-  const [saving, setSaving] = useState(false)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[] | null>(null)
   const [searching, setSearching] = useState(false)
+  const [sourceFilter, setSourceFilter] = useState('all')
+  const [expandId, setExpandId] = useState('')
   const [error, setError] = useState('')
-  const [expandId, setExpandId] = useState<string>('')
+  const [notice, setNotice] = useState('')
+
+  // 新增抽屉
+  const [addOpen, setAddOpen] = useState(false)
+  const [title, setTitle] = useState('')
+  const [content, setContent] = useState('')
+  const [saving, setSaving] = useState(false)
 
   const load = () => {
     knowledgeApi.entries({ scope: 'global' })
@@ -36,6 +60,25 @@ export default function KnowledgeBase() {
     knowledgeApi.info().then(setInfo).catch(() => {})
   }, [])
 
+  /**
+   * 当前展示的「底表」：检索态用命中，否则用全部条目。
+   *
+   * 来源筛选与计数都基于它，所以两个态下工具条的含义是一致的
+   * （「全部 27」说的就是屏幕上这一份有 27 条）。
+   */
+  const base: (KnowledgeEntryItem | SearchHit)[] = hits ?? entries
+  const isSearch = hits !== null
+
+  const counts = useMemo(() => {
+    const m: Record<string, number> = {}
+    for (const e of base) m[e.source_type] = (m[e.source_type] ?? 0) + 1
+    return m
+  }, [base])
+
+  const shown = sourceFilter === 'all'
+    ? base
+    : base.filter((e) => e.source_type === sourceFilter)
+
   const add = async () => {
     if (!title.trim() || !content.trim()) return
     setSaving(true)
@@ -47,6 +90,8 @@ export default function KnowledgeBase() {
       })
       setTitle('')
       setContent('')
+      setAddOpen(false)
+      setNotice('已入全局经验库，评估启动时会参与自动召回。')
       load()
     } catch (e) {
       setError(String(e))
@@ -59,6 +104,9 @@ export default function KnowledgeBase() {
     if (!confirm(`删除经验库条目「${name}」？向量将同步清除。`)) return
     try {
       await knowledgeApi.deleteEntry(id)
+      // 删掉的条目可能正在命中结果里，一起清掉免得留下点不动的幽灵行
+      setHits((prev) => (prev ? prev.filter((h) => h.id !== id) : prev))
+      setExpandId('')
       load()
     } catch (e) {
       setError(String(e))
@@ -69,6 +117,8 @@ export default function KnowledgeBase() {
     if (!query.trim()) return
     setSearching(true)
     setHits(null)
+    setError('')
+    setExpandId('')
     try {
       setHits(await knowledgeApi.search({ query: query.trim(), scope: 'global', top_k: 5 }))
     } catch (e) {
@@ -78,124 +128,201 @@ export default function KnowledgeBase() {
     }
   }
 
+  const clearSearch = () => {
+    setQuery('')
+    setHits(null)
+    setExpandId('')
+  }
+
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-medium">全局经验库</h1>
-        <p className="text-sm text-muted mt-1">
-          跨案件沉淀的办案经验与类案数据，评估时可手动勾选注入、追问/模拟法庭自动召回
-          {info && (
-            <span className="ml-2 text-xs text-muted">
-              向量后端 {info.backend} · {info.embedding}
-            </span>
-          )}
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-medium">全局经验库</h1>
+          <p className="text-sm text-muted mt-1">
+            跨案件沉淀的办案经验与类案数据；评估启动时自动召回，模拟法庭与追问顾问共用同一召回通道
+            {info && (
+              <span className="ml-2 text-xs text-muted">
+                向量后端 {info.backend} · {info.embedding}
+              </span>
+            )}
+          </p>
+        </div>
+        <button
+          onClick={() => { setAddOpen(true); setNotice('') }}
+          className="shrink-0 bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+        >
+          + 新增经验
+        </button>
       </div>
 
       {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm">{error}</div>}
+      {notice && <div className="bg-[var(--success-soft)] text-[var(--success)] rounded-lg p-3 text-sm">{notice}</div>}
 
-      <div className="grid lg:grid-cols-2 gap-5">
-        {/* 新增条目 */}
-        <div className="bg-surface rounded-xl border border-line p-5">
-          <h2 className="text-sm font-medium mb-3">新增经验条目</h2>
+      <div className="bg-surface rounded-xl border border-line p-5">
+        {/* 工具条：检索 + 来源筛选，都作用在下面这一个列表上 */}
+        <div className="flex gap-2">
           <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="标题，如：杭州中院类案判赔经验"
-            className="w-full border border-line rounded-lg px-3 py-2 text-sm mb-2 focus:outline-none focus:border-brand"
-          />
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            placeholder="内容：类案数据、办案心得、判赔口径、抗辩应对经验…（长文自动分块向量化）"
-            rows={5}
-            className="w-full border border-line rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:border-brand resize-none"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && search()}
+            placeholder="语义检索本库，如：杭州 商标 判赔水平"
+            className="flex-1 min-w-0 border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-brand"
           />
           <button
-            onClick={add}
-            disabled={saving || !title.trim() || !content.trim()}
-            className="bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-40 transition-colors"
+            onClick={search}
+            disabled={searching || !query.trim()}
+            className="bg-fg text-white px-4 rounded-lg text-sm disabled:opacity-40 transition-colors shrink-0"
           >
-            {saving ? '入库中…' : '入全局经验库'}
+            {searching ? '检索中' : '检索'}
           </button>
         </div>
 
-        {/* 语义检索演示 */}
-        <div className="bg-surface rounded-xl border border-line p-5">
-          <h2 className="text-sm font-medium mb-3">语义检索（与评估召回同一通道）</h2>
-          <div className="flex gap-2 mb-3">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && search()}
-              placeholder="如：杭州 商标 判赔水平"
-              className="flex-1 border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-brand"
-            />
-            <button
-              onClick={search}
-              disabled={searching || !query.trim()}
-              className="bg-fg hover:bg-fg text-white px-4 rounded-lg text-sm disabled:opacity-40 transition-colors"
-            >
-              {searching ? '检索中' : '检索'}
+        {isSearch && (
+          <div className="flex items-center gap-2 mt-2.5 text-xs">
+            <span className="text-[var(--info)] bg-[var(--info-soft)] rounded-full px-2.5 py-0.5">
+              命中 {hits!.length} 条
+            </span>
+            <span className="text-muted">与评估召回同一通道</span>
+            <button onClick={clearSearch} className="ml-auto text-muted hover:text-brand">
+              清除检索 ×
             </button>
           </div>
-          {hits && (hits.length ? (
-            <div className="space-y-2">
-              {hits.map((h) => (
-                <div key={h.id} className="border border-line rounded-lg p-3 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">{h.title}</span>
-                    <span className="text-xs text-muted">{(h.score * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="text-xs text-muted mt-1 line-clamp-2">{h.matched_chunk}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted">无命中</p>
-          ))}
-        </div>
-      </div>
+        )}
 
-      {/* 条目列表 */}
-      <div className="bg-surface rounded-xl border border-line p-5">
-        <h2 className="text-sm font-medium mb-3">经验条目（{entries.length}）</h2>
-        {entries.length ? (
-          <div className="space-y-2">
-            {entries.map((e) => (
-              <div key={e.id} className="border-b border-line pb-2">
-                <div className="flex items-center gap-2">
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${SOURCE_BADGE[e.source_type] ?? 'bg-surface text-muted'}`}>
-                    {e.source_type_label}
-                  </span>
-                  <button
-                    onClick={() => setExpandId(expandId === e.id ? '' : e.id)}
-                    className="text-sm font-medium hover:text-brand flex-1 text-left"
-                  >
-                    {e.title}
-                  </button>
-                  <span className="text-[11px] text-muted">{e.chunk_count} 块</span>
-                  <button
-                    onClick={() => remove(e.id, e.title)}
-                    className="text-xs text-muted hover:text-[var(--danger)]"
-                  >
-                    删除
-                  </button>
-                </div>
-                {expandId === e.id && (
-                  <div className="text-xs text-muted mt-2 whitespace-pre-wrap leading-relaxed bg-canvas rounded-lg p-3">
-                    {e.content}
+        <div className="flex items-center gap-1 flex-wrap mt-3.5 pt-3 border-t border-line text-xs">
+          <FilterChip active={sourceFilter === 'all'} onClick={() => setSourceFilter('all')}>
+            全部 {base.length}
+          </FilterChip>
+          {Object.entries(SOURCE_LABEL).map(([key, label]) =>
+            counts[key] ? (
+              <FilterChip key={key} active={sourceFilter === key} onClick={() => setSourceFilter(key)}>
+                {label} {counts[key]}
+              </FilterChip>
+            ) : null,
+          )}
+        </div>
+
+        {/* 列表：检索态与全量态共用同一套行 */}
+        {shown.length ? (
+          <div className="mt-1">
+            {shown.map((e) => {
+              const hit = 'score' in e ? (e as SearchHit) : null
+              const open = expandId === e.id
+              return (
+                <div key={e.id} className="border-b border-line last:border-b-0">
+                  <div className="flex items-center gap-2.5 pt-3">
+                    <span
+                      className={`text-[11px] px-2 py-0.5 rounded-full shrink-0 ${SOURCE_BADGE[e.source_type] ?? 'bg-surface text-muted'}`}
+                    >
+                      {e.source_type_label}
+                    </span>
+                    <button
+                      onClick={() => setExpandId(open ? '' : e.id)}
+                      className="text-sm font-medium hover:text-brand text-left min-w-0 truncate"
+                      title={open ? '收起' : '展开全文'}
+                    >
+                      {e.title}
+                    </button>
+                    <span className="ml-auto text-xs text-muted shrink-0 whitespace-nowrap">
+                      {relativeTime(e.created_at)}
+                    </span>
+                    {hit && (
+                      <span className="text-xs text-[var(--info)] bg-[var(--info-soft)] rounded-full px-2 py-0.5 shrink-0">
+                        {Math.round(hit.score * 100)}%
+                      </span>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {/* 摘要：检索态显示真正命中的那一段，全量态显示内容开头 */}
+                  <p className="text-xs text-muted mt-1 truncate">
+                    {hit ? hit.matched_chunk : (e.snippet ?? e.content ?? '')}
+                  </p>
+
+                  {open && (
+                    <div className="mt-2 mb-1 bg-canvas rounded-lg p-3">
+                      <div className="text-xs text-muted whitespace-pre-wrap leading-relaxed">{e.content}</div>
+                      <div className="flex items-center gap-4 flex-wrap mt-3 pt-2 border-t border-line text-[11px] text-muted">
+                        <span>来源 {e.source_type_label}</span>
+                        <span>入库 {fmtDateTime(e.created_at)}</span>
+                        <span>分块 {e.chunk_count} 块</span>
+                        <button
+                          onClick={() => remove(e.id, e.title)}
+                          className="ml-auto text-muted hover:text-[var(--danger)]"
+                        >
+                          删除该条目
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         ) : (
-          <p className="text-sm text-muted">
-            暂无条目。办案中产生的经验也可在案件备忘录页一键沉淀到本库。
+          <p className="text-sm text-muted mt-4">
+            {isSearch
+              ? '无命中。换个说法再试，或确认这条经验是否已入库。'
+              : sourceFilter !== 'all'
+                ? '该来源下暂无条目。'
+                : '暂无条目。办案中产生的经验可在案件「评估结果」页底部一键沉淀到本库。'}
           </p>
         )}
       </div>
+
+      <SlideOver open={addOpen} onClose={() => setAddOpen(false)} title="新增经验条目" widthClass="w-[36rem]">
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs text-muted block mb-1.5">标题</label>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="如：杭州中院类案判赔经验"
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-brand"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-muted block mb-1.5">内容</label>
+            <textarea
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              placeholder="类案数据、办案心得、判赔口径、抗辩应对经验…"
+              rows={14}
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-brand resize-none"
+            />
+            <p className="text-[11px] text-muted mt-1.5">
+              长文会自动分块向量化，入库即刻可被检索与召回命中。
+            </p>
+          </div>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={add}
+              disabled={saving || !title.trim() || !content.trim()}
+              className="bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-40 transition-colors"
+            >
+              {saving ? '入库中…' : '入全局经验库'}
+            </button>
+            <button onClick={() => setAddOpen(false)} className="text-sm text-muted hover:text-fg px-3 py-2">
+              取消
+            </button>
+          </div>
+        </div>
+      </SlideOver>
     </div>
+  )
+}
+
+function FilterChip({
+  active, onClick, children,
+}: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-2.5 py-1 rounded-full transition-colors ${
+        active ? 'text-fg font-medium bg-canvas' : 'text-muted hover:text-fg'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
