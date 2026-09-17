@@ -606,6 +606,10 @@ def start_evaluation(case: Case = Depends(case_owned), db: Session = Depends(get
         db.add(Party(case_id=case.id, role=p["role"],
                      name=p["name"], party_type=p["party_type"]))
 
+    # 重新评估：启动即清空上一轮决策层结果（维度结果/分数/红线等），只保留输入字段。
+    # 这样「确认重新评估」后旧结果立刻消失、从头开始；首跑/草稿时 ctx 本就空，reset 为 no-op。
+    ctx.reset_evaluation()
+
     case.context_json = ctx.to_dict()
     case.status = "pending"
     db.commit()

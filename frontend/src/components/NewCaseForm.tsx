@@ -4,6 +4,7 @@ import { STEP_MOTION } from '../lib/motion'
 import { api, humanError, type CaseCreatePayload } from '../api'
 import { cn } from '../lib/utils'
 import EvidencePreview, { PreviewTarget } from './EvidencePreview'
+import ConfirmDialog from './ConfirmDialog'
 
 /**
  * 新建/编辑案件表单：从 NewCase 页面抽取的可复用组件。
@@ -63,6 +64,12 @@ export default function NewCaseForm({
   onActiveStepChange,
   navBreakpoint = 'xl',
   readOnly = false,
+  /**
+   * 是否需要「重新评估二次确认」。仅当案件「已有结果且非中止态」时为真——
+   * 此时点「保存并启动评估」会清空前一轮结果，必须先让用户确认。
+   * 由父级（CaseWorkbench → CaseDetailTab）根据案件状态算出后透传。
+   */
+  reEvalNeedsConfirm = false,
 }: {
   onCreated: (caseId: string, status: string) => void
   onStartMoot?: (caseId: string) => void
@@ -70,6 +77,12 @@ export default function NewCaseForm({
   initial?: CaseFormInitial
   /** 页级提示（如「已有评估结果」），展示在底栏左侧；不传则整行留给操作按钮 */
   notice?: string
+  /**
+   * 是否需要「重新评估二次确认」。仅当案件「已有结果且非中止态」时为真——
+   * 此时点「保存并启动评估」会清空前一轮结果，必须先让用户确认。
+   * 由父级（CaseWorkbench → CaseDetailTab）根据案件状态算出后透传。
+   */
+  reEvalNeedsConfirm?: boolean
   /**
    * 只读展示（公共示例案件）。
    *
@@ -269,7 +282,8 @@ export default function NewCaseForm({
     }
   }
 
-  /** 开始评估：校验全部 * 字段。创建模式直接正式建案；编辑模式先落库最新改动再启动评估。 */
+  /** 开始评估：校验全部 * 字段。创建模式直接正式建案；编辑模式先落库最新改动再启动评估。
+   *  若本案已有结果（reEvalNeedsConfirm 为真），先弹二次确认，确认后才真正清空前轮并重跑。 */
   async function startEval() {
     setError('')
     const miss = validateRequired()
@@ -277,18 +291,13 @@ export default function NewCaseForm({
       onActiveStepChange?.(miss)
       return
     }
+    if (reEvalNeedsConfirm) {
+      setShowReEvalConfirm(true)
+      return
+    }
     setSubmitting(true)
     try {
-      if (caseId) {
-        const updated = await api.updateDraft(caseId, buildPayload(true))
-        setZipSummary(updated.parse_summary ?? null)
-        await api.startEvaluation(caseId)
-        onCreated(caseId, 'pending')
-      } else {
-        const created = await api.createCase(buildPayload(false))
-        setZipSummary(created.parse_summary ?? null)
-        onCreated(created.id, 'pending')
-      }
+      await doStartEval()
     } catch (e) {
       setError(humanError(e))
       setSubmitting(false)
@@ -319,6 +328,23 @@ export default function NewCaseForm({
       setSubmitting(false)
     }
   }
+
+  /** 真正执行「落库 + 启动评估」：供首次启动与「二次确认后重跑」共用 */
+  async function doStartEval() {
+    if (caseId) {
+      const updated = await api.updateDraft(caseId, buildPayload(true))
+      setZipSummary(updated.parse_summary ?? null)
+      await api.startEvaluation(caseId)
+      onCreated(caseId, 'pending')
+    } else {
+      const created = await api.createCase(buildPayload(false))
+      setZipSummary(created.parse_summary ?? null)
+      onCreated(created.id, 'pending')
+    }
+  }
+
+  /** 整体重新评估的二次确认弹窗状态 */
+  const [showReEvalConfirm, setShowReEvalConfirm] = useState(false)
 
   // 输入框用 surface 浅灰底：页面/抽屉都是白底，浅灰底才能让输入框有明确边界
   const inputCls =
@@ -683,6 +709,7 @@ export default function NewCaseForm({
   // fieldset 只做「整体禁用」用，不参与布局：外层调用点都是普通的 min-w-0 容器，
   // 多一层块级包装不改变卡片本身的限高与撑满链（卡片自带 clamp 高度）。
   return (
+    <>
     <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
     <div
       className="rounded-xl border border-line bg-canvas flex flex-col overflow-hidden"
@@ -784,6 +811,28 @@ export default function NewCaseForm({
 
     </div>
     </fieldset>
+
+    {/* 整体重新评估二次确认：放在 fieldset 外，避免被只读态的 disabled 牵连 */}
+    <ConfirmDialog
+      open={showReEvalConfirm}
+      title="重新评估确认"
+      message="本案已有评估结果。确认重新评估后，前一轮的全部评估结果将被清空，并从头开始新一轮评估（此操作不可撤销）。"
+      confirmText="确认重新评估"
+      cancelText="取消"
+      danger
+      onConfirm={async () => {
+        setShowReEvalConfirm(false)
+        setSubmitting(true)
+        try {
+          await doStartEval()
+        } catch (e) {
+          setError(humanError(e))
+          setSubmitting(false)
+        }
+      }}
+      onCancel={() => setShowReEvalConfirm(false)}
+    />
+    </>
   )
 }
 

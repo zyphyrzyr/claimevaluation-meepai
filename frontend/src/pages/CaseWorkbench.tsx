@@ -480,6 +480,9 @@ export default function CaseWorkbench() {
   const status = detail.status
   const st = STATUS_BADGE[status] ?? STATUS_BADGE.pending
   const evaluated = EVALUATED_STATUSES.includes(status)
+  // 整体重新评估需二次确认：仅「已完成/部分/受阻」这类确有余量结果可丢的状态，
+  // 不含 aborted（已被终止清空、无结果可丢）与 evaluating（运行中本就禁启）。
+  const reEvalNeedsConfirm = ['completed', 'partial', 'blocked'].includes(status)
 
   const fileCount = detail.evidence_files?.length ?? 0
   const isPublic = detail.is_public === true
@@ -610,6 +613,7 @@ export default function CaseWorkbench() {
             <CaseDetailTab
               detail={detail}
               evaluated={evaluated}
+              reEvalNeedsConfirm={reEvalNeedsConfirm}
               activeStep={activeStep}
               onActiveStepChange={setActiveStep}
               onSaved={onDraftSaved}
@@ -688,6 +692,7 @@ function SummaryChip({ label, value }: { label: string; value?: string | null })
 function CaseDetailTab({
   detail,
   evaluated,
+  reEvalNeedsConfirm,
   activeStep,
   onActiveStepChange,
   onSaved,
@@ -697,6 +702,8 @@ function CaseDetailTab({
 }: {
   detail: any
   evaluated: boolean
+  /** 有结果且非中止态：整体重新评估前需二次确认 */
+  reEvalNeedsConfirm: boolean
   activeStep: string
   onActiveStepChange: (id: string) => void
   onSaved: () => void
@@ -724,6 +731,7 @@ function CaseDetailTab({
       activeStep={activeStep}
       onActiveStepChange={onActiveStepChange}
       readOnly={readOnly}
+      reEvalNeedsConfirm={reEvalNeedsConfirm}
       notice={evaluated ? '已有评估结果，修改后建议重新评估' : undefined}
       onCreated={(cid, status) => {
         if (status === 'pending') onStarted()

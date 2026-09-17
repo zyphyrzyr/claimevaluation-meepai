@@ -150,19 +150,38 @@ class TestDraftLifecycle:
             db.close()
 
     def test_start_evaluation_on_completed_resets_pending(self, client):
-        """已评估案件可重新启动评估：校验必填项后状态重置为 pending。"""
+        """已评估案件可重新启动评估：校验必填项后状态重置为 pending，且前一轮结果被清空。"""
         created = client.post("/api/cases", json=_full_payload()).json()
         case_id = created["id"]
         from core.database import SessionLocal, Case
+        from core.case_context import CaseContext
         db = SessionLocal()
         try:
-            db.query(Case).filter(Case.id == case_id).update({"status": "completed"})
+            # 模拟「上一轮评估已产出结果」：在已有输入字段的基础上追加决策层结果
+            case = db.query(Case).filter(Case.id == case_id).one()
+            ctx = CaseContext.from_dict(case.context_json or {})
+            ctx.case_id = case_id
+            ctx.set_dimension("rights", {"score": 80, "analysis": "x"}, status="ok")
+            ctx.scores = {"final": 80}
+            case.status = "completed"
+            case.context_json = ctx.to_dict()
             db.commit()
         finally:
             db.close()
         resp = client.post(f"/api/cases/{case_id}/start-evaluation")
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == "pending"
+        # 前一轮结果必须被清空（整体重跑，从头开始）
+        db = SessionLocal()
+        try:
+            reloaded = db.query(Case).filter(Case.id == case_id).one()
+            ctx2 = CaseContext.from_dict(reloaded.context_json or {})
+            assert ctx2.dimension_results == {}, "重新评估应清空前一轮维度结果"
+            assert ctx2.scores == {}, "重新评估应清空前一轮分数"
+            # 输入字段保留（案情/当事人等），重置只动决策层
+            assert reloaded.status == "pending"
+        finally:
+            db.close()
 
     def test_start_evaluation_rejected_when_evaluating(self, client):
         created = client.post("/api/cases", json=_full_payload()).json()
