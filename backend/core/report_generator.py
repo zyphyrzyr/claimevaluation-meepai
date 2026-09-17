@@ -321,8 +321,19 @@ def enrich_with_pkulaw(data: Dict[str, Any], case_id: str,
         }
         verification = pkulaw_api.run_verification_phase(data.get("markdown", ""))
 
+        # 关键修复：检索阶段若返回 error（不抛异常）而 verification 仍回 ok，
+        # 旧逻辑会直接拿 verification.status 当最终状态，导致「检索全空却显示成功」
+        # 的静默失败。这里把检索错误也透传出来。
+        search_errors = [e for e in (rights.get("error"), infr.get("error")) if e]
+        vstatus = verification.get("status")
+        if vstatus in ("auth_error", "error") or search_errors:
+            final_status = vstatus if vstatus in ("auth_error", "error") else "error"
+        else:
+            final_status = "ok"
+
         data["pkulaw"] = {
-            "status": verification.get("status") or "ok",
+            "status": final_status,
+            "error": "; ".join(search_errors) or verification.get("error"),
             "reference": reference,
             "verification": verification,
             "summary": reference and verification.get("_summary") or "",
@@ -342,8 +353,21 @@ def render_pkulaw_section(pk: Dict[str, Any], numbering=None) -> List[str]:
     numbering 传 _Sections 时章节号顺延主流程；不传则不带编号
     （调用方只拿它判断有无内容时也用这种）。
     """
-    if pk.get("status") in (None, "skipped", "error"):
-        return []  # 未配置或失败：不留空章节，报告保持干净
+    status = pk.get("status")
+    if status in (None, "skipped"):
+        return []  # 未配置 token：不留空章节（设计约束3）
+
+    if status in ("error", "auth_error"):
+        # 检索/核验失败也要让用户看见，而不是静默消失（问题3：北大法宝调用失败）。
+        err = pk.get("error") or "北大法宝增强未成功，但未记录具体原因"
+        title = "法律检索与引用核验（北大法宝）"
+        lines = [numbering.heading(title) if numbering is not None else f"## {title}", ""]
+        lines.append(f"> ⚠️ **北大法宝增强未成功**：{err}")
+        lines.append("")
+        lines.append("_（本报告未包含法宝法条/类案参考，不影响已完成的评估结论；"
+                     "可检查 PKULAW_API_TOKEN 配置后重新生成报告。）_")
+        lines.append("")
+        return lines
 
     title = "法律检索与引用核验（北大法宝）"
     lines = [numbering.heading(title) if numbering is not None else f"## {title}", ""]

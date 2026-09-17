@@ -303,7 +303,56 @@ class TestMemoEnrichment:
         assert "某某著作权侵权案" in md
         assert "核验通过 2 条" in md
 
-    def test_section_skipped_for_error_and_skipped_status(self):
+    def test_section_skipped_for_unconfigured_but_surfaces_error(self):
+        # 未配置 token：不留空章节
         assert report_generator.render_pkulaw_section({"status": "skipped"}) == []
-        assert report_generator.render_pkulaw_section({"status": "error"}) == []
         assert report_generator.render_pkulaw_section({}) == []
+        # 检索/核验失败：必须显式露出原因，不能静默消失（问题3）
+        err_lines = report_generator.render_pkulaw_section(
+            {"status": "error", "error": "北大法宝鉴权失败(401)"})
+        assert err_lines, "error 状态必须渲染提示，而非空章节"
+        assert any("北大法宝鉴权失败(401)" in ln for ln in err_lines)
+
+
+class TestExtractItemsShapes:
+    """_extract_items 必须覆盖北大法宝四种返回形态，否则数据被静默丢弃（问题3 根因）。
+
+    早期实现只认 `content[0].text` = JSON 列表，导致：
+      - 单对象（get_article / law_recognition）→ 0 结果
+      - 类案散文（search_case）→ 0 类案
+    """
+
+    def test_none_and_error_return_empty(self):
+        assert pkulaw_api._extract_items(None) == []
+        assert pkulaw_api._extract_items({"error": "boom"}) == []
+
+    def test_json_list_string(self):
+        rpc = {"result": {"content": [
+            {"type": "text", "text": '[{"title": "商标法"}, {"title": "著作权法"}]'}]}}
+        items = pkulaw_api._extract_items(rpc)
+        assert len(items) == 2 and items[0]["title"] == "商标法"
+
+    def test_json_object_wrapped_as_single(self):
+        # get_article / law_recognition 常返回单对象而非列表——必须包成单元素列表
+        rpc = {"result": {"content": [
+            {"type": "text", "text": '{"title": "商标法", "article": "第五十七条…"}'}]}}
+        items = pkulaw_api._extract_items(rpc)
+        assert len(items) == 1 and items[0]["title"] == "商标法"
+
+    def test_structured_content_list(self):
+        rpc = {"result": {"structuredContent": {"result": [
+            {"text": "商标法"}, {"text": "著作权法"}]}}}
+        items = pkulaw_api._extract_items(rpc)
+        assert len(items) == 2
+
+    def test_case_prose_parsed(self):
+        prose = ("共返回 3 条案例（语义检索候选）：\n\n"
+                 "1. [普通案例] 某某侵害商标权纠纷一审民事判决书 | (2017)苏0412民初6116号\n"
+                 "   文书类型：判决书 | 案件类型：民事案件 | 审理法院：常州市某人民法院 | 审结日期：2017-10-25\n"
+                 "2. [普通案例] 另一案 | (2018)沪01民终1234号\n"
+                 "   审理法院：上海市第一中级人民法院")
+        rpc = {"result": {"content": [{"type": "text", "text": prose}]}}
+        items = pkulaw_api._extract_items(rpc)
+        assert len(items) == 2
+        assert items[0]["ahao"] == "(2017)苏0412民初6116号"
+        assert "常州市某人民法院" in items[0]["court"]

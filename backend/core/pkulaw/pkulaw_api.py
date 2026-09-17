@@ -5,9 +5,10 @@
 """
 
 import json
+import re
 import urllib.request
 import urllib.error
-from typing import Dict
+from typing import Dict, List
 
 from ..config import get_runtime_settings
 
@@ -141,22 +142,65 @@ def _rpc_failed(rpc_result) -> str:
 
     专用于把被 _rpc_call 吞掉的 401 / 网络错误显式暴露出来，
     避免上层把「鉴权失败」误当成「检索到 0 条法条」。
+
+    注意：北大法宝走 JSON-RPC，鉴权/业务错误常以结构化对象返回——
+    {"error": {"code": 401, "message": "..."}}。旧实现只在 err 是字符串时做子串
+    匹配，dict 时 `"401" in err` 测的是「键名」而非「值」，会漏掉这类错误，
+    导致 _extract_items 返回 [] 却看起来「成功检索到 0 条」——典型的静默失败。
     """
     if not isinstance(rpc_result, dict):
         return ""
     err = rpc_result.get("error")
     if not err:
         return ""
-    if "401" in err or "Unauthorized" in err or "Authorization" in err:
+    # 结构化 JSON-RPC 错误：把 code + message 拼成可匹配的文本
+    if isinstance(err, dict):
+        code = err.get("code")
+        msg = err.get("message") or err.get("data") or ""
+        err_text = f"{code} {msg}"
+    else:
+        err_text = str(err)
+    if "401" in err_text or "Unauthorized" in err_text or "Authorization" in err_text:
         return "北大法宝鉴权失败(401)：PKULAW_API_TOKEN 无效或已过期"
-    if "403" in err or "Forbidden" in err:
+    if "403" in err_text or "Forbidden" in err_text:
         return "北大法宝无权限(403)：该 token 未开通对应工具"
-    return f"北大法宝调用失败：{err}"
+    return f"北大法宝调用失败：{err_text}"
 
 
-def _extract_items(rpc_result: dict) -> list:
-    """从 rpc 结果中提取条目列表
-    实际结构: result.content[0].text = JSON 字符串
+# 类案散文头部： "1. [普通案例] <标题> | <案号>"  —— 北大法宝语义检索常返回这种散文而非 JSON。
+# 案号本身可能含括号（如 (2017)苏0412民初6116号），所以案号捕获到行尾而非只到第一个 )。
+_CASE_HEADER = re.compile(r'^\s*\d+\.\s*\[([^\]]*)\]\s*(.+?)\s*\|\s*(.+)$', re.MULTILINE)
+
+
+def _parse_case_prose(text: str) -> List[dict]:
+    """把类案检索返回的散文（"共返回 N 条案例… 1. [类型] 标题 | (案号)…"）抽成结构化条目。
+
+    解析不出来就返回 []，绝不抛错——失败只是「少几个类案」，不能让报告崩。
+    """
+    items: List[dict] = []
+    for m in _CASE_HEADER.finditer(text):
+        ctype, title, ahao = m.group(1), m.group(2).strip(), m.group(3).strip()
+        rest = text[m.end():]
+        court_m = re.search(r'审理法院[：:]\s*([^\n|]+)', rest)
+        items.append({
+            "title": title,
+            "court": court_m.group(1).strip() if court_m else "",
+            "ahao": ahao,
+            "case_type": ctype,
+        })
+    return items
+
+
+def _extract_items(rpc_result: dict) -> List[dict]:
+    """从 rpc 结果中提取条目列表。
+
+    北大法宝 MCP 返回形态不统一，必须覆盖四种：
+      1. result.structuredContent.result = list        （law_recognition/anhao/search_article 常见）
+      2. result.content[0].text = JSON 列表字符串        （search_article 常见）
+      3. result.content[0].text = JSON 对象（单条）       （get_article/law_recognition 常见）
+         —— 旧实现只认 list，单对象会被整体丢弃 → 0 结果（问题3 的根因之一）
+      4. result.content[0].text = 散文（类案语义检索）    （search_case 常见）
+         —— 旧实现 json.loads 抛错后静默返回 [] → 0 类案（问题3 的另一根因）
     """
     if not rpc_result or "error" in rpc_result:
         return []
@@ -164,25 +208,45 @@ def _extract_items(rpc_result: dict) -> list:
     if not isinstance(r, dict):
         return []
 
-    # 结构1: result.content[0].text = JSON 字符串
+    # 1) structuredContent.result（最稳定，直接是 list / 单对象）
+    sc = r.get("structuredContent") if isinstance(r.get("structuredContent"), dict) else None
+    if sc is not None:
+        sc_res = sc.get("result")
+        if isinstance(sc_res, list):
+            return sc_res
+        if isinstance(sc_res, dict):
+            return [sc_res]
+
+    # 2) content[0].text：JSON 列表 / JSON 对象 / 类案散文
     content = r.get("content", [])
     if isinstance(content, list) and content:
         first = content[0]
         if isinstance(first, dict) and "text" in first:
+            text = first["text"]
             try:
-                parsed = json.loads(first["text"])
+                parsed = json.loads(text)
                 if isinstance(parsed, list):
                     return parsed
+                if isinstance(parsed, dict):  # 单对象包裹成单元素列表
+                    return [parsed]
             except (json.JSONDecodeError, TypeError):
                 pass
+            # 散文（类案）：编号列表
+            prose = _parse_case_prose(text)
+            if prose:
+                return prose
 
-    # 结构2: result.result 或 result.Data = 列表
+    # 3) result.result / result.Data 直出
     items = r.get("result", r.get("Result", []))
     if not items:
         items = r.get("Data", r.get("data", []))
     if not items and r.get("original"):
         items = [r]
-    return items if isinstance(items, list) else []
+    if isinstance(items, list):
+        return items
+    if isinstance(items, dict):
+        return [items]
+    return []
 
 
 # ==========================================
