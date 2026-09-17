@@ -4,14 +4,17 @@
 - 案件材料自动入库（来源 A）、评分链路手动勾选注入、观点沉淀（来源 C）
 """
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from typing import Optional
+
+from core.auth import (
+    case_owned, case_readable, current_user_optional, entry_owned, require_user,
+)
 from core.case_context import CaseContext
-from core.database import Case, KnowledgeEntry, get_db
+from core.database import Case, KnowledgeEntry, User, get_db
 from core.knowledge import (
     add_knowledge, delete_knowledge, list_entries, search_knowledge,
     ingest_case_materials, info,
@@ -40,30 +43,33 @@ class EntryCreate(BaseModel):
 
 @router.get("/entries")
 def get_entries(scope: Optional[str] = None, case_id: Optional[str] = None,
-                db: Session = Depends(get_db)):
-    return list_entries(db, scope=scope, case_id=case_id)
+                db: Session = Depends(get_db),
+                user: Optional[User] = Depends(current_user_optional)):
+    return list_entries(db, scope=scope, case_id=case_id,
+                        user_id=user.id if user else None)
 
 
 @router.post("/entries")
-def create_entry(payload: EntryCreate, db: Session = Depends(get_db)):
+def create_entry(payload: EntryCreate, db: Session = Depends(get_db),
+                 user: User = Depends(require_user)):
     if payload.scope == "case":
         if not payload.case_id:
             raise HTTPException(400, "案件材料（scope=case）必须提供 case_id")
-        case = db.query(Case).filter(Case.id == payload.case_id).first()
-        if not case:
-            raise HTTPException(404, "案件不存在")
+        # 案件材料挂到别人的案子上等于替别人加料，按案件归属校验
+        case_owned(case_id=payload.case_id, user=user, db=db)
     try:
         entry = add_knowledge(db, scope=payload.scope, source_type=payload.source_type,
                               title=payload.title, content=payload.content,
-                              case_id=payload.case_id)
+                              case_id=payload.case_id, user_id=user.id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "id": entry.id}
 
 
 @router.delete("/entries/{entry_id}")
-def remove_entry(entry_id: str, db: Session = Depends(get_db)):
-    if not delete_knowledge(db, entry_id):
+def remove_entry(entry: KnowledgeEntry = Depends(entry_owned),
+                 db: Session = Depends(get_db)):
+    if not delete_knowledge(db, entry.id):
         raise HTTPException(404, "条目不存在")
     return {"ok": True}
 
@@ -78,15 +84,18 @@ class SearchRequest(BaseModel):
 
 
 @router.post("/search")
-def search(payload: SearchRequest, db: Session = Depends(get_db)):
+def search(payload: SearchRequest, db: Session = Depends(get_db),
+           user: Optional[User] = Depends(current_user_optional)):
     return search_knowledge(db, payload.query, case_id=payload.case_id,
-                            scope=payload.scope, top_k=payload.top_k)
+                            scope=payload.scope, top_k=payload.top_k,
+                            user_id=user.id if user else None)
 
 
 # ---------------------------------------------------------- 案件级操作
 
 @router.get("/cases/{case_id}/entries")
-def case_entries(case_id: str, db: Session = Depends(get_db)):
+def case_entries(case_id: str, db: Session = Depends(get_db),
+                 case: Case = Depends(case_readable)):
     return list_entries(db, scope="case", case_id=case_id)
 
 
@@ -95,11 +104,9 @@ class IngestRequest(BaseModel):
 
 
 @router.post("/cases/{case_id}/ingest")
-def ingest(case_id: str, payload: IngestRequest, db: Session = Depends(get_db)):
+def ingest(case_id: str, payload: IngestRequest, db: Session = Depends(get_db),
+           case: Case = Depends(case_owned)):
     """来源 A：证据文本自动入库（案件材料库，case_id 隔离）"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     count = ingest_case_materials(db, case_id, payload.evidence_texts)
     return {"ok": True, "ingested": count}
 
@@ -117,14 +124,14 @@ class DepositRequest(BaseModel):
 
 
 @router.post("/cases/{case_id}/deposit")
-def deposit(case_id: str, payload: DepositRequest, db: Session = Depends(get_db)):
+def deposit(case_id: str, payload: DepositRequest, db: Session = Depends(get_db),
+            case: Case = Depends(case_owned), user: User = Depends(require_user)):
     """来源 C：本案讨论/评估结论沉淀到全局经验库（跨案复用）"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     content = payload.content.strip()
     if not content:
         raise HTTPException(400, "沉淀内容不能为空")
+    # 沉淀出来的全局经验记在自己名下：它是跨案复用的私有经验，
+    # 不该变成所有人都看得到、却谁都删不掉的公共数据。
     entry = add_knowledge(db, scope="global", source_type="C",
-                          title=payload.title, content=content)
+                          title=payload.title, content=content, user_id=user.id)
     return {"ok": True, "id": entry.id, "title": entry.title}

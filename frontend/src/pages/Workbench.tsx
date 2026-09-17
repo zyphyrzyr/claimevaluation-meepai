@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { api, CaseItem } from '../api'
+import { api, humanError, type CaseItem } from '../api'
 import SlideOver from '../components/SlideOver'
 import NewCaseForm, { FORM_SECTIONS } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
+import { useAuth } from '../auth/AuthProvider'
 
 /**
  * 案件列表。
@@ -108,6 +109,9 @@ export default function Workbench() {
   /** 抽屉内表单的当前步骤（与左侧导航联动） */
   const [drawerStep, setDrawerStep] = useState<string>(FORM_SECTIONS[0].id)
   const navigate = useNavigate()
+  const auth = useAuth()
+  /** 当前账号标识：换人（登录 / 登出 / 切换）时列表必须重拉 */
+  const ownerKey = auth.user?.id ?? 'anonymous'
 
   // 首次渲染不必 debounce（没有「刚敲的字」要等），否则会白等 300ms 才出数据
   const mounted = useRef(false)
@@ -134,10 +138,12 @@ export default function Workbench() {
         // 后端会把越界页码夹到最后一页，这里跟随它——删空最后一页时自动退一页
         if (res.page !== page) setPage(res.page)
       })
-      .catch((e) => { if (alive) setError(String(e)) })
+      .catch((e) => { if (alive) setError(humanError(e)) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
-  }, [query, page, pageSize, reloadKey])
+    // 登录/登出也要重拉：可见范围是「自己的 + 公共的」，换人就换了结果集。
+    // 少了这一项，登出后页面上还挂着上一个人的私有案件，看着像隔离没生效。
+  }, [query, page, pageSize, reloadKey, ownerKey])
 
   const openNew = () => {
     setDrawerOpen(true)
@@ -145,6 +151,9 @@ export default function Workbench() {
 
   const handleCreated = (id: string) => {
     setDrawerOpen(false)
+    // 侧边栏那行「N 个案件」要跟上：它是首屏 /auth/me 取的快照，
+    // 不刷新建完案后还显示旧数字，看着像没建成。
+    auth.refresh()
     // 建完直接进个案工作台，不必再拉一次列表——这次拉取的结果当场就被路由切换丢弃了
     navigate(`/cases/${id}`)
   }
@@ -155,9 +164,10 @@ export default function Workbench() {
     }
     try {
       await api.deleteCase(c.id)
+      auth.refresh()
       setReloadKey((k) => k + 1)
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
     }
   }
 
@@ -243,13 +253,25 @@ export default function Workbench() {
                   className={`${GRID} py-4 border-b border-line last:border-b-0 hover:bg-surface transition-colors`}
                 >
                   <div className="col-span-5 min-w-0">
-                    <Link
-                      to={`/cases/${c.id}`}
-                      className="font-medium text-fg hover:underline line-clamp-2"
-                      title={c.name}
-                    >
-                      {c.name}
-                    </Link>
+                    <div className="flex items-center gap-1.5">
+                      <Link
+                        to={`/cases/${c.id}`}
+                        className="font-medium text-fg hover:underline line-clamp-2"
+                        title={c.name}
+                      >
+                        {c.name}
+                      </Link>
+                      {/* 公共示例数据：先说清楚「这不是你的」，否则用户点进去
+                          改一半才发现保存不了，界面上完全看不出原因。 */}
+                      {c.is_public && (
+                        <span
+                          className="shrink-0 text-[10px] text-muted bg-surface border border-line px-1.5 py-0.5 rounded"
+                          title="公共示例数据：所有人可见、只读。认领到自己账号后可编辑。"
+                        >
+                          公共
+                        </span>
+                      )}
+                    </div>
                     {parties && (
                       <div className="text-[11px] text-muted mt-0.5 truncate" title={parties}>
                         {parties}
@@ -281,12 +303,23 @@ export default function Workbench() {
                     >
                       进入个案工作台
                     </Link>
-                    <button
-                      onClick={() => handleDelete(c)}
-                      className="text-xs text-danger hover:underline whitespace-nowrap"
-                    >
-                      删除
-                    </button>
+                    {c.is_public ? (
+                      // 公共数据删不掉（后端 403）。与其让它点了报错，
+                      // 不如直接不给按钮，并在悬停时说明原因。
+                      <span
+                        className="text-xs text-muted/50 whitespace-nowrap cursor-not-allowed"
+                        title="公共示例数据不可删除"
+                      >
+                        删除
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleDelete(c)}
+                        className="text-xs text-danger hover:underline whitespace-nowrap"
+                      >
+                        删除
+                      </button>
+                    )}
                   </div>
                 </div>
               )

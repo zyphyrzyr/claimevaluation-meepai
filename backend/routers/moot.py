@@ -17,9 +17,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core import moot_service
+from core.auth import case_owned, case_readable, current_user_optional
 from core.case_context import CaseContext
 from core.config import CAUSE_TRADEMARK, SUPPORTED_CAUSE_TYPES
-from core.database import Case, MootRound, get_db
+from core.database import Case, MootRound, User, get_db
 from core.orchestrator import Orchestrator
 
 router = APIRouter()
@@ -48,11 +49,9 @@ def _save_rounds(db: Session, case_id: Optional[str], rounds: list, mode: str) -
 # ============================================================
 
 @router.post("/{case_id}/run")
-def run_embedded_moot(case_id: str, db: Session = Depends(get_db)):
+def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
+                      case: Case = Depends(case_owned)):
     """内嵌模拟法庭：SSE 直播逐轮发言；结束后系数回写 + 决策合成重算"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     ctx = _load_ctx(case)
 
     if ctx.scores.get("final") is None:
@@ -64,7 +63,9 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db)):
         from core.knowledge import recall_for_context
         recall_query = (ctx.case_description or "")[:200] + " " + " ".join(
             g.get("item", "") for g in (ctx.gap_list or [])[:3])
-        recall = recall_for_context(db, case_id, recall_query, top_k=3)
+        # 案件的归属人 = 经验库的可见范围（案件已过 case_owned 校验）
+        recall = recall_for_context(db, case_id, recall_query, top_k=3,
+                                    user_id=case.user_id)
     except Exception:
         pass
 
@@ -124,11 +125,9 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{case_id}")
-def get_moot(case_id: str, db: Session = Depends(get_db)):
+def get_moot(case_id: str, db: Session = Depends(get_db),
+             case: Case = Depends(case_readable)):
     """查询已保存的庭审记录与修正系数"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     ctx = _load_ctx(case)
     return {
         "case_id": case.id,
@@ -150,12 +149,23 @@ class StandaloneMootRequest(BaseModel):
 
 
 @router.post("/standalone")
-def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(get_db)):
-    """独立演练：不评估、不回写评分，输出演练报告。传 case_id 时记录挂到本案并从本案材料库召回。"""
+def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(get_db),
+                        user: Optional[User] = Depends(current_user_optional)):
+    """独立演练：不评估、不回写评分，输出演练报告。传 case_id 时记录挂到本案并从本案材料库召回。
+
+    case_id 不在路径里（在请求体），所以拿不到路径依赖项，这里显式校验一次：
+    带了 case_id 的独立演练会读该案材料库、并把庭审记录写回该案，实质是读写那个案件。
+    不带 case_id 的纯演练不碰任何案件，允许匿名。
+    """
     if not payload.case_description.strip():
         raise HTTPException(400, "案情描述不能为空")
     if payload.cause_type not in SUPPORTED_CAUSE_TYPES:
         raise HTTPException(400, f"不支持的案由: {payload.cause_type}")
+    owner_id = user.id if user else None
+    if payload.case_id:
+        if user is None:
+            raise HTTPException(401, "请先登录")
+        owner_id = case_owned(case_id=payload.case_id, user=user, db=db).user_id
 
     events: queue.Queue = queue.Queue()
     cid = payload.case_id
@@ -164,7 +174,8 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
     recall = {"context": "", "refs": []}
     try:
         from core.knowledge import recall_for_context
-        recall = recall_for_context(db, cid, payload.case_description[:300], top_k=3)
+        recall = recall_for_context(db, cid, payload.case_description[:300], top_k=3,
+                                    user_id=owner_id)
     except Exception:
         pass
 

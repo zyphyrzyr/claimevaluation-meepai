@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from core.auth import case_owned, case_readable
 from core.case_context import CaseContext
 from core.config import (SCORE_THRESHOLD_GO, SCORE_THRESHOLD_PATCH,
                          QUADRANT_AXIS_MID, POWER_MEAN_P)
@@ -133,12 +134,17 @@ def nodes_meta():
             "rerunnable": RERUNNABLE_NODES}
 
 
-def _auto_recall(db: Session, case: Case, ctx: CaseContext) -> int:
+def _auto_recall(db: Session, case: Case, ctx: CaseContext,
+                 user_id: Optional[str] = None) -> int:
     """后台静默召回（方案 B）：确定性查询词 → 双库检索 → 写入注入快照 + 审计留痕。
 
     - 查询词 = 案由 + 业务目标 + 案情描述截断，纯规则拼接，不用 LLM（确定性可复现）
     - 检索走 search_knowledge 双库（防跨案污染规则内建）；异常降级为空集，不阻塞评估
     - 覆盖 ctx.injected_knowledge（原手动注入字段），下游 evaluate_nodes 注入路径零改动
+
+    user_id 决定全局经验库能召回谁的东西。这是整条链路里唯一一处
+    「别人的数据会被直接写进 prompt」的地方：漏传的后果不是报错，而是
+    评估报告里多出几条来源不明的经验，看上去完全正常。
     """
     from core.knowledge import search_knowledge
     from core.knowledge import embeddings as emb
@@ -156,8 +162,11 @@ def _auto_recall(db: Session, case: Case, ctx: CaseContext) -> int:
                       effect="未执行自动召回，注入集为空")
         return 0
     try:
+        # 没显式传就按案件归属来：案件是谁的，召回范围就是谁的。
+        # 调用方漏传时这样至少还是「按案件」而不是退化成「只看公共」的静默少召回。
+        owner = user_id if user_id is not None else case.user_id
         hits = search_knowledge(db, query, case_id=case.id, scope=None,
-                                top_k=AUTO_RECALL_TOP_K)
+                                top_k=AUTO_RECALL_TOP_K, user_id=owner)
     except Exception as e:
         ctx.injected_knowledge = []
         ctx.log_event("knowledge_auto_recall", content=f"召回异常: {e}",
@@ -184,16 +193,14 @@ def _auto_recall(db: Session, case: Case, ctx: CaseContext) -> int:
 
 
 @router.post("/{case_id}/run")
-def run_evaluation(case_id: str, db: Session = Depends(get_db)):
+def run_evaluation(case_id: str, db: Session = Depends(get_db),
+                   case: Case = Depends(case_owned)):
     """启动完整评估，SSE 推送节点进度（支持暂停/恢复/终止）。
 
     2026-09-03 方案 B：材料注入后台化——启动时先执行自动召回
     （确定性查询词 + 双库语义检索），命中写入 ctx.injected_knowledge
     并留审计，替代原「评估准备页手动勾选」。用户无感，过程可查。
     """
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     existing = RUNS.get(case_id)
     if existing and existing.status in ("running", "paused"):
         raise HTTPException(409, "评估正在进行中，请先暂停/终止或等待完成")
@@ -206,7 +213,9 @@ def run_evaluation(case_id: str, db: Session = Depends(get_db)):
         try:
             case.status = "evaluating"
             db.commit()
-            recalled = _auto_recall(db, case, ctx)
+            # 用案件的归属人去限定经验库范围：走到这里案件必然已通过
+            # case_owned 校验，case.user_id 就是当前登录用户。
+            recalled = _auto_recall(db, case, ctx, user_id=case.user_id)
             ctrl.events.put({"event": "recall_done", "node": "",
                              "label": f"已自动召回 {recalled} 条参考材料注入评估节点",
                              "status": "ok"})
@@ -264,7 +273,7 @@ def run_evaluation(case_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{case_id}/pause")
-def pause_evaluation(case_id: str):
+def pause_evaluation(case_id: str, case: Case = Depends(case_owned)):
     """暂停：置 pause 信号，编排器在下一个检查点挂起（线程保持、几乎不耗算力）。"""
     ctrl = RUNS.get(case_id)
     if not ctrl:
@@ -276,7 +285,7 @@ def pause_evaluation(case_id: str):
 
 
 @router.post("/{case_id}/resume")
-def resume_evaluation(case_id: str):
+def resume_evaluation(case_id: str, case: Case = Depends(case_owned)):
     """恢复：清除 pause 信号并（按需）重开 SSE 流。
 
     - 若已有活跃流（同一标签页未刷新）：仅发信号，不返回新流，避免事件被两个消费者瓜分。
@@ -307,7 +316,7 @@ def resume_evaluation(case_id: str):
 
 
 @router.post("/{case_id}/stop")
-def stop_evaluation(case_id: str):
+def stop_evaluation(case_id: str, case: Case = Depends(case_owned)):
     """终止：置 abort 信号（若在暂停中同时解除阻塞），编排器在下一个检查点抛出 StopRun 收尾。"""
     ctrl = RUNS.get(case_id)
     if not ctrl:
@@ -318,7 +327,8 @@ def stop_evaluation(case_id: str):
 
 
 @router.get("/{case_id}/run-state")
-def evaluation_run_state(case_id: str, db: Session = Depends(get_db)):
+def evaluation_run_state(case_id: str, db: Session = Depends(get_db),
+                         case: Case = Depends(case_readable)):
     """查询当前评估运行状态，供前端刷新页面后同步。
 
     注意 run 的取值口径：**RUNS 是唯一「可实际操作」的真相**——pause / resume /
@@ -331,8 +341,7 @@ def evaluation_run_state(case_id: str, db: Session = Depends(get_db)):
     ctrl = RUNS.get(case_id)
     if ctrl:
         return {"run": ctrl.status}
-    case = db.query(Case).filter(Case.id == case_id).first()
-    s = case.status if case else None
+    s = case.status
     if s == "evaluating":
         return {"run": "interrupted"}
     if s in ("completed", "partial", "blocked"):
@@ -343,10 +352,8 @@ def evaluation_run_state(case_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{case_id}/result")
-def evaluation_result(case_id: str, db: Session = Depends(get_db)):
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def evaluation_result(case_id: str, db: Session = Depends(get_db),
+                      case: Case = Depends(case_readable)):
     ctx = _load_ctx(case)
     return {
         "case_id": case.id,
@@ -391,7 +398,8 @@ class RerunRequest(BaseModel):
 
 
 @router.get("/{case_id}/audit")
-def case_audit(case_id: str, limit: int = 200, db: Session = Depends(get_db)):
+def case_audit(case_id: str, limit: int = 200, db: Session = Depends(get_db),
+               case: Case = Depends(case_readable)):
     """
     案件审计轨迹。
 
@@ -399,9 +407,6 @@ def case_audit(case_id: str, limit: int = 200, db: Session = Depends(get_db)):
     （前端 grep 不到任何 audit 接口）。这个方法把 audit_events 暴露出来，
     让「谁在什么时候做了什么、影响了什么」真的可见。
     """
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     rows = (db.query(AuditEvent)
             .filter(AuditEvent.case_id == case_id)
             .order_by(AuditEvent.created_at.desc())
@@ -419,11 +424,9 @@ def case_audit(case_id: str, limit: int = 200, db: Session = Depends(get_db)):
 
 
 @router.post("/{case_id}/rerun")
-def rerun_node(case_id: str, payload: RerunRequest, db: Session = Depends(get_db)):
+def rerun_node(case_id: str, payload: RerunRequest, db: Session = Depends(get_db),
+               case: Case = Depends(case_owned)):
     """节点级重跑（§6.4）：引导注入 + 重跑 + 下游失效传播 + 规则环节瞬时重算"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     ctx = _load_ctx(case)
     orch = Orchestrator(ctx)
     try:

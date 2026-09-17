@@ -50,10 +50,10 @@ class _FakeSearch:
         self.hits = hits
         self.calls = []
 
-    def __call__(self, db, query, *, case_id=None, scope=None, top_k=5):
+    def __call__(self, db, query, *, case_id=None, scope=None, top_k=5, user_id=None):
         self.calls.append({
             "query": query, "case_id": case_id,
-            "scope": scope, "top_k": top_k,
+            "scope": scope, "top_k": top_k, "user_id": user_id,
         })
         if isinstance(self.hits, BaseException):
             raise self.hits
@@ -294,6 +294,20 @@ class TestSearchArguments:
         assert call["case_id"] == case.id
         assert call["scope"] is None          # 双库：本案材料库 + 全局经验库
         assert call["top_k"] == AUTO_RECALL_TOP_K
+        # 归属必须透传：漏了它，全局库会把别人的经验也召回进来，
+        # 而输出看上去完全正常——这是整条链路上唯一一处「别人的数据进 prompt」。
+        assert call["user_id"] == case.user_id
+
+    def test_owner_is_threaded_into_recall(self, db, monkeypatch):
+        """案件的归属人决定经验库可见范围：换个用户召回范围就得跟着换。"""
+        fake = _patch_search(monkeypatch, [])
+        case = _new_case(db)
+        case.user_id = "user-A"
+        ctx = CaseContext(case_id=case.id)
+
+        _auto_recall(db, case, ctx)
+
+        assert fake.calls[0]["user_id"] == "user-A"
 
     def test_search_failure_degrades_to_empty(self, db, monkeypatch):
         """向量库不可用时不抛异常、注入集置空、评估照常继续。"""

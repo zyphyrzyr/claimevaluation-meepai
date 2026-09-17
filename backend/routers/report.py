@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from core.auth import case_readable
 from core.case_context import CaseContext
 from core.database import Case, get_db
 from core.docx_export import DOCX_MIME, markdown_to_docx_bytes
@@ -82,7 +83,8 @@ def _load_ctx(case: Case) -> CaseContext:
 
 @router.get("/{case_id}/result.docx")
 def download_result_docx(case_id: str, pkulaw: bool = False,
-                         db: Session = Depends(get_db)):
+                         db: Session = Depends(get_db),
+                         case: Case = Depends(case_readable)):
     """
     评估结果 Word 导出。
 
@@ -90,7 +92,6 @@ def download_result_docx(case_id: str, pkulaw: bool = False,
     默认关闭：该步骤要打外部 API，会拖慢响应，而绝大多数下载场景并不需要。
     未配置 PKULAW_API_TOKEN 时即使传 true 也会整段跳过，不留空章节。
     """
-    case = _load_case(db, case_id)
     ctx = _load_ctx(case)
     markdown = generate_memo(case.name, ctx, pkulaw=pkulaw)["markdown"]
 
@@ -102,9 +103,9 @@ def download_result_docx(case_id: str, pkulaw: bool = False,
 
 @router.get("/{case_id}/result.pdf")
 def download_result_pdf(case_id: str, pkulaw: bool = False,
-                        db: Session = Depends(get_db)):
+                        db: Session = Depends(get_db),
+                        case: Case = Depends(case_readable)):
     """评估结果 PDF 导出（与 Word 导出同源：同一份 markdown 内容）"""
-    case = _load_case(db, case_id)
     ctx = _load_ctx(case)
     markdown = generate_memo(case.name, ctx, pkulaw=pkulaw)["markdown"]
 
@@ -117,9 +118,9 @@ def download_result_pdf(case_id: str, pkulaw: bool = False,
 
 
 @router.get("/{case_id}/transcript.docx")
-def download_transcript_docx(case_id: str, db: Session = Depends(get_db)):
+def download_transcript_docx(case_id: str, db: Session = Depends(get_db),
+                             case: Case = Depends(case_readable)):
     """庭审记录 Word 导出（独立成册）"""
-    case = _load_case(db, case_id)
     ctx = _load_ctx(case)
     if not ctx.moot_transcript:
         raise HTTPException(404, "尚未进行模拟法庭")
@@ -136,9 +137,9 @@ def download_transcript_docx(case_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{case_id}/transcript.pdf")
-def download_transcript_pdf(case_id: str, db: Session = Depends(get_db)):
+def download_transcript_pdf(case_id: str, db: Session = Depends(get_db),
+                            case: Case = Depends(case_readable)):
     """庭审记录 PDF 导出（独立成册，与 Word 导出同源：同一份 markdown 内容）"""
-    case = _load_case(db, case_id)
     ctx = _load_ctx(case)
     if not ctx.moot_transcript:
         raise HTTPException(404, "尚未进行模拟法庭")

@@ -11,9 +11,12 @@ from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from core.auth import case_owned, case_readable, current_user_optional, require_user
 from core.case_context import CaseContext
 from core.config import SUPPORTED_CAUSE_TYPES, GOAL_TYPES
-from core.database import Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, get_db
+from core.database import (
+    Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, User, get_db,
+)
 from core.evidence_parser import (
     is_image_file, is_pdf_file, is_zip_file, ocr_image, parse_pdf, parse_zip_archive,
 )
@@ -58,6 +61,9 @@ class CaseRow(CaseOut):
     """
     plaintiff: Optional[str] = None
     defendant: Optional[str] = None
+    # 公共示例数据（user_id 为空）。前端据此把行标成「公共·只读」，
+    # 否则用户点进去做一半发现改不了，界面上看不出原因。
+    is_public: bool = False
 
 
 class CasePage(BaseModel):
@@ -289,7 +295,14 @@ def _write_evidence_files(records: list, case_id: str, db: Session) -> None:
 
 
 @router.post("", response_model=CaseOut)
-async def create_case(request: Request, db: Session = Depends(get_db)):
+async def create_case(
+    request: Request,
+    db: Session = Depends(get_db),
+    # 建案要登录：不登录建的案子挂在谁名下无从判断，
+    # 而「无主案件」正是这次要消灭的状态——它既不能被别人看到（跨账号串数据），
+    # 也不能被建它的人看到（换个浏览器就没了）。
+    user: User = Depends(require_user),
+):
     payload, files = await _parse_create_request(request)
 
     if not payload.name.strip():
@@ -321,6 +334,7 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
             client_org=payload.client_org,
             case_description=payload.case_description,
             status="draft",
+            user_id=user.id,
         )
         db.add(case)
         db.flush()
@@ -360,6 +374,7 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
         client_org=payload.client_org,
         case_description=payload.case_description,
         status="pending",
+        user_id=user.id,
     )
     db.add(case)
     db.flush()
@@ -392,7 +407,8 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
 
 @router.get("", response_model=CasePage)
 def list_cases(q: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
-               db: Session = Depends(get_db)):
+               db: Session = Depends(get_db),
+               user: Optional[User] = Depends(current_user_optional)):
     """案件列表（分页 + 关键词搜索）。
 
     q 按空格分词，**词与词之间是 AND**（每个词都得命中），每个词匹配
@@ -401,11 +417,18 @@ def list_cases(q: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
     为什么必须走子查询而不是只匹配名称：当事人落在 parties 表，而案件名称里**不一定**
     写着当事人（全库只有个位数案件名含「诉」字），靠名称推断当事人的路子不成立——
     截图里「栖木家居有限公司诉顾家家居股份有限公司…」这种是少数。
+
+    可见范围：**自己的案件 + 公共案件**（user_id 为空的存量数据）。
+    未登录时只剩下公共那部分，所以匿名进来看不到别人建的东西。
     """
     page = max(1, page)
     page_size = min(MAX_PAGE_SIZE, max(1, page_size))
 
     query = db.query(Case)
+    if user is None:
+        query = query.filter(Case.user_id.is_(None))
+    else:
+        query = query.filter(or_(Case.user_id == user.id, Case.user_id.is_(None)))
     for term in (q or "").split():
         like = f"%{term}%"
         query = query.filter(or_(
@@ -444,18 +467,16 @@ def list_cases(q: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
             # 一个案子可能有多个原告/被告，顿号连起来给前端一行显示
             plaintiff="、".join(slot.get("plaintiff") or []) or None,
             defendant="、".join(slot.get("defendant") or []) or None,
+            is_public=(c.user_id is None),
         ))
     return CasePage(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/{case_id}")
-def case_detail(case_id: str, db: Session = Depends(get_db)):
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def case_detail(case: Case = Depends(case_readable), db: Session = Depends(get_db)):
     evidence_files = [
         {"id": ef.id, "file_name": ef.file_name, "parse_status": ef.parse_status}
-        for ef in db.query(EvidenceFile).filter(EvidenceFile.case_id == case_id).all()
+        for ef in db.query(EvidenceFile).filter(EvidenceFile.case_id == case.id).all()
     ]
     return {
         "id": case.id,
@@ -463,6 +484,7 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
         "cause_type": case.cause_type,
         "goal_type": case.goal_type,
         "status": case.status,
+        "is_public": case.user_id is None,
         "case_description": case.case_description,
         "client_org": case.client_org,
         "evidence_files": evidence_files,
@@ -471,11 +493,10 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{case_id}", response_model=CaseOut)
-async def update_draft(case_id: str, request: Request, db: Session = Depends(get_db)):
+async def update_draft(
+    request: Request, case: Case = Depends(case_owned), db: Session = Depends(get_db)
+):
     """编辑案件：覆盖文本字段、重新解析上传文件、重建当事人与 context。草稿/已评估案件均可改，状态保持原值；评估运行中禁止。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再编辑")
 
@@ -508,7 +529,7 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
     _write_evidence_files(file_records, case.id, db)
 
     # 同步 Party 表（删除旧的，写最新）
-    for p in db.query(Party).filter(Party.case_id == case_id).all():
+    for p in db.query(Party).filter(Party.case_id == case.id).all():
         db.delete(p)
     for p in parties:
         db.add(Party(case_id=case.id, role=p["role"],
@@ -527,11 +548,8 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
 
 
 @router.post("/{case_id}/start-evaluation", response_model=CaseOut)
-def start_evaluation(case_id: str, db: Session = Depends(get_db)):
+def start_evaluation(case: Case = Depends(case_owned), db: Session = Depends(get_db)):
     """启动评估：校验带 * 的必填项，补全当事人与 context，置 pending。草稿/已评估案件均可重新评估；评估进行中禁止。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再启动评估")
 
@@ -547,7 +565,7 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
     if not (case.case_description or "").strip():
         missing.append("案情描述")
     evidence_text = (di.get("evidence_texts", "") or "").strip()
-    has_files = db.query(EvidenceFile).filter(EvidenceFile.case_id == case_id).count() > 0
+    has_files = db.query(EvidenceFile).filter(EvidenceFile.case_id == case.id).count() > 0
     if not evidence_text and not has_files:
         missing.append("证据材料文本或上传文件")
     if missing:
@@ -563,7 +581,7 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
                         "party_type": di.get("type", "company")})
     ctx.parties = parties
     # 同步 Party 表，保证详情与红线引擎读取一致
-    for p in db.query(Party).filter(Party.case_id == case_id).all():
+    for p in db.query(Party).filter(Party.case_id == case.id).all():
         db.delete(p)
     for p in parties:
         db.add(Party(case_id=case.id, role=p["role"],
@@ -578,16 +596,39 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
                    created_at=case.created_at.isoformat())
 
 
+@router.post("/{case_id}/claim", response_model=CaseOut)
+def claim_case(case: Case = Depends(case_readable), db: Session = Depends(get_db),
+               user: User = Depends(require_user)):
+    """把一条公共案件认领到自己名下。
+
+    为什么需要它：存量案件迁移后全是公共的，而公共数据是只读的（否则谁都能改
+    共享数据）。没有这个口子，用户连自己过去积累的案件都改不动 —— 从「能改」变成
+    「只能看」是一次静默的功能倒退。认领是唯一的、显式的一次性动作，
+    认领后该案件就只属于认领人，其他人列表里不再出现。
+    """
+    if case.user_id is not None:
+        # 已是自己的：重复认领不该报错，否则前端「认领」按钮点两次就炸
+        if case.user_id != user.id:
+            raise HTTPException(403, "该案件已被其他用户认领")
+        return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
+                       goal_type=case.goal_type, status=case.status,
+                       created_at=case.created_at.isoformat())
+
+    case.user_id = user.id
+    db.commit()
+    return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
+                   goal_type=case.goal_type, status=case.status,
+                   created_at=case.created_at.isoformat())
+
+
 @router.delete("/{case_id}/evidence-files/{file_id}")
-def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def delete_evidence_file(file_id: str, case: Case = Depends(case_owned),
+                         db: Session = Depends(get_db)):
     """删除已上传的证据文件：移除 EvidenceFile 记录、从 evidence_texts 剥离其解析片段、重建本案材料库。草稿/已评估案件均可；评估进行中禁止。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再删除文件")
     ef = db.query(EvidenceFile).filter(
-        EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
+        EvidenceFile.id == file_id, EvidenceFile.case_id == case.id,
     ).first()
     if not ef:
         raise HTTPException(404, "文件记录不存在")
@@ -614,18 +655,19 @@ def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_d
     db.commit()
 
     # 重建本案材料库（先清后增，保证删后一致）
-    _rebuild_case_knowledge(db, case_id, remaining)
+    _rebuild_case_knowledge(db, case.id, remaining)
 
     return {"ok": True}
 
 
-def _get_ef(case_id: str, file_id: str, db: Session) -> EvidenceFile:
-    """校验 file_id 确实属于该 case_id（防越权读他人文件）。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def _get_ef(case: Case, file_id: str, db: Session) -> EvidenceFile:
+    """校验 file_id 确实属于该案件（防越权读他人文件）。
+
+    入参改成 case 对象而不是 case_id：归属判定已经在依赖项里做过一次，
+    这里再按 id 查一遍不仅多余，还容易被后加的调用点漏掉那次查询。
+    """
     ef = db.query(EvidenceFile).filter(
-        EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
+        EvidenceFile.id == file_id, EvidenceFile.case_id == case.id,
     ).first()
     if not ef:
         raise HTTPException(404, "文件记录不存在")
@@ -633,9 +675,10 @@ def _get_ef(case_id: str, file_id: str, db: Session) -> EvidenceFile:
 
 
 @router.get("/{case_id}/evidence-files/{file_id}")
-def evidence_file_detail(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def evidence_file_detail(file_id: str, case: Case = Depends(case_readable),
+                         db: Session = Depends(get_db)):
     """预览用元信息：解析文本、是否有原件、大小、预览类型。"""
-    ef = _get_ef(case_id, file_id, db)
+    ef = _get_ef(case, file_id, db)
     return {
         "id": ef.id,
         "file_name": ef.file_name,
@@ -648,9 +691,10 @@ def evidence_file_detail(case_id: str, file_id: str, db: Session = Depends(get_d
 
 
 @router.get("/{case_id}/evidence-files/{file_id}/raw")
-def evidence_file_raw(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def evidence_file_raw(file_id: str, case: Case = Depends(case_readable),
+                      db: Session = Depends(get_db)):
     """原始字节流（inline），供 PDF 原生渲染 / 图片显示 / 下载原件。无原件返回 404。"""
-    ef = _get_ef(case_id, file_id, db)
+    ef = _get_ef(case, file_id, db)
     p = file_store.original_path(ef.storage_uri)
     if p is None:
         raise HTTPException(404, "原始文件不可用：该文件可能上传于旧版本，仅保留解析文本")
@@ -663,9 +707,10 @@ def evidence_file_raw(case_id: str, file_id: str, db: Session = Depends(get_db))
 
 
 @router.get("/{case_id}/evidence-files/{file_id}/preview")
-def evidence_file_preview(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def evidence_file_preview(file_id: str, case: Case = Depends(case_readable),
+                          db: Session = Depends(get_db)):
     """doc/docx 经 textutil 转出的 HTML（带缓存），供沙箱 iframe 渲染；不可用返回 406。"""
-    ef = _get_ef(case_id, file_id, db)
+    ef = _get_ef(case, file_id, db)
     html = file_store.doc_to_html(ef.storage_uri)
     if html is None:
         raise HTTPException(406, "该文件类型不支持在线预览（仅 doc/docx 可预览，且需本机 textutil）")
@@ -673,19 +718,15 @@ def evidence_file_preview(case_id: str, file_id: str, db: Session = Depends(get_
 
 
 @router.delete("/{case_id}")
-def delete_case(case_id: str, db: Session = Depends(get_db)):
+def delete_case(case: Case = Depends(case_owned), db: Session = Depends(get_db)):
     """删除案件：清案件材料库（向量 + DB）、检索记录，再删案件本体；
     SQLAlchemy cascade 自动带走 Party/EvidenceFile/RuleHit/ScoreSnapshot/MootRound/Report/AuditEvent。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
-
     # 1. 案件材料库（scope=case）先清 DB 行，与向量清理解耦（保证一致性）
     #    delete_knowledge 内部先删向量后删 DB 行，向量库一旦异常会把 DB 行删除吞掉，
     #    导致材料库残留。这里改为：先算好各条目向量块 id → 删并提交 DB 行 → 再 best-effort 清向量。
     from core.knowledge.service import chunk_text, get_store
     case_entries = db.query(KnowledgeEntry).filter(
-        KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case_id,
+        KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case.id,
     ).all()
     # 删除前按各条目内容算出向量块 id（content 随后随 DB 行消失）
     entry_chunk_ids: list = []
@@ -703,7 +744,7 @@ def delete_case(case_id: str, db: Session = Depends(get_db)):
             pass
 
     # 3. 检索记录无外键级联，手动清
-    db.query(RetrievalRecord).filter(RetrievalRecord.case_id == case_id).delete()
+    db.query(RetrievalRecord).filter(RetrievalRecord.case_id == case.id).delete()
 
     # 4. 删案件本体（级联带走其余子表）
     db.delete(case)

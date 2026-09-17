@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { api, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
+import { api, authApi, humanError, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
 import EvalRun, { EVAL_AXES, NODE_ORDER } from './EvalRun'
 import DecisionDashboard, { RESULT_SECTIONS } from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
 import RunControlBar from '../components/RunControlBar'
+import { useAuth } from '../auth/AuthProvider'
 
 type Tab = 'detail' | 'run' | 'result'
 
@@ -41,6 +42,8 @@ const NAV_STICKY = 'mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]'
 export default function CaseWorkbench() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const auth = useAuth()
+  const [claiming, setClaiming] = useState(false)
 
   const [detail, setDetail] = useState<any>(null)
   const [error, setError] = useState('')
@@ -91,7 +94,7 @@ export default function CaseWorkbench() {
         setEvalError('')
         setTraceEvents([])
       })
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(humanError(e)))
   }
 
   useEffect(() => {
@@ -269,6 +272,23 @@ export default function CaseWorkbench() {
   const evaluated = EVALUATED_STATUSES.includes(status)
 
   const fileCount = detail.evidence_files?.length ?? 0
+  const isPublic = detail.is_public === true
+
+  const claim = async () => {
+    if (!id) return
+    setClaiming(true)
+    try {
+      await authApi.claimCase(id)
+      await auth.refresh()
+      setDefaultChosen(false)
+      setRefreshTick((t) => t + 1)
+    } catch {
+      // 认领失败最常见的两种：没登录（401，拦截器已弹框）、已被别人认领（403）。
+      // 两种都不需要额外提示——前者弹框里会说明，后者刷新后案件就看不见了。
+    } finally {
+      setClaiming(false)
+    }
+  }
 
   return (
     <div className="max-w-[67rem] mx-auto xl:grid xl:grid-cols-[9rem_minmax(0,1fr)] xl:gap-8">
@@ -332,6 +352,24 @@ export default function CaseWorkbench() {
           </span>
         </div>
 
+        {/* 公共示例案件：先交代「这不是你的、改不了、怎么才能改」。
+            不放进表单卡片里，是为了让它出现在页面顶部——用户一进来就看到，
+            而不是填完一堆字段才发现保存按钮是灰的。 */}
+        {isPublic && (
+          <div className="flex flex-wrap items-center gap-3 mt-3 rounded-lg border border-line bg-surface px-3 py-2.5">
+            <span className="text-xs text-muted">
+              这是公共示例案件，所有人可见、只读。认领到自己账号后可编辑与评估。
+            </span>
+            <button
+              onClick={claim}
+              disabled={claiming}
+              className="ml-auto text-xs text-fg underline hover:opacity-70 disabled:opacity-50 whitespace-nowrap"
+            >
+              {claiming ? '认领中…' : '认领到我的账号'}
+            </button>
+          </div>
+        )}
+
         {/* 摘要带：把关键事实前置，进页面即可确认是哪个案子、什么目标、证据齐不齐 */}
         <div className="flex flex-wrap gap-2 mt-3">
           <SummaryChip label="案由" value={detail.cause_type} />
@@ -367,6 +405,7 @@ export default function CaseWorkbench() {
               onSaved={onDraftSaved}
               onStarted={onDraftStarted}
               onStartMoot={(cid) => navigate(`/cases/${cid}/moot?mode=standalone`)}
+              readOnly={isPublic}
             />
           )}
           {activeTab === 'run' && (
@@ -443,6 +482,7 @@ function CaseDetailTab({
   onSaved,
   onStarted,
   onStartMoot,
+  readOnly = false,
 }: {
   detail: any
   evaluated: boolean
@@ -451,6 +491,8 @@ function CaseDetailTab({
   onSaved: () => void
   onStarted: () => void
   onStartMoot: (caseId: string) => void
+  /** 公共示例案件：表单整体禁用，改不了也跑不了评估 */
+  readOnly?: boolean
 }) {
   const initial: CaseFormInitial = {
     name: detail.name ?? '',
@@ -470,6 +512,7 @@ function CaseDetailTab({
       initial={initial}
       activeStep={activeStep}
       onActiveStepChange={onActiveStepChange}
+      readOnly={readOnly}
       notice={evaluated ? '已有评估结果，修改后建议重新评估' : undefined}
       onCreated={(cid, status) => {
         if (status === 'pending') onStarted()

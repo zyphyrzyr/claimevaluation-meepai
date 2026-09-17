@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { KnowledgeEntryItem, SearchHit, knowledgeApi } from '../api'
+import { KnowledgeEntryItem, SearchHit, humanError, knowledgeApi } from '../api'
 import SlideOver from '../components/SlideOver'
+import { useAuth } from '../auth/AuthProvider'
 import { fmtDateTime, relativeTime } from '../lib/time'
 
 /**
@@ -33,6 +34,7 @@ const SOURCE_LABEL: Record<string, string> = {
 }
 
 export default function KnowledgeBase() {
+  const auth = useAuth()
   const [entries, setEntries] = useState<KnowledgeEntryItem[]>([])
   const [info, setInfo] = useState<{ backend: string; embedding: string } | null>(null)
   const [query, setQuery] = useState('')
@@ -52,13 +54,17 @@ export default function KnowledgeBase() {
   const load = () => {
     knowledgeApi.entries({ scope: 'global' })
       .then(setEntries)
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(humanError(e)))
   }
 
+  // 换账号要重拉：可见范围是「自己的 + 公共的」，换人就换了结果集。
+  // 少了这一项，登出后屏幕上还挂着上一个人的私有经验。
+  const ownerKey = auth.user?.id ?? 'anonymous'
   useEffect(() => {
+    setHits(null)
     load()
     knowledgeApi.info().then(setInfo).catch(() => {})
-  }, [])
+  }, [ownerKey])
 
   /**
    * 当前展示的「底表」：检索态用命中，否则用全部条目。
@@ -92,9 +98,10 @@ export default function KnowledgeBase() {
       setContent('')
       setAddOpen(false)
       setNotice('已入全局经验库，评估启动时会参与自动召回。')
+      auth.refresh()
       load()
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
     } finally {
       setSaving(false)
     }
@@ -107,9 +114,10 @@ export default function KnowledgeBase() {
       // 删掉的条目可能正在命中结果里，一起清掉免得留下点不动的幽灵行
       setHits((prev) => (prev ? prev.filter((h) => h.id !== id) : prev))
       setExpandId('')
+      auth.refresh()
       load()
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
     }
   }
 
@@ -122,7 +130,7 @@ export default function KnowledgeBase() {
     try {
       setHits(await knowledgeApi.search({ query: query.trim(), scope: 'global', top_k: 5 }))
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
     } finally {
       setSearching(false)
     }
@@ -246,12 +254,23 @@ export default function KnowledgeBase() {
                         <span>来源 {e.source_type_label}</span>
                         <span>入库 {fmtDateTime(e.created_at)}</span>
                         <span>分块 {e.chunk_count} 块</span>
-                        <button
-                          onClick={() => remove(e.id, e.title)}
-                          className="ml-auto text-muted hover:text-[var(--danger)]"
-                        >
-                          删除该条目
-                        </button>
+                        {e.is_public ? (
+                          // 公共经验谁都删不掉（后端 403）。给了按钮再报错，
+                          // 不如一开始就说清楚它为什么不能删。
+                          <span
+                            className="ml-auto text-muted/60 cursor-not-allowed"
+                            title="公共经验，所有账号共享，不可删除"
+                          >
+                            公共 · 不可删除
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => remove(e.id, e.title)}
+                            className="ml-auto text-muted hover:text-[var(--danger)]"
+                          >
+                            删除该条目
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}

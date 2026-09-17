@@ -9,7 +9,7 @@
 """
 
 import time
-from typing import Any, Dict, Generator
+from typing import Any, Dict, Generator, Optional
 
 from sqlalchemy.orm import Session
 
@@ -78,17 +78,20 @@ def _mock_answer(question: str, recall: Dict[str, Any], ctx: CaseContext) -> str
     )
 
 
-def chat(db: Session, ctx: CaseContext, question: str) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
+def chat(db: Session, ctx: CaseContext, question: str,
+         user_id: Optional[str] = None) -> Generator[Dict[str, Any], None, Dict[str, Any]]:
     """
     一次顾问对话。yield 事件流；返回值为 {"answer": 完整回答, "recall": refs}。
     调用方负责把回答追加进 ctx.advisor_messages 并落库。
+
+    user_id 用于限定全局经验库的召回范围（见 service.recall_for_context）。
     """
     question = (question or "").strip()
     if not question:
         return {"answer": "", "recall": []}
 
     # ① 自动召回（案件材料库 + 全局经验库）
-    recall = recall_for_context(db, ctx.case_id, question, top_k=3)
+    recall = recall_for_context(db, ctx.case_id, question, top_k=3, user_id=user_id)
     if recall["refs"]:
         yield {"event": "recall", "refs": recall["refs"]}
 

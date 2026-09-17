@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import APP_TITLE, APP_VERSION
 from core.database import init_db
-from routers import cases, evaluation, moot, report, knowledge, advisor, settings
+from routers import cases, evaluation, moot, report, knowledge, advisor, settings, auth
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
 
@@ -32,11 +32,22 @@ app.include_router(report.router, prefix="/api/report", tags=["report"])
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["knowledge"])
 app.include_router(advisor.router, prefix="/api/advisor", tags=["advisor"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+# 认证挂在 /api/auth 下。放在最后不影响路由匹配（前缀互不重叠），
+# 但读代码时它是「跨切面」而不是某个业务模块，单独一行更醒目。
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 
 
 @app.on_event("startup")
 def startup():
     init_db()
+    # 启动自愈：多用户隔离上线前入库的向量块没有 user_id 元数据，
+    # 不补的话新的「自己的 + 公共的」过滤会把它们全挡掉——老经验库一夜之间
+    # 搜不到任何东西，而接口照常返回空列表。
+    try:
+        from core.knowledge import ensure_vector_user_id
+        ensure_vector_user_id()
+    except Exception as e:
+        print(f"[startup] 向量块 user_id 回填跳过：{e}")
     # 启动自愈：进程刚起来时不可能有任何运行中的评估，凡是 case.status 还停在
     # evaluating 的都是上一轮被重启/异常打断留下的僵尸状态，按实际产出修正。
     # 不修的话案件会永远显示「评估中」，且 run-state 会据此谎报 running、点暂停报 404。

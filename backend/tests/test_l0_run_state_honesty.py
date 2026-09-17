@@ -40,7 +40,11 @@ def _ctx() -> CaseContext:
 
 
 def _make_case(case_id: str, status: str, ctx: CaseContext | None) -> None:
-    """种一个案件；ctx 为 None 时 context_json 留空（模拟什么都没跑出来）"""
+    """种一个案件；ctx 为 None 时 context_json 留空（模拟什么都没跑出来）
+
+    归属到默认测试用户：暂停 / 恢复 / 终止这些控制端点现在要求「案件是自己的」，
+    不挂 owner 的话公共案件一律 403，用例就测不到它真正要测的 RUNS 口径了。
+    """
     from core.database import Case, SessionLocal, init_db
     init_db()
     db = SessionLocal()
@@ -48,6 +52,7 @@ def _make_case(case_id: str, status: str, ctx: CaseContext | None) -> None:
         db.query(Case).filter(Case.id == case_id).delete()
         db.add(Case(id=case_id, name=f"状态用例-{case_id}", cause_type="商标侵权",
                     goal_type="要钱", status=status,
+                    user_id=os.environ.get("SOFT_IP_TEST_USER_ID"),
                     context_json=(ctx.to_dict() if ctx else {})))
         db.commit()
     finally:

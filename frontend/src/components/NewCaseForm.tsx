@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { STEP_MOTION } from '../lib/motion'
-import { api, CaseCreatePayload } from '../api'
+import { api, humanError, type CaseCreatePayload } from '../api'
 import { cn } from '../lib/utils'
 import EvidencePreview, { PreviewTarget } from './EvidencePreview'
 
@@ -62,6 +62,7 @@ export default function NewCaseForm({
   activeStep,
   onActiveStepChange,
   navBreakpoint = 'xl',
+  readOnly = false,
 }: {
   onCreated: (caseId: string, status: string) => void
   onStartMoot?: (caseId: string) => void
@@ -69,6 +70,14 @@ export default function NewCaseForm({
   initial?: CaseFormInitial
   /** 页级提示（如「已有评估结果」），展示在底栏左侧；不传则整行留给操作按钮 */
   notice?: string
+  /**
+   * 只读展示（公共示例案件）。
+   *
+   * 用 `<fieldset disabled>` 包住整张卡片，让浏览器原生地禁用内部所有输入与按钮——
+   * 逐个输入加 disabled 要改十几处，漏一个就会出现「能填但保存报错」。
+   * 只读的原因由父级在卡片外说明（认领引导），不塞进这张卡里。
+   */
+  readOnly?: boolean
   /** 当前显示的分区块 id（由父级维护，受控） */
   activeStep?: string
   /** 切换分区块（导航点击 / 校验失败自动跳块时调用） */
@@ -182,7 +191,7 @@ export default function NewCaseForm({
       await api.deleteEvidenceFile(caseId, fileId)
       setSavedFiles((prev) => prev.filter((f) => f.id !== fileId))
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
     } finally {
       setBusyDelFile(null)
     }
@@ -255,7 +264,7 @@ export default function NewCaseForm({
       }
       setSubmitting(false)
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
       setSubmitting(false)
     }
   }
@@ -281,7 +290,7 @@ export default function NewCaseForm({
         onCreated(created.id, 'pending')
       }
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
       setSubmitting(false)
     }
   }
@@ -306,7 +315,7 @@ export default function NewCaseForm({
       }
       onStartMoot?.(cid)
     } catch (e) {
-      setError(String(e))
+      setError(humanError(e))
       setSubmitting(false)
     }
   }
@@ -671,7 +680,10 @@ export default function NewCaseForm({
     }
   }
 
+  // fieldset 只做「整体禁用」用，不参与布局：外层调用点都是普通的 min-w-0 容器，
+  // 多一层块级包装不改变卡片本身的限高与撑满链（卡片自带 clamp 高度）。
   return (
+    <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
     <div
       className="rounded-xl border border-line bg-canvas flex flex-col overflow-hidden"
       style={{ height: 'clamp(24rem, calc(100vh - 14rem), 46rem)' }}
@@ -743,7 +755,7 @@ export default function NewCaseForm({
           <button
             type="button"
             onClick={startMoot}
-            disabled={submitting}
+            disabled={submitting || readOnly}
             className="text-sm text-muted hover:text-fg disabled:opacity-50 whitespace-nowrap transition-colors"
           >
             仅开始模拟法庭
@@ -751,7 +763,7 @@ export default function NewCaseForm({
           <button
             type="button"
             onClick={saveDraft}
-            disabled={submitting}
+            disabled={submitting || readOnly}
             className="px-4 py-2.5 rounded-lg border border-line text-fg hover:bg-surface disabled:opacity-50 text-sm font-medium transition-colors"
           >
             {submitting ? '保存中…' : '保存草稿'}
@@ -759,7 +771,7 @@ export default function NewCaseForm({
           <button
             type="button"
             onClick={startEval}
-            disabled={submitting}
+            disabled={submitting || readOnly}
             className="px-5 py-2.5 rounded-lg bg-fg text-canvas hover:opacity-90 disabled:opacity-50 text-sm font-medium transition-colors"
           >
             {submitting ? '处理中…' : caseId ? '保存并启动评估' : '创建案件并开始评估'}
@@ -771,6 +783,7 @@ export default function NewCaseForm({
       <EvidencePreview target={preview} caseId={caseId} onClose={() => setPreview(null)} />
 
     </div>
+    </fieldset>
   )
 }
 
