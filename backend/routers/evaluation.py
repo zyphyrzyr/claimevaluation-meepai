@@ -219,8 +219,19 @@ def run_evaluation(case_id: str, db: Session = Depends(get_db),
             ctrl.events.put({"event": "recall_done", "node": "",
                              "label": f"已自动召回 {recalled} 条参考材料注入评估节点",
                              "status": "ok"})
+
+            # 每产出一个维度结果即落库 context_json，使前端「节点完成即刷新详情」
+            # 拿到实时数据（此前只在整轮 finally 落库，导致评估过程中内容区不动）。
+            def _save_progress():
+                try:
+                    case.context_json = ctx.to_dict()
+                    db.commit()
+                except Exception:
+                    pass
+
             orch = Orchestrator(ctx, on_event=ctrl.events.put,
-                               pause_event=ctrl.pause, abort_event=ctrl.abort)
+                               pause_event=ctrl.pause, abort_event=ctrl.abort,
+                               progress_saver=_save_progress)
             orch.run_all()
             # run_all 正常结束：非终止路径
             final = ctx.scores.get("final")

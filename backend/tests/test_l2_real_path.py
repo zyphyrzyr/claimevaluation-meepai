@@ -114,6 +114,25 @@ def real_llm(monkeypatch):
     import core.qcc_api as qcc
     monkeypatch.setattr(qcc, "search_for_financial_qcc_full", lambda info: QCC_PROFILE)
 
+    # 北大法宝出口也换成假响应：保证真实模式链路把「法律可行性接入外部依据」这段
+    # 真正跑起来，且不依赖线上 token / 不触发真实网络（否则评测既慢又受环境影响）。
+    import core.pkulaw.pkulaw_api as pkulaw_api_mod
+    monkeypatch.setattr(pkulaw_api_mod, "_pkulaw_configured", lambda: True)
+    monkeypatch.setattr(pkulaw_api_mod, "search_for_rights_foundation",
+                        lambda *a, **k: {"laws": [{"title": "保护权利的相关法律规定",
+                                                  "content": "相关权利受法律保护，侵权应承担法律责任"}],
+                                        "cases": [], "_summary": "测试检索-权利基础"})
+    monkeypatch.setattr(pkulaw_api_mod, "search_for_infringement",
+                        lambda *a, **k: {"laws": [],
+                                        "cases": [{"title": "某知识产权侵权典型案例",
+                                                   "court": "高级人民法院",
+                                                   "summary": "认定构成侵权并判令停止侵害"}],
+                                        "_summary": "测试检索-侵权认定"})
+    monkeypatch.setattr(pkulaw_api_mod, "search_for_procedure",
+                        lambda *a, **k: {"laws": [{"title": "程序相关法律规定",
+                                                  "content": "管辖与诉讼时效依据相关法律规定确定"}],
+                                        "cases": [], "_summary": "测试检索-诉讼程序"})
+
     return calls
 
 
@@ -207,6 +226,16 @@ class TestRealModePipeline:
         assert ctx.scores["business_expectation"] == pytest.approx(business, abs=0.1)
         assert ctx.scores["final"] == pytest.approx(
             scoring.calculate_overall_score(legal, business), abs=0.1)
+
+    def test_legal_nodes_inject_pkulaw_basis(self, real_llm):
+        """法律可行性三节点应接入北大法宝外部依据并随结果返回（问题2 修复）。"""
+        ctx = _ctx()
+        orchestrator.Orchestrator(ctx).run_all()
+        for node in ("rights", "infringement", "procedure"):
+            payload = ctx.dimension_results[node]["result"].get("pkulaw")
+            assert payload, f"{node} 未注入北大法宝依据"
+            assert payload.get("laws") or payload.get("cases"), \
+                f"{node} 检索结果为空：{payload}"
 
 
 # ============================================================

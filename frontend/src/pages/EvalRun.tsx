@@ -553,6 +553,53 @@ export default function EvalRun({
     )
   }
 
+  // 北大法宝外部检索依据（问题2 修复）：法律可行性三节点接入外部法律数据库，
+  // 把检索到的法条 / 类案显式透出，让评判「有外部依据」可见，而非只给一个分数。
+  const PkulawBasis = ({ pk }: { pk?: any }) => {
+    if (!pk) return null
+    const laws: any[] = pk.laws ?? []
+    const cases: any[] = pk.cases ?? []
+    if (pk.status === 'error' || pk.error) {
+      return (
+        <Basis title="外部检索依据（北大法宝）">
+          <span className="text-sm text-[var(--danger)]">
+            检索未成功：{pk.error ?? '未知错误'}。本次评判缺少外部法条/类案佐证，建议检查北大法宝配置后重跑本节点。
+          </span>
+        </Basis>
+      )
+    }
+    if (laws.length === 0 && cases.length === 0) {
+      return null
+    }
+    return (
+      <Basis title="外部检索依据（北大法宝）">
+        <p className="text-xs text-muted mb-1.5">{pk.summary || '已检索北大法宝作为外部法律参照（不替代权威来源）。'}</p>
+        {laws.length > 0 && (
+          <div className="space-y-1">
+            {laws.slice(0, 5).map((l: any, i: number) => (
+              <div key={i} className="text-sm text-muted">
+                <b className="text-fg">{l.title}</b>
+                {l.content ? `：${l.content}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
+        {cases.length > 0 && (
+          <div className="space-y-1 mt-1.5">
+            {cases.slice(0, 4).map((c: any, i: number) => (
+              <div key={i} className="text-sm text-muted">
+                <b className="text-fg">{c.title}</b>
+                {c.court || c.ahao ? `（${[c.court, c.ahao].filter(Boolean).join(' ')}）` : ''}
+                {c.summary ? `：${c.summary}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
+      </Basis>
+    )
+  }
+
+
   const renderDetail = (node: string): ReactNode => {
     const d = detailOf(node)
     if (!d) return null
@@ -720,6 +767,7 @@ export default function EvalRun({
               </div>
             )}
             {legalBasis('权利基础', r.score, ['权利基础证据'])}
+            <PkulawBasis pk={r.pkulaw} />
           </div>
         )
       case 'infringement':
@@ -736,6 +784,7 @@ export default function EvalRun({
             </div>
             {r.analysis && <p className="text-sm text-muted mt-1">{r.analysis}</p>}
             {legalBasis('侵权认定', r.score, ['侵权认定证据', '取证技术规范'])}
+            <PkulawBasis pk={r.pkulaw} />
           </div>
         )
       case 'procedure':
@@ -752,6 +801,7 @@ export default function EvalRun({
             </div>
             {r.analysis && <p className="text-sm text-muted mt-1">{r.analysis}</p>}
             {legalBasis('诉讼程序', r.score, ['取证技术规范'])}
+            <PkulawBasis pk={r.pkulaw} />
           </div>
         )
       case 'damages':

@@ -17,6 +17,7 @@ from .case_context import CaseContext
 from .config import get_runtime_settings
 from .evidence_review import review_evidence
 from .legal_rules import run_rule_engine, build_evidence_checklist, infer_uploaded_proof_categories
+from .pkulaw import pkulaw_api
 
 NODE_ORDER = [
     "evidence_review", "red_gate",
@@ -231,11 +232,47 @@ def _use_mock() -> bool:
 
 class Orchestrator:
     def __init__(self, ctx: CaseContext, on_event: EventCallback = None,
-                 pause_event=None, abort_event=None):
+                 pause_event=None, abort_event=None, progress_saver=None):
         self.ctx = ctx
         self.on_event = on_event
         self.mock = _use_mock()
         self.control = PauseControl(pause_event, abort_event)
+        # progress_saver: 每产出一个维度结果后立即落库 context_json 的可选回调，
+        # 让前端「节点完成即刷新详情」拿到实时数据（默认只在整轮 finally 落库）。
+        self._progress_saver = progress_saver
+
+    def _set_dim(self, node: str, result: Dict[str, Any], status: str = "ok",
+                 error: str = None) -> None:
+        """写维度结果，并即时落库进度（仅 context_json），供前端实时刷新。"""
+        self.ctx.set_dimension(node, result, status=status, error=error)
+        if self._progress_saver is not None:
+            try:
+                self._progress_saver()
+            except Exception:
+                pass
+
+    def _retrieve_legal_pkulaw(self, node: str):
+        """法律可行性三节点接入北大法宝：检索权利基础 / 侵权认定 / 诉讼程序相关法条与类案。
+
+        不可用时（未配置 token、节点不属此类、或 mock）返回 None —— 不注入、不报错，
+        评估照常进行；检索失败则返回一个带 error 的 dict，由调用方在 trace 显式露出。
+        """
+        if self.mock:
+            return None
+        if node not in ("rights", "infringement", "procedure"):
+            return None
+        if not pkulaw_api._pkulaw_configured():
+            return None
+        try:
+            if node == "rights":
+                return pkulaw_api.search_for_rights_foundation(self.ctx.cause_type)
+            if node == "infringement":
+                return pkulaw_api.search_for_infringement(self.ctx.cause_type)
+            return pkulaw_api.search_for_procedure()
+        except Exception as e:  # 检索异常不应让评估节点挂掉
+            return {"status": "error", "error": str(e)[:200],
+                    "laws": [], "cases": [],
+                    "_summary": f"北大法宝调用异常：{e}"}
 
     # -------------------------------------------------- 各节点执行
 
@@ -256,7 +293,7 @@ class Orchestrator:
         ctx.extra_evidence = result["extra_evidence"]
         ctx.evidence_completeness = result["completeness"]
         ctx.evidence_note = result.get("note", "")
-        ctx.set_dimension("evidence_review",
+        self._set_dim("evidence_review",
                           {"completeness": result["completeness"],
                            "gap_count": len(result["gap_list"])},
                           status="failed" if result.get("error") else "ok",
@@ -292,7 +329,7 @@ class Orchestrator:
         hits = run_rule_engine(case_facts)
         ctx.red_flags = hits
         blocked = scoring.has_block_red_flag(hits)
-        ctx.set_dimension("red_gate", {"hits": hits, "blocked": blocked},
+        self._set_dim("red_gate", {"hits": hits, "blocked": blocked},
                           status="blocked" if blocked else "ok")
         sev_cn = {"pass": "通过", "warning": "警示", "block": "拦截"}
         counts = {"pass": 0, "warning": 0, "block": 0}
@@ -318,6 +355,15 @@ class Orchestrator:
         ctx = self.ctx
         cb = self.on_event
         label = NODE_LABELS.get(node, node)
+        # 法律可行性三节点接入北大法宝外部依据：先把检索结果显式推到 trace，
+        # 让界面能直观看到「评判有外部依据」，再注入 prompt 供模型参照。
+        pkulaw_payload = self._retrieve_legal_pkulaw(node)
+        if pkulaw_payload is not None:
+            fail = pkulaw_payload.get("status") == "error"
+            _mcp(cb, node, "北大法宝",
+                 pkulaw_payload.get("_summary") or "已检索外部法律依据作为评判参照",
+                 status="error" if fail else "ok",
+                 detail=str(pkulaw_payload.get("error") or "")[:200])
         _step(cb, node,
               (f"组装判断依据：案情 {len(ctx.case_description or '')} 字 · "
                f"证据完整度 {_fmt_score(ctx.evidence_completeness)}% · "
@@ -336,18 +382,18 @@ class Orchestrator:
                   f"调用模型 {model} 做{label}分析，要求返回结论、优势与风险清单")
         self.control.pause_point(cb)
         try:
-            result = fn(self.ctx, use_mock=self.mock)
+            result = fn(self.ctx, use_mock=self.mock, pkulaw=pkulaw_payload)
             failed = "error" in result
-            self.ctx.set_dimension(node, result,
-                                   status="failed" if failed else "ok",
-                                   error=result.get("error"))
+            self._set_dim(node, result,
+                          status="failed" if failed else "ok",
+                          error=result.get("error"))
             _step(cb, node,
                   f"{label}结论已解析：得分 {_fmt_score(result.get('score'))}",
                   status="failed" if failed else "ok",
                   detail=(str(result.get("analysis") or result.get("error") or ""))[:400])
             self.control.pause_point(cb)
         except Exception as e:  # 失败态：不静默落默认分
-            self.ctx.set_dimension(node, {}, status="failed", error=str(e))
+            self._set_dim(node, {}, status="failed", error=str(e))
             _step(cb, node, f"{label}分析失败：{e}", status="failed")
 
     def _run_business(self) -> None:
@@ -359,11 +405,11 @@ class Orchestrator:
             damages: Dict[str, Any] = {}
             try:
                 damages = evaluate_nodes.evaluate_damages(ctx, use_mock=self.mock)
-                ctx.set_dimension("damages", damages,
+                self._set_dim("damages", damages,
                                   status="failed" if "error" in damages else "ok",
                                   error=damages.get("error"))
             except Exception as e:
-                ctx.set_dimension("damages", {}, status="failed", error=str(e))
+                self._set_dim("damages", {}, status="failed", error=str(e))
             _step(cb, "business",
                   (f"判赔规模完成：{_fmt_score(damages.get('score'))} 分"
                    + (f"，参考区间 P10 {_fmt_score(damages.get('p10'))} 万 / "
@@ -389,7 +435,7 @@ class Orchestrator:
             ctx.defendant_profile = profile
             metrics = profile.get("metrics", {}) if isinstance(profile, dict) else {}
             ctx.recovery_ability = metrics.get("recovery_probability")
-            ctx.set_dimension("recovery",
+            self._set_dim("recovery",
                               {"recovery_ability": ctx.recovery_ability,
                                "red_flags": metrics.get("red_flags", []),
                                "green_flags": metrics.get("green_flags", [])},
@@ -410,11 +456,11 @@ class Orchestrator:
             _step(cb, "business", "按判例价值维度评估业务预期（检索同类在先判决）")
             try:
                 precedent = evaluate_nodes.evaluate_precedent(ctx, use_mock=self.mock)
-                ctx.set_dimension("precedent", precedent,
+                self._set_dim("precedent", precedent,
                                   status="failed" if "error" in precedent else "ok",
                                   error=precedent.get("error"))
             except Exception as e:
-                ctx.set_dimension("precedent", {}, status="failed", error=str(e))
+                self._set_dim("precedent", {}, status="failed", error=str(e))
 
         self._record_business_rollup()
 
@@ -462,7 +508,7 @@ class Orchestrator:
         else:
             status, error = "ok", None
 
-        ctx.set_dimension(
+        self._set_dim(
             "business",
             {"goal_type": ctx.goal_type,
              "sub_dimensions": sub_dims,
@@ -544,7 +590,7 @@ class Orchestrator:
             } if not blocked else {},
             confidence=ctx.confidence,
         )
-        ctx.set_dimension("synthesize", {
+        self._set_dim("synthesize", {
             "scores": ctx.scores,
             "confidence": ctx.confidence,
             "recommendation": ctx.recommendation,
