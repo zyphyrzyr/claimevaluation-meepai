@@ -12,7 +12,7 @@
 from pydantic import BaseModel, ConfigDict
 from fastapi import APIRouter, HTTPException
 
-from core import config, llm_gateway, settings_store
+from core import config, llm_gateway, providers, settings_store
 from core.providers import PRESETS
 from core.settings_store import SwitchError
 
@@ -23,6 +23,32 @@ router = APIRouter()
 def list_providers():
     """可选供应商 + 当前生效配置（密钥仅掩码）"""
     return settings_store.snapshot()
+
+
+@router.get("/mode")
+def run_mode():
+    """
+    运行模式摘要 —— 给页脚那一行用的（真实模式 / Mock + 当前模型）。
+
+    单独开一个接口而不是让页脚复用它上面的 /providers，是因为页脚要回答的问题
+    只有一个：「现在屏幕上这些结论，是真模型跑出来的还是演示数据？」为此把
+    供应商清单、密钥掩码、成本档位一并拉进每一次页面加载，既没必要也徒增暴露面。
+    这个接口不返回任何密钥信息，连掩码都不给——它只需要知道「配没配」。
+    """
+    effective = config.get_runtime_settings()
+    selection = settings_store.read_selection()
+    preset = providers.get_preset(selection["provider_id"])
+
+    return {
+        "mock": bool(effective["use_mock"]),
+        "provider_id": preset.id,
+        "provider_label": preset.label,
+        "base_url": effective["llm_base_url"],
+        "strong_model": effective["llm_strong_model"],
+        "fast_model": effective["llm_fast_model"],
+        # 真实模式 + 没密钥 = 一调就炸，页脚要据此给出红色提示而不是静静显示「真实模式」
+        "key_configured": bool(effective["llm_api_key"]),
+    }
 
 
 class ProviderSelect(BaseModel):

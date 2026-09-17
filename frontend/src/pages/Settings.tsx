@@ -2,19 +2,18 @@ import { useEffect, useState } from 'react'
 import { ProviderInfo, SettingsSnapshot, settingsApi } from '../api'
 
 /**
- * 高级设置 —— LLM 供应商切换
+ * 高级设置 —— LLM 供应商切换（**部署方运维页**）
+ *
+ * 本页不在左侧导航中展示，只保留 /settings 路由。原因不是它「能配密钥」——
+ * 它从来就不接收密钥（见后端 extra="forbid"），而是它展示的东西属于部署方：
+ * 成本档位、密钥槽位、各家厂商的排障注记。客户看到「服务商的 key 可能余额不足」
+ * 是灾难，而这些信息对运维又是必需的，所以处理方式是「移出导航」而不是「删掉」。
  *
  * 这一页刻意**没有密钥输入框**，也拿不到密钥：
  * 产品以 SaaS 形态交付，调用用的是我们的 key，用户付费买的是能力不是凭证。
- * 密钥只存在于服务端环境变量（将来是 KMS），这里只显示末 4 位掩码和
- * 「去哪个环境变量里配」的提示。
+ * 密钥只存在于服务端环境变量（将来是 KMS），这里只显示「读自哪个槽」和
+ * 「去哪个环境变量里配」的提示——连末 4 位掩码也不再渲染。
  */
-
-const COST_BADGE: Record<string, string> = {
-  low: 'bg-[var(--success-soft)] text-[var(--success)]',
-  medium: 'bg-[var(--warning-soft)] text-[var(--warning)]',
-  high: 'bg-[var(--danger-soft)] text-[var(--danger)]',
-}
 
 const SOURCE_LABEL: Record<string, string> = {
   default: '默认（未在 .env 指定）',
@@ -91,9 +90,14 @@ export default function Settings() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-xl font-medium">高级设置</h1>
+        <h1 className="text-xl font-medium flex items-center gap-2 flex-wrap">
+          高级设置
+          <span className="text-[11px] px-2 py-0.5 rounded-full bg-surface text-muted border border-line">
+            运维页 · 不在导航中展示
+          </span>
+        </h1>
         <p className="text-sm text-muted mt-1">
-          切换后端大模型供应商。密钥由服务端环境变量提供，本页不展示也不接收密钥。
+          切换后端大模型供应商、做连通性自检。密钥由服务端环境变量提供，本页不展示也不接收密钥。
         </p>
       </div>
 
@@ -127,11 +131,11 @@ export default function Settings() {
           <Row
             label="密钥"
             value={
-              snap.key_masked
-                ? `已配置 ${snap.key_masked}（来源 ${snap.current.key_source}）`
+              snap.current.available
+                ? `已配置（读自 ${snap.current.key_source || snap.current.primary_key_env}）`
                 : `未配置 —— 设置环境变量 ${snap.current.primary_key_env}`
             }
-            warn={!snap.key_masked}
+            warn={!snap.current.available}
           />
           <Row label="运行模式" value={snap.mock ? 'Mock（离线演示）' : '真实模式'} />
           <Row
@@ -169,15 +173,12 @@ export default function Settings() {
               >
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{p.label}</span>
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full ${COST_BADGE[p.cost_tier] ?? 'bg-surface text-muted'}`}>
-                    {p.cost_tier_label}
-                  </span>
                   <span
                     className={`text-[11px] px-2 py-0.5 rounded-full ${
                       p.available ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-surface text-muted'
                     }`}
                   >
-                    {p.available ? `密钥已配置 ${p.key_masked}` : '未配置密钥'}
+                    {p.available ? '密钥已配置' : '未配置密钥'}
                   </span>
                   {active && (
                     <span className="text-[11px] px-2 py-0.5 rounded-full bg-brand text-white">

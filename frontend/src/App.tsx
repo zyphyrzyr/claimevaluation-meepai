@@ -2,18 +2,18 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import Workbench from './pages/Workbench'
 import CaseWorkbench from './pages/CaseWorkbench'
 import MootCourt from './pages/MootCourt'
-import MootStandalone from './pages/MootStandalone'
-import Report from './pages/Report'
 import KnowledgeBase from './pages/KnowledgeBase'
 import Settings from './pages/Settings'
-import OnePager from './pages/OnePager'
 import AdvisorPanel from './components/AdvisorPanel'
+import RunModeBadge from './components/RunModeBadge'
 
+// 模拟法庭不再有全局入口：只能从个案工作台启动（案件详情「仅开始模拟法庭」/
+// 评估详情与评估结果的「启动模拟法庭」），三条入口都落在 /cases/:id/moot。
+// 「高级设置」同理移出导航：那一页是部署方的运维台（供应商切换 + 连通性自检），
+// 摆给客户看只会暴露成本档位与密钥掩码。它与 /settings 路由都还在，知道地址就能进。
 const navItems = [
   { to: '/workbench', label: '案件列表' },
-  { to: '/moot', label: '模拟法庭' },
   { to: '/knowledge', label: '经验库' },
-  { to: '/settings', label: '高级设置' },
 ]
 
 export default function App() {
@@ -51,19 +51,20 @@ export default function App() {
             <Route path="/workbench" element={<Workbench />} />
             <Route path="/cases/:id" element={<CaseWorkbench />} />
             <Route path="/cases/:id/moot" element={<MootCourt />} />
-            <Route path="/cases/:id/report" element={<Report />} />
-            <Route path="/cases/:id/onepager" element={<OnePager />} />
-            <Route path="/moot" element={<MootStandalone />} />
             <Route path="/knowledge" element={<KnowledgeBase />} />
+            {/* 保留但不在导航中：部署方运维入口（供应商切换 + 连通性自检） */}
             <Route path="/settings" element={<Settings />} />
+            {/* 兜底：/moot 独立演练页已下架，旧书签或错 URL 不再渲染成空白内容区，统一跳回案件列表 */}
+            <Route path="*" element={<Navigate to="/workbench" replace />} />
           </Routes>
         </main>
 
         {/* 伴随式追问顾问：案件页面全程悬浮 */}
         <AdvisorPanel />
 
-        <footer className="text-center text-xs text-muted py-4 print:hidden">
-          本系统为 AI 辅助评估工具，结果仅供内部决策参考，不构成正式法律意见
+        <footer className="text-center text-xs text-muted py-4 space-y-1 print:hidden">
+          <RunModeBadge />
+          <div>本系统为 AI 辅助评估工具，结果仅供内部决策参考，不构成正式法律意见</div>
         </footer>
       </div>
     </div>

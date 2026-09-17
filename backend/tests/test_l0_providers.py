@@ -352,7 +352,75 @@ class TestSettingsApi:
 
 
 # ============================================================
-# E. 测试环境自身的隔离（护栏）
+# E. 页脚运行模式接口（/settings/mode）
+# ============================================================
+
+class TestRunModeApi:
+    """
+    页脚那一行「真实模式 / Mock 模式」的数据源。
+
+    这个接口是**刻意跟 /providers 分开**的：页脚只需要回答「屏幕上这些结论是
+    真模型跑出来的还是演示数据」，没必要为此把供应商清单和密钥掩码也拉进
+    每一次页面加载。所以它有一条自己的底线——连掩码都不返回。
+    """
+
+    @pytest.fixture
+    def client(self, env_file, monkeypatch):
+        from fastapi.testclient import TestClient
+        from main import app
+        with TestClient(app) as c:
+            yield c
+
+    def test_reports_mock_mode(self, client):
+        body = client.get("/api/settings/mode").json()
+        assert body["mock"] is True
+        assert body["provider_id"] == "deepseek"
+
+    def test_never_returns_any_key_material(self, client):
+        """
+        连掩码都不给。
+
+        「只有末 4 位」这个理由在 /providers 上成立（运维需要确认是不是自己填的那把），
+        但页脚没有这个需求，多回一个字段就多一条泄露路径。
+        """
+        raw = client.get("/api/settings/mode").text
+        assert "sk-deepseek-plain-9527" not in raw
+        assert "9527" not in raw                      # 末 4 位也不该出现
+        assert "••••" not in raw
+        assert "key_masked" not in raw
+
+    def test_reports_models_and_provider(self, client):
+        body = client.get("/api/settings/mode").json()
+        assert body["provider_label"] == "DeepSeek"
+        assert body["strong_model"] == "deepseek-reasoner"
+        assert body["fast_model"] == "deepseek-chat"
+        assert body["base_url"] == "https://api.deepseek.com"
+
+    def test_real_mode_without_key_is_flagged(self, client, env_file, monkeypatch):
+        """
+        真实模式却没密钥 —— 一调就炸。
+
+        这是页脚唯一需要报警的组合：它必须显示「未配置密钥，调用会失败」，
+        而不是安安静静地写一句「真实模式」，让人以为一切正常。
+        """
+        monkeypatch.setenv("USE_MOCK", "False")
+        env_file.write_text(
+            "LLM_PROVIDER=deepseek\nLLM_BASE_URL=https://api.deepseek.com\n",
+            encoding="utf-8",
+        )
+        body = client.get("/api/settings/mode").json()
+        assert body["mock"] is False
+        assert body["key_configured"] is False
+
+    def test_real_mode_with_key_is_healthy(self, client, env_file, monkeypatch):
+        monkeypatch.setenv("USE_MOCK", "False")
+        body = client.get("/api/settings/mode").json()
+        assert body["mock"] is False
+        assert body["key_configured"] is True
+
+
+# ============================================================
+# F. 测试环境自身的隔离（护栏）
 # ============================================================
 
 class TestEnvIsolation:

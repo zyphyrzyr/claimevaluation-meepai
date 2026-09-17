@@ -138,20 +138,6 @@ export default function Workbench() {
         </div>
       )}
 
-      {/* 独立模拟法庭快捷入口（三分钟看产品最抓人的部分） */}
-      <Link
-        to="/moot"
-        className="mt-6 flex items-center justify-between bg-surface border border-line rounded-xl p-5 hover:border-fg transition-colors"
-      >
-        <div>
-          <div className="font-medium text-fg">独立模拟法庭 · 诉前对抗演练</div>
-          <div className="text-sm text-muted mt-0.5">
-            不建案不评估，输入案情直接开庭——AI 被告当庭抗辩，法官归纳薄弱点
-          </div>
-        </div>
-        <span className="text-sm font-medium text-muted hover:text-fg">开庭演练 →</span>
-      </Link>
-
       <SlideOver
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
