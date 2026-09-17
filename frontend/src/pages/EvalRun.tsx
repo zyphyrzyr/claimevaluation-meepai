@@ -537,7 +537,7 @@ export default function EvalRun({
   // 三个法律维度的依据区块，只回答两件事：本维度依赖哪些证据要件、本维度为什么得这个分。
   // 幂平均的完整口径与「参考材料」清单各自只讲一次（前者在决策合成分，后者在证据盘点列明细），
   // 四个维度不再各抄一遍，界面因此干净很多。
-  const legalBasis = (label: string, score: any, categories: string[] = []) => {
+  const legalBasis = (label: string, score: any, categories: string[] = [], pkulaw?: any) => {
     const corr = result?.correction_coeff
     return (
       <BasisList>
@@ -549,6 +549,9 @@ export default function EvalRun({
           {corr != null && corr !== 1 ? `，再乘上模拟法庭给出的修正系数 ${corr}` : ''}
           。合成口径、以及「为什么用幂平均而不是算术平均」，统一在「决策合成」里说明，这里不再重复。
         </Basis>
+        {/* 北大法宝外部检索依据：必须与其余依据同处「判断依据」折叠面板内，
+            默认收起、展开后一并显示；此前挂在 BasisList 之外，导致面板收起时它仍常驻可见。 */}
+        {pkulaw && <PkulawBasis pk={pkulaw} />}
       </BasisList>
     )
   }
@@ -766,8 +769,7 @@ export default function EvalRun({
                 </div>
               </div>
             )}
-            {legalBasis('权利基础', r.score, ['权利基础证据'])}
-            <PkulawBasis pk={r.pkulaw} />
+            {legalBasis('权利基础', r.score, ['权利基础证据'], r.pkulaw)}
           </div>
         )
       case 'infringement':
@@ -783,8 +785,7 @@ export default function EvalRun({
               ))}
             </div>
             {r.analysis && <p className="text-sm text-muted mt-1">{r.analysis}</p>}
-            {legalBasis('侵权认定', r.score, ['侵权认定证据', '取证技术规范'])}
-            <PkulawBasis pk={r.pkulaw} />
+            {legalBasis('侵权认定', r.score, ['侵权认定证据', '取证技术规范'], r.pkulaw)}
           </div>
         )
       case 'procedure':
@@ -800,8 +801,7 @@ export default function EvalRun({
               ))}
             </div>
             {r.analysis && <p className="text-sm text-muted mt-1">{r.analysis}</p>}
-            {legalBasis('诉讼程序', r.score, ['取证技术规范'])}
-            <PkulawBasis pk={r.pkulaw} />
+            {legalBasis('诉讼程序', r.score, ['取证技术规范'], r.pkulaw)}
           </div>
         )
       case 'damages':
