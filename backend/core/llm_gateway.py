@@ -249,10 +249,21 @@ def call_json(system_prompt: str, user_prompt: str, *,
     下游失效，而不是让整轮评估中断。调用方（orchestrator._run_llm_node 等）
     通过 "error" in result 判定，不要改成抛异常。
     """
+    model = pick_model(node)
+    # JSON 节点必须走「支持 json 模式」的模型，否则推理模型（如 deepseek-reasoner）
+    # 在没有 response_format=json_object 强制时，会返回散文而非 JSON，导致解析失败
+    # （详见 config.py 对 JSON_MODE_MODELS 的说明）。当节点首选模型不在白名单内时，
+    # 退回白名单中的模型再下发 json 模式——一处兜底同时覆盖 judge / infringement 等
+    # 所有 JSON 节点，且不波及走 call_text 的纯文本节点（开庭陈述、法庭辩论等）。
+    if not supports_json_mode(model):
+        whitelist = get_runtime_settings().get("llm_json_mode_models") or set()
+        fallback = next(iter(whitelist), None)
+        if fallback:
+            model = fallback
     resp = _post_chat(
         [{"role": "system", "content": system_prompt},
          {"role": "user", "content": user_prompt}],
-        pick_model(node), temperature, max_tokens, json_mode=True,
+        model, temperature, max_tokens, json_mode=True,
     )
     result = json.loads(resp.read().decode("utf-8"))
     raw = _clean_json(result["choices"][0]["message"]["content"])

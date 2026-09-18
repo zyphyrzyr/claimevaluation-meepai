@@ -179,10 +179,17 @@ class TestRequestConstruction:
     def _model(slot: str) -> str:
         return config.get_runtime_settings()[slot]
 
-    def test_strong_nodes_get_the_strong_model(self, llm_ready):
+    def test_strong_json_nodes_resolve_to_json_capable_model(self, llm_ready):
+        """强模型节点（infringement/judge）是 JSON 节点，必须落到「支持 json 模式」的模型，
+        否则推理模型返回散文导致解析失败。强模型若不支持 json 模式，call_json 会兜底退回白名单模型。"""
         assert STRONG_MODEL_NODES, "强模型节点清单为空，模型路由等于没做"
+        strong = self._model("llm_strong_model")
         _call(llm_ready, '{"score": 80}', node="infringement")
-        assert llm_ready["payload"]["model"] == self._model("llm_strong_model")
+        model_used = llm_ready["payload"]["model"]
+        assert llm_gateway.supports_json_mode(model_used), (
+            f"JSON 节点不得裸奔：强模型 {strong} 不支持 json 模式时，"
+            f"call_json 必须兜底到支持 json 的模型，实际下发了 {model_used}")
+        assert llm_ready["payload"].get("response_format", {}).get("type") == "json_object"
 
     def test_ordinary_nodes_get_the_fast_model(self, llm_ready):
         _call(llm_ready, '{"score": 80}', node="rights")
@@ -193,21 +200,22 @@ class TestRequestConstruction:
         _call(llm_ready, '{"score": 80}', node="rights")
         assert llm_ready["payload"].get("response_format", {}).get("type") == "json_object"
 
-    def test_json_mode_is_skipped_for_models_that_reject_it(self, llm_ready):
-        """
-        不在 LLM_JSON_MODE_MODELS 白名单里的模型（如 deepseek-reasoner）不接受
-        response_format，下发会返回 400。它正好承担侵权认定与法官归纳两个节点——
-        全局开启会让这两处直接失败。
-        """
+    def test_json_node_never_sends_response_format_to_rejecting_strong_model(self, llm_ready):
+        """强模型（如 kimi-k3 / deepseek-reasoner）不支持 response_format，下发会 400；
+        但 JSON 节点不能因此裸奔——call_json 应兜底改用白名单里的 json 模型：既不开给
+        不支持的强模型（避免 400），又保证节点拿到 json 强制（避免返回散文）。"""
         strong = self._model("llm_strong_model")
         if llm_gateway.supports_json_mode(strong):
             pytest.skip(f"当前供应商的强模型 {strong} 支持 json 模式，本例不适用")
         _call(llm_ready, '{"score": 80}', node="infringement")
-        assert "response_format" not in llm_ready["payload"], (
-            f"{strong} 不得下发 response_format，否则 API 返回 400")
+        assert llm_ready["payload"]["model"] != strong, (
+            f"不得把 response_format 下发给不支持 json 的强模型 {strong}")
+        assert llm_ready["payload"].get("response_format", {}).get("type") == "json_object", (
+            "兜底模型必须带 json 模式，否则等于退回散文裸奔")
 
     def test_reasoner_output_still_parses(self, llm_ready):
-        """reasoner 没有 json 模式兜底，更依赖 _clean_json 的提取能力"""
+        """即便模型把 JSON 包在围栏/话术里，_clean_json 也要能剥出主体
+        （强模型被兜底成白名单 json 模型后仍可能夹带客套话）。"""
         content = ('让我逐步分析本案…\n\n```json\n'
                    '{"score": 72, "elements": [{"name": "接触", "status": "满足"}]}\n```')
         result = _call(llm_ready, content, node="infringement")
@@ -394,3 +402,64 @@ class TestStreaming:
         monkeypatch.setattr(llm_gateway.urllib.request, "urlopen",
                             lambda req, timeout=None: iter(bad))
         assert "".join(llm_gateway.stream_text("sys", "user")) == "ok"
+
+
+# ============================================================
+# E. JSON 节点的模型兜底（强模型不支持 json 模式时退回白名单模型）
+# ============================================================
+
+class TestJsonModelFallback:
+    """修复：node 首选模型不在 json 白名单内时，call_json 必须改用白名单模型，
+    否则推理模型返回散文导致 JSON 解析失败（法官归纳 / 侵权认定双双为空）。
+
+    复现场景即对应用户真实配置：强模型（kimi-k3 / deepseek-reasoner）被刻意排除在
+    JSON_MODE_MODELS 之外（下发 json 模式会 400），而 judge / infringement 两个
+    JSON 节点又走强模型——没有 API 级 json 强制，模型返回中文散文而非 JSON。
+    """
+
+    def _nonjson_strong_settings(self, monkeypatch):
+        """构造一个「强模型不支持 json 模式」的运行配置。
+        直接 monkeypatch get_runtime_settings——pick_model / supports_json_mode /
+        call_json 的兜底都读它（而非 _settings）。"""
+        settings = {
+            **config.get_runtime_settings(),
+            "llm_api_key": "test-key",
+            "llm_base_url": "https://api.example.invalid",
+            "llm_strong_model": "reasoner-x",   # 故意不在白名单内
+            "llm_fast_model": "chat-x",
+            "llm_json_mode_models": {"chat-x"},
+        }
+        monkeypatch.setattr(llm_gateway, "get_runtime_settings", lambda: settings)
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _fake_response(captured["content"])
+
+        monkeypatch.setattr(llm_gateway.urllib.request, "urlopen", fake_urlopen)
+        return captured
+
+    def test_judge_falls_back_to_json_model(self, monkeypatch):
+        cap = self._nonjson_strong_settings(monkeypatch)
+        cap["content"] = '{"focus_points": ["争议焦点"], "summary": "归纳"}'
+        result = llm_gateway.call_json("sys", "user", node="judge", temperature=0.2)
+        assert result.get("focus_points") == ["争议焦点"]
+        # 关键断言：实际下发的是白名单内的 json 模型，而非 reasoner-x
+        assert cap["payload"]["model"] == "chat-x"
+        assert cap["payload"].get("response_format") == {"type": "json_object"}
+
+    def test_infringement_falls_back_to_json_model(self, monkeypatch):
+        cap = self._nonjson_strong_settings(monkeypatch)
+        cap["content"] = '{"score": 80}'
+        result = llm_gateway.call_json("sys", "user", node="infringement")
+        assert result.get("score") == 80
+        assert cap["payload"]["model"] == "chat-x"
+        assert cap["payload"].get("response_format") == {"type": "json_object"}
+
+    def test_plain_node_keeps_json_model(self, monkeypatch):
+        """非强模型节点本就用白名单模型，兜底不应改变其行为"""
+        cap = self._nonjson_strong_settings(monkeypatch)
+        cap["content"] = '{"score": 60}'
+        llm_gateway.call_json("sys", "user", node="rights")
+        assert cap["payload"]["model"] == "chat-x"
+        assert cap["payload"].get("response_format") == {"type": "json_object"}
