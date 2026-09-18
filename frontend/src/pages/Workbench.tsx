@@ -14,7 +14,7 @@ import { useAuth } from '../auth/AuthProvider'
  * 所以改成服务端分页 + 关键词搜索。
  *
  * 搜索必须走后端：当事人存在 parties 表，不在案件名称里。案件名称里**不一定**
- * 写着当事人（全库名含「诉」字的案件只有个位数）——纯前端过滤永远搜不到「顾家家居」。
+ * 写着当事人（全库名含「诉」字的案件只有个位数）——纯前端过滤永远搜不到「茉莉奶白」。
  */
 
 const STATUS_LABELS: Record<string, { text: string; dot: string }> = {
@@ -44,7 +44,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 /**
- * 当事人一行灰字：搜「顾家家居」命中时，用户得看得出是匹配在哪。
+ * 当事人一行灰字：搜「茉莉奶白」命中时，用户得看得出是匹配在哪。
  *
  * 有数据才显示，两边都没有就整行不占位（早期草稿与 E2E 测试案常没登记当事人）。
  */
@@ -199,7 +199,7 @@ export default function Workbench() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索案件名称、原告或被告，如「栖木 顾家」"
+            placeholder="搜索案件名称、原告或被告，如「LV 茉莉奶白」"
             className="w-full border border-line rounded-lg pl-3 pr-8 py-2 text-sm focus:outline-none focus:border-brand"
           />
           {q && (
