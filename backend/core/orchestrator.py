@@ -10,7 +10,7 @@
 
 import math
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import evaluate_nodes, scoring
 from .case_context import CaseContext
@@ -521,23 +521,36 @@ class Orchestrator:
         cb = self.on_event
         _step(cb, "synthesize", "读取权利基础、侵权认定、诉讼程序三个维度的得分")
 
-        def score_of(node: str) -> Optional[float]:
+        def score_of(node: str) -> Tuple[Optional[float], bool]:
+            """返回 (分数, 是否过期)。
+
+            - status=="ok"：正常分数；
+            - status=="stale"：过期但仍持有上次算出的分数 → 参与聚合，但调用方须把结论标「参考」；
+            - 其余（failed / 不存在 / 分数为空或 NaN）：无可用分数 → (None, False)，
+              由 missing 分支 withholding（这正是重跑上游把下游标记失效的目的：不让陈旧分静默复用）。
+            NaN 不是「零分」，是「没算出分」，normalize(nan) 会被静默夹成 0 并触发幂平均
+            一票否决，把整案打到 0 分而界面无提示——在此拦下，走 missing 分支。
+            """
             d = ctx.dimension_results.get(node, {})
-            if d.get("status") != "ok":
-                return None
             s = (d.get("result") or {}).get("score")
-            # NaN 不是「零分」，是「没算出分」。
-            # 若直接放进评分，normalize(nan) 会被静默夹成 0，幂平均的一票否决
-            # 再把整案打到 0 分、结论落到「暂缓」——界面上却看不到任何异常提示。
-            # 在这里拦下来，走 missing 分支，让报告明确写出「该维度未产出分数」。
             if s is None or (isinstance(s, float) and math.isnan(s)):
-                return None
-            return s
+                return None, False
+            if d.get("status") == "ok":
+                return s, False
+            if d.get("status") == "stale":
+                return s, True
+            return None, False
 
-        rights_s = score_of("rights")
-        infr_s = score_of("infringement")
-        proc_s = score_of("procedure")
+        rights_s, rights_stale = score_of("rights")
+        infr_s, infr_stale = score_of("infringement")
+        proc_s, proc_stale = score_of("procedure")
 
+        # 过期维度仍参与聚合（其旧分数依旧可读），但整体结论须标「参考」而非正常结论。
+        # 仅 failed / 不存在（分数取不到）才计入 missing → withholding。
+        stale_labels = [NODE_LABELS[n] for n, st in
+                        [("rights", rights_stale), ("infringement", infr_stale),
+                         ("procedure", proc_stale)]
+                        if st]
         missing = [NODE_LABELS[n] for n, s in
                    [("rights", rights_s), ("infringement", infr_s), ("procedure", proc_s)]
                    if s is None]
@@ -547,8 +560,11 @@ class Orchestrator:
             legal = scoring.calculate_legal_feasibility(
                 rights_s, infr_s, proc_s, ctx.correction_coeff)
 
+        # 业务子维度的过期同样计入「参考」标注：先置 False，分支里再覆盖
+        damages_stale = False
+        precedent_stale = False
         if ctx.goal_type == "要钱":
-            damages_s = score_of("damages")
+            damages_s, damages_stale = score_of("damages")
             recovery_s = ctx.recovery_ability
             business = None
             if damages_s is not None and recovery_s is not None:
@@ -559,7 +575,7 @@ class Orchestrator:
             if recovery_s is None:
                 missing.append(NODE_LABELS["business"] + "(回款能力)")
         else:
-            precedent_s = score_of("precedent")
+            precedent_s, precedent_stale = score_of("precedent")
             business = None
             if precedent_s is not None:
                 business = scoring.calculate_business_expectation(
@@ -567,6 +583,12 @@ class Orchestrator:
             else:
                 missing.append(NODE_LABELS["business"] + "(判例价值)")
 
+        # 业务子维度过期 → 一并计入「参考」标注（其旧分仍参与聚合，结论标参考而非消失）
+        for n, st in (("damages", damages_stale), ("precedent", precedent_stale)):
+            if st:
+                stale_labels.append(NODE_LABELS[n])
+
+        has_stale = bool(stale_labels)  # 过期分仍参与聚合 → is_complete 为真；仅决定结论标「参考」
         final = None
         if legal is not None and business is not None:
             final = scoring.calculate_overall_score(legal, business)
@@ -585,17 +607,22 @@ class Orchestrator:
         ctx.recommendation = scoring.generate_recommendation(
             final, ctx.red_flags,
             is_complete=is_complete, missing_dimensions=missing,
+            stale_dimensions=stale_labels,
             dimension_scores={
                 "权利基础": rights_s, "侵权认定": infr_s, "诉讼程序": proc_s,
             } if not blocked else {},
             confidence=ctx.confidence,
         )
+        synth_status = ("blocked" if blocked
+                        else "partial" if has_stale
+                        else "ok" if is_complete else "partial")
         self._set_dim("synthesize", {
             "scores": ctx.scores,
             "confidence": ctx.confidence,
             "recommendation": ctx.recommendation,
             "missing": missing,
-        }, status="blocked" if blocked else ("ok" if is_complete else "partial"))
+            "stale_dimensions": stale_labels,
+        }, status=synth_status)
 
         coeff = ctx.correction_coeff
         _step(cb, "synthesize",
@@ -609,9 +636,10 @@ class Orchestrator:
               (f"法律可行性 {_fmt_score(ctx.scores.get('legal_feasibility'))} 分与 "
                f"业务预期 {_fmt_score(ctx.scores.get('business_expectation'))} 分"
                f"共同决定主诉决策分 {_fmt_score(ctx.scores.get('final'))} 分"),
-              status="blocked" if blocked else ("ok" if is_complete else "partial"),
+              status=synth_status,
               detail=(f"置信度 {_fmt_score(ctx.confidence)}%"
-                      + (f"；未产出维度：{'、'.join(missing)}" if missing else "")))
+                      + (f"；未产出维度：{'、'.join(missing)}" if missing else "")
+                      + (f"；含过期维度（参考）：{'、'.join(stale_labels)}" if has_stale else "")))
         _step(cb, "synthesize",
               f"最终建议：{ctx.recommendation.get('recommendation', '—')}",
               status="blocked" if blocked else "ok",
@@ -702,12 +730,17 @@ class Orchestrator:
             return ""
         return ""
 
-    def rerun_node(self, node: str, guidance: str = "") -> CaseContext:
+    def rerun_node(self, node: str, guidance: str = "", cascade: bool = True) -> CaseContext:
         """
-        节点级重跑（§6.4）：
-        1. 引导意见注入 user_viewpoints（自动影响后续所有节点）
-        2. 重跑该节点
-        3. 下游按 DAG 标记 stale；规则环节（synthesize）瞬时重算，LLM 环节标记待确认
+        节点级重跑（§6.4）。
+
+        cascade=True（默认，级联重跑）：重跑本节点后，按 DAG 拓扑顺序自动重算全部下游
+            LLM 节点，最后规则环节（synthesize）瞬时重算。下游 LLM 重算失败 → 降级为
+            stale：保留旧分数并标「参考」，绝不让整案结论被一票否决而消失。
+        cascade=False（仅本节点）：下游 LLM 节点全部标记 stale（保留旧分数，聚合时按
+            过期参与），仅 synthesize 瞬时重算。用于省成本或离线场景。
+
+        引导意见始终注入 user_viewpoints，自动影响本节点及其下游。
         """
         if node not in NODE_ORDER:
             raise ValueError(f"未知节点: {node}")
@@ -720,15 +753,63 @@ class Orchestrator:
         rule_nodes = [n for n in downstream if n == "synthesize"]
         llm_nodes = [n for n in downstream if n != "synthesize"]
 
-        self.ctx.mark_stale(llm_nodes, reason=f"上游「{NODE_LABELS.get(node, node)}」已重跑")
-        for n in rule_nodes:
-            self.run_node(n)  # 纯规则，瞬时重算
+        rerun_nodes: List[str] = []
+        stale_nodes: List[str] = []
+        label = NODE_LABELS.get(node, node)
 
+        if cascade:
+            for n in llm_nodes:
+                prior = self.ctx.dimension_results.get(n)
+                try:
+                    self.run_node(n)
+                except Exception:
+                    # 重算异常：沿用旧结果并标 stale，不丢分、不隐藏
+                    if prior is not None:
+                        restored = dict(prior)
+                        restored["status"] = "stale"
+                        restored["stale_reason"] = f"上游「{label}」重跑后重算失败，沿用上次结果"
+                        self.ctx.dimension_results[n] = restored
+                    stale_nodes.append(n)
+                    continue
+                if self.ctx.dimension_results.get(n, {}).get("status") != "ok":
+                    # 重算未成功（failed）：同上降级为 stale，保留旧分数
+                    if prior is not None:
+                        restored = dict(prior)
+                        restored["status"] = "stale"
+                        restored["stale_reason"] = f"上游「{label}」重跑后重算失败，沿用上次结果"
+                        self.ctx.dimension_results[n] = restored
+                    stale_nodes.append(n)
+                else:
+                    rerun_nodes.append(n)
+            for n in rule_nodes:
+                self.run_node(n)  # 纯规则，瞬时重算
+        else:
+            # 仅本节点：下游 LLM 标 stale（保留旧分数，聚合时按过期参与）
+            self.ctx.mark_stale(llm_nodes, reason=f"上游「{label}」已重跑")
+            stale_nodes = list(llm_nodes)
+            for n in rule_nodes:
+                self.run_node(n)
+
+        self._last_rerun = {
+            "node": node,
+            "cascade": cascade,
+            "rerun_nodes": rerun_nodes,
+            "stale_nodes": stale_nodes,
+        }
+
+        if cascade:
+            effect = (f"「{label}」已重跑并级联重算下游"
+                      + (f"：{'、'.join(NODE_LABELS.get(n, n) for n in rerun_nodes)}" if rerun_nodes else "")
+                      + ("；决策合成已重算" if rule_nodes else "")
+                      + (f"；重算失败降级为参考：{'、'.join(NODE_LABELS.get(n, n) for n in stale_nodes)}"
+                         if stale_nodes else ""))
+        else:
+            effect = (f"「{label}」已重跑（仅本节点）；决策合成已重算；"
+                      + (f"下游待确认重跑：{'、'.join(NODE_LABELS.get(n, n) for n in stale_nodes)}"
+                         if stale_nodes else "无下游待办"))
         self.ctx.log_event(
             "node_rerun", node=node,
             content=guidance,
-            effect=f"「{NODE_LABELS.get(node, node)}」已重跑；决策合成已重算；"
-                   + (f"待确认重跑：{'、'.join(NODE_LABELS.get(n, n) for n in llm_nodes)}"
-                      if llm_nodes else "无下游待办"),
+            effect=effect,
         )
         return self.ctx

@@ -182,13 +182,35 @@ class TestDependencyGraph:
 
 
 class TestRerunPropagation:
-    def test_rerun_rights_stales_infringement_and_recomputes_synthesize(self):
+    def test_rerun_rights_cascade_recomputes_infringement_keeps_final(self):
+        """
+        计划 C 默认级联重跑：重跑 rights 后，下游 infringement 被真正重算（ok），
+        而非标记 stale；主诉决策分保持有效，结论不再因上游重跑而整段消失。
+        """
         ctx = _good_ctx()
         orch = orchestrator.Orchestrator(ctx)
-        orch.run_all()                       # mock 全流程
+        orch.run_all()
         before_final = ctx.scores.get("final")
 
-        orch.rerun_node("rights", guidance="商标续展证明已补充提交")
+        orch.rerun_node("rights", guidance="商标续展证明已补充提交", cascade=True)
+
+        assert ctx.dimension_results["infringement"]["status"] == "ok", \
+            "级联重跑下侵权认定应被重算为 ok，而非 stale"
+        assert ctx.dimension_results["synthesize"]["status"] != "stale", \
+            "规则环节须瞬时重算，不留 stale"
+        assert ctx.scores.get("final") is not None, "级联重跑后主诉决策分仍应算得出"
+        assert before_final is not None
+        meta = orch._last_rerun
+        assert "infringement" in meta["rerun_nodes"], "级联重算清单应包含侵权认定"
+        assert meta["cascade"] is True
+
+    def test_rerun_rights_stales_infringement_only_node_mode(self):
+        """仅本节点模式（cascade=False）：下游侵权认定标记 stale，供用户按需重跑"""
+        ctx = _good_ctx()
+        orch = orchestrator.Orchestrator(ctx)
+        orch.run_all()
+
+        orch.rerun_node("rights", guidance="商标续展证明已补充提交", cascade=False)
 
         assert ctx.dimension_results["infringement"]["status"] == "stale", "下游侵权认定应标记待确认重跑"
         assert "stale_reason" in ctx.dimension_results["infringement"]
@@ -200,7 +222,7 @@ class TestRerunPropagation:
         ctx = _good_ctx()
         orch = orchestrator.Orchestrator(ctx)
         orch.run_all()
-        orch.rerun_node("rights", guidance="补充观点X")
+        orch.rerun_node("rights", guidance="补充观点X", cascade=False)
         effect = ctx.audit_trail[-1]["effect"]
         assert "侵权认定" in effect, f"审计轨迹应写明待确认重跑的下游，实际：{effect}"
 
@@ -217,13 +239,15 @@ class TestRerunPropagation:
         mark_stale 静默跳过 → 重跑证据盘点后，判赔规模、回款能力、判例价值
         都不会被标记 stale。用户补充证据后看到的判赔分仍是旧证据算出来的，
         且界面无任何"待重跑"提示。
+
+        仅在 cascade=False（仅本节点）下验证失效传播；cascade=True 会真正重算它们。
         """
         ctx = _good_ctx()
         orch = orchestrator.Orchestrator(ctx)
         orch.run_all()
         assert ctx.dimension_results["damages"]["status"] == "ok"
 
-        orch.rerun_node("evidence_review", guidance="补充了销量公证书")
+        orch.rerun_node("evidence_review", guidance="补充了销量公证书", cascade=False)
 
         stale_or_absent = ctx.dimension_results.get("damages", {}).get("status")
         assert stale_or_absent == "stale", (
@@ -235,7 +259,7 @@ class TestRerunPropagation:
         ctx = _good_ctx()
         orch = orchestrator.Orchestrator(ctx)
         orch.run_all()
-        orch.rerun_node("synthesize")
+        orch.rerun_node("synthesize", cascade=False)
         assert "无下游待办" in ctx.audit_trail[-1]["effect"]
 
     def test_downstream_is_pruned_to_the_goal_path(self):
@@ -271,6 +295,40 @@ class TestRerunPropagation:
         assert "判赔规模" not in effect_fame and "回款能力" not in effect_fame, (
             f"要名案子却提示重跑判赔/回款：{effect_fame}")
         assert "判例价值" in effect_fame
+
+
+class TestStaleRecommendation:
+    """过期维度参与聚合、结论标「参考」，而非整段消失（计划 C 核心修复）"""
+
+    def test_stale_dimension_yields_reference_level_not_incomplete(self):
+        # 法律可行性三维度算出有效分，仅其中侵权认定过期（stale，仍持有旧分）
+        rec = scoring.generate_recommendation(
+            80.0, red_flags=[],
+            is_complete=True, missing_dimensions=[],
+            stale_dimensions=["侵权认定"],
+            dimension_scores={"权利基础": 85, "侵权认定": 78, "诉讼程序": 82},
+            confidence=70,
+        )
+        assert rec["level"] == "stale", f"含过期维度应返回参考档，实际：{rec}"
+        assert "侵权认定" in rec["reason"], "reason 应点明哪个维度过期"
+        assert "参考" in rec["recommendation"]
+
+    def test_stale_takes_precedence_over_threshold_levels(self):
+        # 即使分数够高，只要有过期维度就标参考而非「建议优先启动」
+        rec = scoring.generate_recommendation(
+            90.0, red_flags=[], is_complete=True, missing_dimensions=[],
+            stale_dimensions=["诉讼程序"], confidence=80,
+        )
+        assert rec["level"] == "stale"
+
+    def test_missing_dimension_still_withholds(self):
+        # truly failed / 缺失 → 仍 withholding（评估未完成），不被 stale 分支吞掉
+        rec = scoring.generate_recommendation(
+            None, red_flags=[], is_complete=False, missing_dimensions=["判赔规模"],
+            stale_dimensions=[], confidence=60,
+        )
+        assert rec["level"] == "yellow"
+        assert rec["recommendation"] == "评估未完成"
 
 
 # ============================================================

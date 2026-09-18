@@ -187,16 +187,33 @@ export default function DecisionDashboard({
     if (id) api.caseDetail(id).then(setCaseMeta).catch(() => {})
   }, [id])
 
-  const rerun = async (node: string, guidance: string): Promise<RerunResult> => {
+  const rerun = async (node: string, guidance: string, cascade = true): Promise<RerunResult> => {
     if (!id) throw new Error('缺少案件 ID')
     setBusyNode(node)
     try {
-      const r = await api.rerun(id, node, guidance)
+      const r = await api.rerun(id, node, guidance, cascade)
       reload()
-      return { effect: r.effect ?? '', stale_nodes: r.stale_nodes ?? [] }
+      return {
+        effect: r.effect ?? '',
+        stale_nodes: r.stale_nodes ?? [],
+        rerun_nodes: r.rerun_nodes ?? [],
+        cascade: r.cascade,
+      }
     } finally {
       setBusyNode('')
     }
+  }
+
+  // 仅本节点模式下列出的「将被标参考」的下游维度（用于重跑控件确认提示）。
+  // 与后端 DOWNSTREAM 一致：evidence_review 影响全部法律+业务维度；rights 影响侵权认定；
+  // infringement / procedure / business 的下游只剩决策合成（纯规则、瞬时重算、不会 stale）。
+  const downstreamLabelsOf = (node: string): string[] => {
+    if (node === 'evidence_review') {
+      const biz = isMoney ? ['判赔规模', '回款能力'] : ['判例价值']
+      return ['权利基础', '侵权认定', '诉讼程序', ...biz, '业务预期']
+    }
+    if (node === 'rights') return ['侵权认定']
+    return []
   }
 
   if (error) return <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>
@@ -582,10 +599,11 @@ export default function DecisionDashboard({
                       variant="link"
                       label={label}
                       busy={busyNode !== ''}
+                      downstreamLabels={downstreamLabelsOf(key)}
                       hint={key === 'rights'
                         ? '重跑后「侵权认定」将标记失效（其结论依赖权利基础），决策合成立即重算。'
                         : '重跑后决策合成立即重算；法律可行性三维度按分层幂平均重新聚合。'}
-                      onRerun={(g) => rerun(key, g)}
+                      onRerun={(g, cascade) => rerun(key, g, cascade)}
                     />
                   ))}
                   <RerunControl
@@ -593,16 +611,18 @@ export default function DecisionDashboard({
                     variant="link"
                     label="业务预期"
                     busy={busyNode !== ''}
+                    downstreamLabels={downstreamLabelsOf('business')}
                     hint={`重跑将同时重算${bizDims.map((d) => d.label).join('、')}，并瞬时重算决策合成。`}
-                    onRerun={(g) => rerun('business', g)}
+                    onRerun={(g, cascade) => rerun('business', g, cascade)}
                   />
                   <RerunControl
                     compact
                     variant="link"
                     label="证据盘点"
                     busy={busyNode !== ''}
+                    downstreamLabels={downstreamLabelsOf('evidence_review')}
                     hint="补齐证据后可重跑证据盘点；其下游的权利基础、侵权认定、诉讼程序、业务预期与决策合成都会被标记失效。"
-                    onRerun={(g) => rerun('evidence_review', g)}
+                    onRerun={(g, cascade) => rerun('evidence_review', g, cascade)}
                   />
                 </div>
                 </div>

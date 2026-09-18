@@ -218,10 +218,10 @@ export const api = {
   deleteCase: (id: string) =>
     request<{ ok: boolean }>(`/cases/${id}`, { method: 'DELETE' }),
   result: (id: string) => request<any>(`/evaluation/${id}/result`),
-  rerun: (id: string, node: string, guidance: string) =>
+  rerun: (id: string, node: string, guidance: string, cascade = true) =>
     request<any>(`/evaluation/${id}/rerun`, {
       method: 'POST',
-      body: JSON.stringify({ node, guidance }),
+      body: JSON.stringify({ node, guidance, cascade }),
     }),
   // 评估三态控制（暂停 / 恢复 / 终止 / 状态查询）
   pauseEvaluation: (id: string) =>
