@@ -426,7 +426,8 @@ export default function CaseWorkbench() {
 
   // ---- URL 直达：?tab=run&axis=eval-moot[&moot=embedded|standalone] ----
   //
-  // 评估结果页的「启动模拟法庭」、以及新建案件后「仅开始模拟法庭」都靠它落位。
+  // 案件详情「仅开始模拟法庭」（含新建案件后换地址再开）靠它落位；
+  // 评估详情轴的「开始模拟法庭」是就地调用 startMoot('embedded')，不经 URL。
   // 用 searchParams 而不是跳转独立路由：同一个 /cases/:id 路由不会重挂载组件，
   // 已经跑起来的评估进度与庭审现场都不会因为这次跳转丢掉。
 
@@ -446,8 +447,8 @@ export default function CaseWorkbench() {
   useEffect(() => {
     if (!id || !detail) return
     if (mootParam !== 'embedded' && mootParam !== 'standalone') return
-    // 「已处理过」记的是**整条 query**而不是 moot 的值：同一次会话里
-    // 「结果页 → 启动模拟法庭」可以点第二次（第二次点开的仍然是 moot=embedded），
+    // 「已处理过」记的是**整条 query**而不是 moot 的值：同一次会话里可能再次
+    // 带相同的 moot 值跳进来（例如又新建一个案件再点「仅开始模拟法庭」），
     // 按值去重会把第二次静默吞掉。消费后参数会被抹掉，所以两次的 query 必然不同。
     const key = searchParams.toString()
     if (mootAutoRef.current === key) return

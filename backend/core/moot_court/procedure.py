@@ -49,6 +49,9 @@ class MootCourtResult:
     weak_points: List[str] = field(default_factory=list)
     focus_points: List[str] = field(default_factory=list)
     judge_scores: Dict[str, Any] = field(default_factory=dict)
+    legal_basis: List[Dict[str, Any]] = field(default_factory=list)
+    precedents: List[Dict[str, Any]] = field(default_factory=list)
+    experience_refs: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -71,6 +74,9 @@ class MootCourtResult:
             "weak_points": self.weak_points,
             "focus_points": self.focus_points,
             "judge_scores": self.judge_scores,
+            "legal_basis": self.legal_basis,
+            "precedents": self.precedents,
+            "experience_refs": self.experience_refs,
             "error": self.error
         }
 
@@ -119,7 +125,8 @@ class MootCourtProcedure:
         infringement_assessment: str = "",
         evidence_summary: str = "",
         evidence_checklist: Optional[Dict[str, bool]] = None,
-        cause_type: str = CAUSE_TRADEMARK
+        cause_type: str = CAUSE_TRADEMARK,
+        shared_legal_context: str = ""
     ):
         self.case_description = case_description
         self.rights_assessment = rights_assessment
@@ -131,11 +138,13 @@ class MootCourtProcedure:
             "has_damage_proof": False
         }
         self.cause_type = cause_type
+        self.shared_legal_context = shared_legal_context
 
-        # 三个 Agent 共用同一案由画像，保证三方在同一法律框架下对抗
-        self.plaintiff = PlaintiffAgent(cause_type)
-        self.defendant = DefendantAgent(cause_type)
-        self.judge = JudgeAgent(cause_type)
+        # 三个 Agent 共用同一案由画像，保证三方在同一法律框架下对抗；
+        # 公开依据（法定基准/法条/类案/经验库）三方共享，仅原告私有评估对被告隐藏
+        self.plaintiff = PlaintiffAgent(cause_type, shared_legal_context)
+        self.defendant = DefendantAgent(cause_type, shared_legal_context)
+        self.judge = JudgeAgent(cause_type, shared_legal_context)
 
         self.rounds: List[RoundResult] = []
         self._transcript_parts: List[str] = []
@@ -295,6 +304,9 @@ class MootCourtProcedure:
         result.summary_structured = judge_raw.get("summary_structured", {}) or {}
         result.weak_points = judge_raw.get("weak_points", [])
         result.focus_points = judge_raw.get("focus_points", [])
+        result.legal_basis = judge_raw.get("legal_basis", []) or []
+        result.precedents = judge_raw.get("precedents", []) or []
+        result.experience_refs = judge_raw.get("experience_refs", []) or []
         result.judge_scores = {
             "plaintiff": judge_raw.get("plaintiff_scores", {}),
             "defendant": judge_raw.get("defendant_scores", {}),

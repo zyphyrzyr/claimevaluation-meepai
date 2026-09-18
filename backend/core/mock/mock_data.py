@@ -324,6 +324,16 @@ def _moot_trademark():
             "plaintiff_scores_detail": {"legal_basis": "权利基础引用准确", "evidence": "证据链不完整", "argument": "辩论逻辑清晰"},
             "defendant_scores_detail": {"defense": "合法来源抗辩无证据支持", "evidence_challenge": "对证据效力攻击有效", "argument": "酌减赔偿论证合理"},
             "coefficient_reasoning": "原告证据固定存在瑕疵且关键取证缺失，被告对证据效力的抗辩具有实质影响，修正系数取 0.85。",
+            "legal_basis": [
+                {"article": "《商标法》第五十七条第（二）项", "cited_text": "未经许可在同一种商品上使用近似商标、易导致混淆", "applied_to": "支撑原告侵权构成要件"},
+                {"article": "《商标法》第六十三条", "cited_text": "法定赔偿与惩罚性赔偿的计算顺位", "applied_to": "支撑赔偿数额主张"},
+            ],
+            "precedents": [
+                {"name": "（202X）最高法知民终XX号", "court": "最高人民法院", "holding": "商标近似以整体观感与主要部分比对为准", "applied_to": "支撑混淆可能性认定"},
+            ],
+            "experience_refs": [
+                {"title": "商标侵权公证购买取证要点", "applied_to": "补强证据固定流程"},
+            ],
         },
     }
 
@@ -371,6 +381,16 @@ def _moot_copyright():
             "plaintiff_scores_detail": {"legal_basis": "法条适用正确但独创性论证不足", "evidence": "相似比对扎实、接触证据缺失", "argument": "辩论逻辑清晰"},
             "defendant_scores_detail": {"defense": "公有领域与权属攻击有效", "evidence_challenge": "对时间戳与登记证书的质疑成立", "argument": "判赔区间论证合理"},
             "coefficient_reasoning": "原告在独创性与权属两处存在实质短板，被告抗辩对案件走向有实质影响，修正系数取 0.78。",
+            "legal_basis": [
+                {"article": "《著作权法》第五十二条", "cited_text": "复制权与信息网络传播权的侵权构成", "applied_to": "支撑原告侵权主张"},
+                {"article": "《著作权法》第五十四条", "cited_text": "法定赔偿区间与计算顺位", "applied_to": "支撑赔偿数额主张"},
+            ],
+            "precedents": [
+                {"name": "（202X）最高法民再XX号", "court": "最高人民法院", "holding": "接触要件采高度盖然性，同业经营者公知作品接触可能性高", "applied_to": "支撑接触可能性认定"},
+            ],
+            "experience_refs": [
+                {"title": "图形作品独创性说明模板", "applied_to": "补强独创性论证"},
+            ],
         },
     }
 
@@ -418,6 +438,16 @@ def _moot_unfair_competition():
             "plaintiff_scores_detail": {"legal_basis": "法条适用正确但前提要件论证不足", "evidence": "知名度证据偏弱", "argument": "辩论组织尚可"},
             "defendant_scores_detail": {"defense": "前提性要件与在先使用抗辩有力", "evidence_challenge": "对单方销售数据质疑成立", "argument": "举证责任分配论证合理"},
             "coefficient_reasoning": "前提性要件「有一定影响」处于临界状态，被告抗辩对案件走向具有实质影响，修正系数取 0.72。",
+            "legal_basis": [
+                {"article": "《反不正当竞争法》第六条第1项", "cited_text": "有一定影响的商品装潢保护", "applied_to": "支撑原告权益基础"},
+                {"article": "《反不正当竞争法》第十七条", "cited_text": "法定赔偿计算", "applied_to": "支撑赔偿数额主张"},
+            ],
+            "precedents": [
+                {"name": "（202X）最高法民再XX号", "court": "最高人民法院", "holding": "有一定影响的认定应综合销售时间、区域、数额与宣传投入", "applied_to": "支撑知名度要件"},
+            ],
+            "experience_refs": [
+                {"title": "装潢类不正当竞争知名度证据清单", "applied_to": "补强「有一定影响」举证"},
+            ],
         },
     }
 

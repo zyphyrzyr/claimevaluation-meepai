@@ -105,15 +105,17 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
     if ctx.scores.get("final") is None:
         raise HTTPException(400, "案件尚未完成评估，请先完成主诉评估再启动模拟法庭")
 
-    # RAG 自动召回（§7）：案件材料库 + 全局经验库，注入庭审材料
-    recall = {"context": "", "refs": []}
+    # 聚合三方共享的「可引用依据」：法定基准（始终有）+ 复用评估流程北大法宝结果
+    # （load_results，不重复调用）+ 经验库 RAG 召回。
+    legal_ctx = {"block": "", "refs": []}
     try:
-        from core.knowledge import recall_for_context
-        recall_query = (ctx.case_description or "")[:200] + " " + " ".join(
+        from core.moot_court.context_sources import gather_legal_context
+        recall_query = (ctx.case_description or "")[:300] + " " + " ".join(
             g.get("item", "") for g in (ctx.gap_list or [])[:3])
-        # 案件的归属人 = 经验库的可见范围（案件已过 case_owned 校验）
-        recall = recall_for_context(db, case_id, recall_query, top_k=3,
-                                    user_id=case.user_id)
+        legal_ctx = gather_legal_context(
+            case_id, ctx.cause_type, recall_query,
+            db=db, user_id=case.user_id, top_k=3,
+        )
     except Exception:
         pass
 
@@ -127,9 +129,9 @@ def run_embedded_moot(case_id: str, db: Session = Depends(get_db),
     def work():
         try:
             before = dict(ctx.scores)
-            if recall["refs"]:
-                events.put({"event": "recall", "refs": recall["refs"]})
-            gen = moot_service.run_embedded(ctx, recall_context=recall["context"])
+            if legal_ctx["refs"]:
+                events.put({"event": "recall", "refs": legal_ctx["refs"]})
+            gen = moot_service.run_embedded(ctx, shared_legal_context=legal_ctx["block"])
             # 中止检查放在「取下一轮」之前：真实模式下 next(gen) 就是一次
             # LLM 调用（十秒级），调用中途打断不了。能承诺的只有
             # 「当前这轮说完就停」——前端文案必须照这个口径，别许诺立即停止。
@@ -240,12 +242,14 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
     events: queue.Queue = queue.Queue()
     cid = payload.case_id
 
-    # RAG 自动召回：传了 case_id 则含本案材料库；否则仅全局经验库
-    recall = {"context": "", "refs": []}
+    # 聚合三方共享依据：法定基准 + 经验库召回；纯独立演练（cid=None）不触发 on-demand 北大法宝
+    legal_ctx = {"block": "", "refs": []}
     try:
-        from core.knowledge import recall_for_context
-        recall = recall_for_context(db, cid, payload.case_description[:300], top_k=3,
-                                    user_id=owner_id)
+        from core.moot_court.context_sources import gather_legal_context
+        legal_ctx = gather_legal_context(
+            cid, payload.cause_type, payload.case_description[:300],
+            db=db, user_id=owner_id, top_k=3,
+        )
     except Exception:
         pass
 
@@ -256,14 +260,14 @@ def run_standalone_moot(payload: StandaloneMootRequest, db: Session = Depends(ge
 
     def work():
         try:
-            if recall["refs"]:
-                events.put({"event": "recall", "refs": recall["refs"]})
+            if legal_ctx["refs"]:
+                events.put({"event": "recall", "refs": legal_ctx["refs"]})
             gen = moot_service.run_standalone(
                 payload.case_description,
                 cause_type=payload.cause_type,
                 viewpoints=payload.viewpoints,
                 plaintiff_points=payload.plaintiff_points,
-                recall_context=recall["context"],
+                shared_legal_context=legal_ctx["block"],
             )
 
             def emit(event):

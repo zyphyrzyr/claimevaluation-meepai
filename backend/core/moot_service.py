@@ -78,12 +78,16 @@ def _mock_run(materials: Dict[str, Any],
         "defendant_detail": judge_raw.get("defendant_scores_detail", {}),
         "coefficient_reasoning": judge_raw.get("coefficient_reasoning", ""),
     }
+    result.legal_basis = judge_raw.get("legal_basis", []) or []
+    result.precedents = judge_raw.get("precedents", []) or []
+    result.experience_refs = judge_raw.get("experience_refs", []) or []
     return result
 
 
 def _real_run(case_description: str, materials: Dict[str, Any],
               viewpoints: str = "",
-              cause_type: str = CAUSE_TRADEMARK) -> Generator[Dict[str, Any], None, MootCourtResult]:
+              cause_type: str = CAUSE_TRADEMARK,
+              shared_legal_context: str = "") -> Generator[Dict[str, Any], None, MootCourtResult]:
     """真实模式：MootCourtProcedure 分步运行"""
     if viewpoints:
         # 用户观点仅注入原告侧（影响我方主张组织，不影响被告抗辩生成）
@@ -96,6 +100,7 @@ def _real_run(case_description: str, materials: Dict[str, Any],
         evidence_summary=materials.get("evidence_summary", ""),
         evidence_checklist=materials.get("evidence_checklist"),
         cause_type=cause_type,
+        shared_legal_context=shared_legal_context,
     )
     result = MootCourtResult()
     for rr in procedure._run_steps():
@@ -123,24 +128,24 @@ def _final_event(result: MootCourtResult, mode: str) -> Dict[str, Any]:
         "weak_points": result.weak_points,
         "focus_points": result.focus_points,
         "judge_scores": result.judge_scores,
+        "legal_basis": result.legal_basis,
+        "precedents": result.precedents,
+        "experience_refs": result.experience_refs,
         "error": result.error,
     }
 
 
-def run_embedded(ctx: CaseContext, recall_context: str = ""):
+def run_embedded(ctx: CaseContext, shared_legal_context: str = ""):
     """
     内嵌模式：评估流程内的压力测试。
-    recall_context：RAG 自动召回材料（案件材料库 + 全局经验库，路由层组好传入）
+    shared_legal_context：moot_court.context_sources 渲染的「可引用依据」片段
+    （法定基准 + 北大法宝复用 + 经验库召回），路由层组好传入，注入三方 system prompt。
     生成器：yield 逐轮事件；最后返回 moot_finished 事件 dict。
     调用方负责：ctx.correction_coeff 回写后重算 synthesize（见 routers/moot.py）。
     """
     materials = _materials_from_ctx(ctx)
-    if recall_context:
-        materials["evidence_summary"] = (
-            (materials["evidence_summary"] or "")
-            + "\n\n【知识库召回材料】\n" + recall_context)
     gen = _mock_run(materials, ctx.cause_type) if _use_mock() else _real_run(
-        ctx.case_description, materials, ctx.viewpoints_text(), ctx.cause_type)
+        ctx.case_description, materials, ctx.viewpoints_text(), ctx.cause_type, shared_legal_context)
     result = None
     try:
         while True:
@@ -172,26 +177,24 @@ def run_embedded(ctx: CaseContext, recall_context: str = ""):
 def run_standalone(case_description: str, cause_type: str = CAUSE_TRADEMARK,
                    viewpoints: List[str] = None,
                    plaintiff_points: str = "",
-                   recall_context: str = "") -> Generator[Dict[str, Any], None, None]:
+                   shared_legal_context: str = "") -> Generator[Dict[str, Any], None, None]:
     """
     独立演练模式：跳过评估，手动组料。产出演练报告，不回写任何评分。
-    recall_context：全局经验库自动召回材料（无案件上下文）。
+    shared_legal_context：moot_court.context_sources 渲染的「可引用依据」片段
+    （法定基准 + 经验库召回；独立演练不触发 on-demand 北大法宝）。
     cause_type：决定三方 Agent 的案由画像（请求权基础/抗辩路径/证据类型）。
     """
     viewpoints = viewpoints or []
-    evidence_summary = ""
-    if recall_context:
-        evidence_summary = "【知识库召回材料】\n" + recall_context
     materials = {
         "rights_assessment": plaintiff_points or "（独立演练：未提供权利基础评估，由 AI 从案情自行组织）",
         "infringement_assessment": "",
-        "evidence_summary": evidence_summary,
+        "evidence_summary": "",
         "evidence_checklist": {"has_rights_proof": True,
                                "has_infringement_proof": True,
                                "has_damage_proof": False},
     }
     gen = _mock_run(materials, cause_type) if _use_mock() else _real_run(
-        case_description, materials, "\n".join(viewpoints), cause_type)
+        case_description, materials, "\n".join(viewpoints), cause_type, shared_legal_context)
     result = None
     try:
         while True:
