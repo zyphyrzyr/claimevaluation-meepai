@@ -66,6 +66,19 @@ def startup():
         # 自愈失败不该挡住服务启动
         print(f"[startup] 僵尸状态自愈跳过：{e}")
 
+    # 启动自愈：后台证据解析在进程重启时可能被中断，把残留 pending 的文件重新排队解析，
+    # 否则这些文件会永远停在「解析中」。
+    try:
+        from core.database import SessionLocal
+        db = SessionLocal()
+        try:
+            from routers.cases import _resume_pending_evidence
+            _resume_pending_evidence(db)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[startup] 证据解析自愈跳过：{e}")
+
 
 @app.get("/api/health")
 def health():
