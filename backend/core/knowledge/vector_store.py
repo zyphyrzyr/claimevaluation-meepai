@@ -47,6 +47,15 @@ class _BaseStore:
         """块总数。用于把「向量库 vs DB」的不一致做成可观测的自述指标。"""
         raise NotImplementedError
 
+    def backfill_user_id(self, default: str = "") -> int:
+        """给缺 user_id 的存量块补默认值，返回补了多少块。
+
+        幂等：已经有该键的块不动。多用户隔离上线前入库的块都没有这个键，
+        不补的话「自己的 + 公共的」这条 OR 过滤会把它们全部挡在门外——
+        表现是老经验库突然搜不到任何东西，且不报错。
+        """
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------- ChromaDB 后端
 
@@ -67,9 +76,15 @@ class _ChromaStore(_BaseStore):
 
     @staticmethod
     def _to_chroma_where(where: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """扁平条件 dict → chroma where 语法（多条件需 $and）"""
+        """扁平条件 dict → chroma where 语法（多条件需 $and）
+
+        已经是 chroma 原生语法（含 $and / $or）时原样返回：
+        「自己的 + 公共的」是个 OR 条件，压平成一个 dict 根本表达不出来。
+        """
         if not where:
             return None
+        if "$and" in where or "$or" in where:
+            return where
         if len(where) == 1:
             k, v = next(iter(where.items()))
             return {k: v}
@@ -95,6 +110,23 @@ class _ChromaStore(_BaseStore):
 
     def total_chunks(self):
         return self._col.count()
+
+    def backfill_user_id(self, default: str = "") -> int:
+        got = self._col.get(include=["metadatas"])
+        ids = got.get("ids") or []
+        metas = got.get("metadatas") or []
+        todo_ids, todo_metas = [], []
+        for cid, meta in zip(ids, metas):
+            meta = dict(meta or {})
+            if "user_id" in meta:
+                continue
+            meta["user_id"] = default
+            todo_ids.append(cid)
+            todo_metas.append(meta)
+        if todo_ids:
+            # chroma 的 update 是整份 metadata 覆盖，所以必须带着原有键一起写回
+            self._col.update(ids=todo_ids, metadatas=todo_metas)
+        return len(todo_ids)
 
 
 # ---------------------------------------------------------- numpy/内存降级后端
@@ -131,10 +163,22 @@ class _FallbackStore(_BaseStore):
         self._persist()
 
     def query(self, vector, where, top_k=5):
-        def _match(meta: Dict[str, Any]) -> bool:
-            if not where:
+        def _match(meta: Dict[str, Any], cond=None) -> bool:
+            """支持 $and / $or 的递归匹配。
+
+            兜底存储必须跟 chroma 后端接受同一套 where：否则「自己的 + 公共的」
+            这条 OR 在 chroma 上生效、在降级存储上被当成普通键名去比对，
+            两边行为不一致，而降级只在没装 chromadb 的机器上出现，
+            出问题时根本想不到是 where 语法的事。
+            """
+            cond = where if cond is None else cond
+            if not cond:
                 return True
-            return all(meta.get(k) == v for k, v in where.items())
+            if "$and" in cond:
+                return all(_match(meta, sub) for sub in cond["$and"])
+            if "$or" in cond:
+                return any(_match(meta, sub) for sub in cond["$or"])
+            return all(meta.get(k) == v for k, v in cond.items())
 
         def _cos(a, b):
             dot = sum(x * y for x, y in zip(a, b))
@@ -144,7 +188,7 @@ class _FallbackStore(_BaseStore):
 
         hits = [{"id": cid, "document": d["document"], "metadata": d["metadata"],
                  "score": _cos(vector, d["vector"])}
-                for cid, d in self._data.items() if _match(d["metadata"])]
+                for cid, d in self._data.items() if _match(d["metadata"], where)]
         hits.sort(key=lambda h: h["score"], reverse=True)
         return hits[:top_k]
 
@@ -153,6 +197,18 @@ class _FallbackStore(_BaseStore):
 
     def total_chunks(self):
         return len(self._data)
+
+    def backfill_user_id(self, default: str = "") -> int:
+        n = 0
+        for d in self._data.values():
+            meta = d.setdefault("metadata", {}) or {}
+            if "user_id" not in meta:
+                meta["user_id"] = default
+                n += 1
+        if n:
+            self._dirty = True
+            self._persist()
+        return n
 
 
 # 降级原因。None 表示用的是 chromadb（正常）；有值表示当前在兜底存储上跑。

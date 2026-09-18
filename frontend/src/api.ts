@@ -16,6 +16,20 @@ export interface CaseItem {
   status: string
   created_at: string
   parse_summary?: ParseSummary
+  /** 原告（多个用「、」连接）。当事人存在 parties 表，未登记时为 null */
+  plaintiff?: string | null
+  /** 被告（多个用「、」连接）。未登记时为 null */
+  defendant?: string | null
+  /** 公共示例数据（存量迁移而来）：人人可见、不可改，需先认领 */
+  is_public?: boolean
+}
+
+/** 案件列表分页信封（全库已有数百个案件，服务端分页 + 搜索） */
+export interface CasePage {
+  items: CaseItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface EvidenceFileMeta {
@@ -59,6 +73,45 @@ export interface EvalEvent {
   summary?: string
 }
 
+// ---------------------------------------------------------------- 401 拦截
+
+/**
+ * 未登录时的统一出口。
+ *
+ * 由 AuthProvider 注册。写操作撞 401 时自动弹登录框——否则用户的感受是
+ * 「点了新建案件，什么都没发生」，而控制台里躺着一条 401 没人看。
+ */
+let onUnauthorized: (() => void) | null = null
+
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  onUnauthorized = fn
+}
+
+/** 请求是不是 401（后端抛的是 Error(`${status}: ${body}`)） */
+export function isUnauthorized(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith('401:')
+}
+
+/**
+ * 把请求错误翻成给人看的一句话。
+ *
+ * 401 返回**空串**：那种情况已经由 401 拦截器弹了登录框，
+ * 表单里再贴一条 `401: {"detail":"请先登录"}` 只是把裸 JSON 甩给用户，
+ * 而且两条提示互相盖着看。调用方把空串当「不显示」处理即可。
+ */
+export function humanError(err: unknown): string {
+  if (isUnauthorized(err)) return ''
+  const raw = err instanceof Error ? err.message : String(err)
+  const body = raw.replace(/^\d+:\s*/, '')
+  try {
+    const parsed = JSON.parse(body)
+    if (parsed?.detail) return String(parsed.detail)
+  } catch {
+    /* 不是 JSON 就原样用 */
+  }
+  return body || '操作失败，请重试'
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData
   const resp = await fetch(`${BASE}${path}`, {
@@ -67,14 +120,57 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!resp.ok) {
     const text = await resp.text()
+    // 认证端点自己会解释 401（邮箱或密码不正确）。这类 401 不该再弹一次
+    // 登录框——用户明明已经在框里了，再弹一个只会把错误提示盖掉。
+    if (resp.status === 401 && !path.startsWith('/auth/')) onUnauthorized?.()
     throw new Error(`${resp.status}: ${text}`)
   }
   return resp.json()
 }
 
+// ---------------------------------------------------------------- 认证
+
+export interface AuthUser {
+  id: string
+  email: string
+  display_name: string
+  stats: { cases: number; entries: number }
+}
+
+export const authApi = {
+  /** 当前登录用户；未登录返回 { user: null }（不是 401） */
+  me: () => request<{ user: AuthUser | null }>('/auth/me'),
+  login: (email: string, password: string) =>
+    request<{ user: AuthUser }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  register: (email: string, password: string, display_name?: string) =>
+    request<{ user: AuthUser }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, display_name: display_name ?? '' }),
+    }),
+  logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+  /** 把一条公共案件认领到自己名下（公共数据只读，认领后即可编辑） */
+  claimCase: (id: string) => request<CaseItem>(`/cases/${id}/claim`, { method: 'POST' }),
+}
+
 export const api = {
   meta: () => request<{ cause_types: string[]; goal_types: string[] }>('/cases/meta'),
-  listCases: () => request<CaseItem[]>('/cases'),
+  /**
+   * 案件列表（服务端分页 + 关键词搜索）。
+   *
+   * q 按空格分词、多词 AND，匹配案件名称或原被告——搜索一定是**全库**搜，
+   * 不是只搜当前页，否则「翻页」和「搜索」两个语义会互相打架。
+   */
+  listCases: (params?: { q?: string; page?: number; page_size?: number }) => {
+    const s = new URLSearchParams()
+    if (params?.q) s.set('q', params.q)
+    if (params?.page) s.set('page', String(params.page))
+    if (params?.page_size) s.set('page_size', String(params.page_size))
+    const qs = s.toString()
+    return request<CasePage>(`/cases${qs ? `?${qs}` : ''}`)
+  },
   createCase: (payload: CaseCreatePayload | FormData) =>
     request<CaseItem>('/cases', {
       method: 'POST',
@@ -87,6 +183,8 @@ export const api = {
       cause_type: string
       goal_type: string
       status: string
+      /** 公共示例数据：只读，改之前要先认领 */
+      is_public: boolean
       case_description: string
       client_org: string
       evidence_files: { id: string; file_name: string; parse_status: string }[]
@@ -207,6 +305,15 @@ export const mootApi = {
   /** 独立模式：手动组料纯演练，不回写评分 */
   runStandalone: (payload: StandaloneMootPayload, onEvent: (e: any) => void) =>
     ssePost('/moot/standalone', payload, onEvent),
+  /**
+   * 中止进行中的庭审。
+   *
+   * 语义是「作废」：当前这轮说完就停，不回写系数、不落库。对没在跑的庭审
+   * 调用返回 stopped=false（不是错误），所以前端不必判断按钮该不该出现，
+   * 点了也不会炸。
+   */
+  stop: (caseId: string) =>
+    request<{ stopped: boolean; detail?: string }>(`/moot/${caseId}/stop`, { method: 'POST' }),
 }
 
 /** 通用 SSE 读取：把流按 \n\n 切分，逐条回调（与后端 `data: ` 约定一致） */
@@ -274,6 +381,8 @@ export interface KnowledgeEntryItem {
   snippet?: string
   chunk_count: number
   created_at: string
+  /** 公共经验：所有人可见、谁都不能删 */
+  is_public?: boolean
 }
 
 export interface SearchHit extends KnowledgeEntryItem {

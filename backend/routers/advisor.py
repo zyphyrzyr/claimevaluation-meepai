@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core import advisor
+from core.auth import case_owned, case_readable
 from core.database import Case, get_db
 from routers.evaluation import _load_ctx, _save_ctx
 
@@ -23,10 +24,8 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/{case_id}/chat")
-def chat(case_id: str, payload: ChatRequest, db: Session = Depends(get_db)):
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def chat(case_id: str, payload: ChatRequest, db: Session = Depends(get_db),
+         case: Case = Depends(case_owned)):
     if not payload.question.strip():
         raise HTTPException(400, "问题不能为空")
 
@@ -36,7 +35,8 @@ def chat(case_id: str, payload: ChatRequest, db: Session = Depends(get_db)):
     def stream():
         result = {"answer": "", "recall": []}
         try:
-            gen = advisor.chat(db, ctx, payload.question)
+            # 用案件的归属人限定经验库召回范围（案件已过 case_owned 校验）
+            gen = advisor.chat(db, ctx, payload.question, user_id=case.user_id)
             while True:
                 try:
                     event = next(gen)
@@ -69,9 +69,7 @@ def chat(case_id: str, payload: ChatRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/{case_id}/history")
-def history(case_id: str, db: Session = Depends(get_db)):
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def history(case_id: str, db: Session = Depends(get_db),
+            case: Case = Depends(case_readable)):
     ctx = _load_ctx(case)
     return {"messages": ctx.advisor_messages}

@@ -2,17 +2,21 @@
 案件管理路由：建案（案情+案由+业务目标+被告信息+观点注入）、列表、详情
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from core.auth import case_owned, case_readable, current_user_optional, require_user
 from core.case_context import CaseContext
 from core.config import SUPPORTED_CAUSE_TYPES, GOAL_TYPES
-from core.database import Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, get_db
+from core.database import (
+    Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, User, get_db,
+)
 from core.evidence_parser import (
     is_image_file, is_pdf_file, is_zip_file, ocr_image, parse_pdf, parse_zip_archive,
 )
@@ -46,6 +50,37 @@ class CaseOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CaseRow(CaseOut):
+    """列表行：在基础字段上补当事人。
+
+    当事人存在 parties 表（按 case_id 拆开），不在 cases 表里；而搜索要按原被告匹配，
+    结果里也必须看得见——否则搜「顾家家居」搜到了，用户看不出匹配在哪一行。
+    没有当事人记录的案件这两个字段是 None（早期草稿与 E2E 测试案有不少这种情况）。
+    """
+    plaintiff: Optional[str] = None
+    defendant: Optional[str] = None
+    # 公共示例数据（user_id 为空）。前端据此把行标成「公共·只读」，
+    # 否则用户点进去做一半发现改不了，界面上看不出原因。
+    is_public: bool = False
+
+
+class CasePage(BaseModel):
+    """分页信封。
+
+    列表不再是裸数组：全库已有 279 个案件，裸数组会逼着前端一口气全渲染，
+    既没有「第几页」的概念，服务端也失去了只取一页的余地。
+    """
+    items: List[CaseRow]
+    total: int
+    page: int
+    page_size: int
+
+
+# 每页条数上限：前端会传 10 / 20 / 50，这里再兜一道，避免有人手拼 URL 拉全库
+DEFAULT_PAGE_SIZE = 10
+MAX_PAGE_SIZE = 50
 
 
 @router.get("/meta")
@@ -260,7 +295,14 @@ def _write_evidence_files(records: list, case_id: str, db: Session) -> None:
 
 
 @router.post("", response_model=CaseOut)
-async def create_case(request: Request, db: Session = Depends(get_db)):
+async def create_case(
+    request: Request,
+    db: Session = Depends(get_db),
+    # 建案要登录：不登录建的案子挂在谁名下无从判断，
+    # 而「无主案件」正是这次要消灭的状态——它既不能被别人看到（跨账号串数据），
+    # 也不能被建它的人看到（换个浏览器就没了）。
+    user: User = Depends(require_user),
+):
     payload, files = await _parse_create_request(request)
 
     if not payload.name.strip():
@@ -292,6 +334,7 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
             client_org=payload.client_org,
             case_description=payload.case_description,
             status="draft",
+            user_id=user.id,
         )
         db.add(case)
         db.flush()
@@ -331,6 +374,7 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
         client_org=payload.client_org,
         case_description=payload.case_description,
         status="pending",
+        user_id=user.id,
     )
     db.add(case)
     db.flush()
@@ -361,22 +405,78 @@ async def create_case(request: Request, db: Session = Depends(get_db)):
                    parse_summary=_build_parse_summary(file_records, zip_summaries))
 
 
-@router.get("", response_model=List[CaseOut])
-def list_cases(db: Session = Depends(get_db)):
-    cases = db.query(Case).order_by(Case.created_at.desc()).all()
-    return [CaseOut(id=c.id, name=c.name, cause_type=c.cause_type,
-                    goal_type=c.goal_type, status=c.status,
-                    created_at=c.created_at.isoformat()) for c in cases]
+@router.get("", response_model=CasePage)
+def list_cases(q: str = "", page: int = 1, page_size: int = DEFAULT_PAGE_SIZE,
+               db: Session = Depends(get_db),
+               user: Optional[User] = Depends(current_user_optional)):
+    """案件列表（分页 + 关键词搜索）。
+
+    q 按空格分词，**词与词之间是 AND**（每个词都得命中），每个词匹配
+    案件名称或该案下任一当事人名称——所以「栖木 顾家」能直接定位到那件案子。
+
+    为什么必须走子查询而不是只匹配名称：当事人落在 parties 表，而案件名称里**不一定**
+    写着当事人（全库只有个位数案件名含「诉」字），靠名称推断当事人的路子不成立——
+    截图里「栖木家居有限公司诉顾家家居股份有限公司…」这种是少数。
+
+    可见范围：**自己的案件 + 公共案件**（user_id 为空的存量数据）。
+    未登录时只剩下公共那部分，所以匿名进来看不到别人建的东西。
+    """
+    page = max(1, page)
+    page_size = min(MAX_PAGE_SIZE, max(1, page_size))
+
+    query = db.query(Case)
+    if user is None:
+        query = query.filter(Case.user_id.is_(None))
+    else:
+        query = query.filter(or_(Case.user_id == user.id, Case.user_id.is_(None)))
+    for term in (q or "").split():
+        like = f"%{term}%"
+        query = query.filter(or_(
+            Case.name.ilike(like),
+            Case.id.in_(db.query(Party.case_id).filter(Party.name.ilike(like))),
+        ))
+
+    total = query.count()
+    # 页码越界自愈：删掉最后一页仅剩的几条后，前端手上的页码会指向不存在的页。
+    # 这里夹到最后一页并把它回给前端，前端据此同步页码——比让前端算「该不该退一页」可靠。
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    # 次级排序键不能省：同一天建案的很多（E2E-* 系列全落在 9/1），
+    # 相同 created_at 之间顺序不稳定，翻页时会重复出现某些行、又漏掉另一些。
+    rows = (query.order_by(Case.created_at.desc(), Case.id.desc())
+            .offset((page - 1) * page_size).limit(page_size).all())
+
+    # 本页当事人的一次取完，别在循环里逐案查（N+1）
+    names: Dict[str, Dict[str, List[str]]] = {}
+    ids = [c.id for c in rows]
+    if ids:
+        for p in db.query(Party).filter(Party.case_id.in_(ids)).all():
+            if not p.name:
+                continue
+            slot = names.setdefault(p.case_id, {"plaintiff": [], "defendant": []})
+            if p.role in slot:
+                slot[p.role].append(p.name)
+
+    items = []
+    for c in rows:
+        slot = names.get(c.id, {})
+        items.append(CaseRow(
+            id=c.id, name=c.name, cause_type=c.cause_type,
+            goal_type=c.goal_type, status=c.status,
+            created_at=c.created_at.isoformat(),
+            # 一个案子可能有多个原告/被告，顿号连起来给前端一行显示
+            plaintiff="、".join(slot.get("plaintiff") or []) or None,
+            defendant="、".join(slot.get("defendant") or []) or None,
+            is_public=(c.user_id is None),
+        ))
+    return CasePage(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/{case_id}")
-def case_detail(case_id: str, db: Session = Depends(get_db)):
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def case_detail(case: Case = Depends(case_readable), db: Session = Depends(get_db)):
     evidence_files = [
         {"id": ef.id, "file_name": ef.file_name, "parse_status": ef.parse_status}
-        for ef in db.query(EvidenceFile).filter(EvidenceFile.case_id == case_id).all()
+        for ef in db.query(EvidenceFile).filter(EvidenceFile.case_id == case.id).all()
     ]
     return {
         "id": case.id,
@@ -384,6 +484,7 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
         "cause_type": case.cause_type,
         "goal_type": case.goal_type,
         "status": case.status,
+        "is_public": case.user_id is None,
         "case_description": case.case_description,
         "client_org": case.client_org,
         "evidence_files": evidence_files,
@@ -392,11 +493,10 @@ def case_detail(case_id: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{case_id}", response_model=CaseOut)
-async def update_draft(case_id: str, request: Request, db: Session = Depends(get_db)):
+async def update_draft(
+    request: Request, case: Case = Depends(case_owned), db: Session = Depends(get_db)
+):
     """编辑案件：覆盖文本字段、重新解析上传文件、重建当事人与 context。草稿/已评估案件均可改，状态保持原值；评估运行中禁止。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再编辑")
 
@@ -429,11 +529,30 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
     _write_evidence_files(file_records, case.id, db)
 
     # 同步 Party 表（删除旧的，写最新）
-    for p in db.query(Party).filter(Party.case_id == case_id).all():
+    for p in db.query(Party).filter(Party.case_id == case.id).all():
         db.delete(p)
     for p in parties:
         db.add(Party(case_id=case.id, role=p["role"],
                      name=p["name"], party_type=p["party_type"]))
+
+    # 关键修复：_build_context 会重建一个空 context，若直接落库会把已有评估结果整笔抹掉
+    # （「编辑案件」「仅开始模拟法庭」都会走这条 PUT，正是 8d9bcc0c 等案例结果被清空的根因）。
+    # 只让「案件输入」字段随编辑更新，把「评估产出 + 用户输入」从旧 context 搬回新 ctx。
+    old_ctx = CaseContext.from_dict(case.context_json or {})
+    _CTX_PRESERVE = (
+        # 决策层产出
+        "dimension_results", "scores", "confidence", "red_flags", "recommendation",
+        "defendant_profile", "recovery_ability",
+        # 证据盘点产出（重跑会整体重算覆盖，编辑不该清掉）
+        "evidence_matrix", "gap_list", "extra_evidence",
+        "evidence_completeness", "evidence_note",
+        # 模拟法庭
+        "moot_transcript", "correction_coeff",
+        # 用户输入（编辑案件不应丢失用户注入的观点/知识、追问历史、审计轨迹）
+        "injected_knowledge", "user_viewpoints", "advisor_messages", "audit_trail",
+    )
+    for _f in _CTX_PRESERVE:
+        setattr(ctx, _f, getattr(old_ctx, _f))
 
     case.context_json = ctx.to_dict()
     db.commit()
@@ -448,11 +567,8 @@ async def update_draft(case_id: str, request: Request, db: Session = Depends(get
 
 
 @router.post("/{case_id}/start-evaluation", response_model=CaseOut)
-def start_evaluation(case_id: str, db: Session = Depends(get_db)):
+def start_evaluation(case: Case = Depends(case_owned), db: Session = Depends(get_db)):
     """启动评估：校验带 * 的必填项，补全当事人与 context，置 pending。草稿/已评估案件均可重新评估；评估进行中禁止。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再启动评估")
 
@@ -468,7 +584,7 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
     if not (case.case_description or "").strip():
         missing.append("案情描述")
     evidence_text = (di.get("evidence_texts", "") or "").strip()
-    has_files = db.query(EvidenceFile).filter(EvidenceFile.case_id == case_id).count() > 0
+    has_files = db.query(EvidenceFile).filter(EvidenceFile.case_id == case.id).count() > 0
     if not evidence_text and not has_files:
         missing.append("证据材料文本或上传文件")
     if missing:
@@ -484,11 +600,15 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
                         "party_type": di.get("type", "company")})
     ctx.parties = parties
     # 同步 Party 表，保证详情与红线引擎读取一致
-    for p in db.query(Party).filter(Party.case_id == case_id).all():
+    for p in db.query(Party).filter(Party.case_id == case.id).all():
         db.delete(p)
     for p in parties:
         db.add(Party(case_id=case.id, role=p["role"],
                      name=p["name"], party_type=p["party_type"]))
+
+    # 重新评估：启动即清空上一轮决策层结果（维度结果/分数/红线等），只保留输入字段。
+    # 这样「确认重新评估」后旧结果立刻消失、从头开始；首跑/草稿时 ctx 本就空，reset 为 no-op。
+    ctx.reset_evaluation()
 
     case.context_json = ctx.to_dict()
     case.status = "pending"
@@ -499,16 +619,39 @@ def start_evaluation(case_id: str, db: Session = Depends(get_db)):
                    created_at=case.created_at.isoformat())
 
 
+@router.post("/{case_id}/claim", response_model=CaseOut)
+def claim_case(case: Case = Depends(case_readable), db: Session = Depends(get_db),
+               user: User = Depends(require_user)):
+    """把一条公共案件认领到自己名下。
+
+    为什么需要它：存量案件迁移后全是公共的，而公共数据是只读的（否则谁都能改
+    共享数据）。没有这个口子，用户连自己过去积累的案件都改不动 —— 从「能改」变成
+    「只能看」是一次静默的功能倒退。认领是唯一的、显式的一次性动作，
+    认领后该案件就只属于认领人，其他人列表里不再出现。
+    """
+    if case.user_id is not None:
+        # 已是自己的：重复认领不该报错，否则前端「认领」按钮点两次就炸
+        if case.user_id != user.id:
+            raise HTTPException(403, "该案件已被其他用户认领")
+        return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
+                       goal_type=case.goal_type, status=case.status,
+                       created_at=case.created_at.isoformat())
+
+    case.user_id = user.id
+    db.commit()
+    return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
+                   goal_type=case.goal_type, status=case.status,
+                   created_at=case.created_at.isoformat())
+
+
 @router.delete("/{case_id}/evidence-files/{file_id}")
-def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def delete_evidence_file(file_id: str, case: Case = Depends(case_owned),
+                         db: Session = Depends(get_db)):
     """删除已上传的证据文件：移除 EvidenceFile 记录、从 evidence_texts 剥离其解析片段、重建本案材料库。草稿/已评估案件均可；评估进行中禁止。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再删除文件")
     ef = db.query(EvidenceFile).filter(
-        EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
+        EvidenceFile.id == file_id, EvidenceFile.case_id == case.id,
     ).first()
     if not ef:
         raise HTTPException(404, "文件记录不存在")
@@ -535,18 +678,19 @@ def delete_evidence_file(case_id: str, file_id: str, db: Session = Depends(get_d
     db.commit()
 
     # 重建本案材料库（先清后增，保证删后一致）
-    _rebuild_case_knowledge(db, case_id, remaining)
+    _rebuild_case_knowledge(db, case.id, remaining)
 
     return {"ok": True}
 
 
-def _get_ef(case_id: str, file_id: str, db: Session) -> EvidenceFile:
-    """校验 file_id 确实属于该 case_id（防越权读他人文件）。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
+def _get_ef(case: Case, file_id: str, db: Session) -> EvidenceFile:
+    """校验 file_id 确实属于该案件（防越权读他人文件）。
+
+    入参改成 case 对象而不是 case_id：归属判定已经在依赖项里做过一次，
+    这里再按 id 查一遍不仅多余，还容易被后加的调用点漏掉那次查询。
+    """
     ef = db.query(EvidenceFile).filter(
-        EvidenceFile.id == file_id, EvidenceFile.case_id == case_id,
+        EvidenceFile.id == file_id, EvidenceFile.case_id == case.id,
     ).first()
     if not ef:
         raise HTTPException(404, "文件记录不存在")
@@ -554,9 +698,10 @@ def _get_ef(case_id: str, file_id: str, db: Session) -> EvidenceFile:
 
 
 @router.get("/{case_id}/evidence-files/{file_id}")
-def evidence_file_detail(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def evidence_file_detail(file_id: str, case: Case = Depends(case_readable),
+                         db: Session = Depends(get_db)):
     """预览用元信息：解析文本、是否有原件、大小、预览类型。"""
-    ef = _get_ef(case_id, file_id, db)
+    ef = _get_ef(case, file_id, db)
     return {
         "id": ef.id,
         "file_name": ef.file_name,
@@ -569,9 +714,10 @@ def evidence_file_detail(case_id: str, file_id: str, db: Session = Depends(get_d
 
 
 @router.get("/{case_id}/evidence-files/{file_id}/raw")
-def evidence_file_raw(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def evidence_file_raw(file_id: str, case: Case = Depends(case_readable),
+                      db: Session = Depends(get_db)):
     """原始字节流（inline），供 PDF 原生渲染 / 图片显示 / 下载原件。无原件返回 404。"""
-    ef = _get_ef(case_id, file_id, db)
+    ef = _get_ef(case, file_id, db)
     p = file_store.original_path(ef.storage_uri)
     if p is None:
         raise HTTPException(404, "原始文件不可用：该文件可能上传于旧版本，仅保留解析文本")
@@ -584,9 +730,10 @@ def evidence_file_raw(case_id: str, file_id: str, db: Session = Depends(get_db))
 
 
 @router.get("/{case_id}/evidence-files/{file_id}/preview")
-def evidence_file_preview(case_id: str, file_id: str, db: Session = Depends(get_db)):
+def evidence_file_preview(file_id: str, case: Case = Depends(case_readable),
+                          db: Session = Depends(get_db)):
     """doc/docx 经 textutil 转出的 HTML（带缓存），供沙箱 iframe 渲染；不可用返回 406。"""
-    ef = _get_ef(case_id, file_id, db)
+    ef = _get_ef(case, file_id, db)
     html = file_store.doc_to_html(ef.storage_uri)
     if html is None:
         raise HTTPException(406, "该文件类型不支持在线预览（仅 doc/docx 可预览，且需本机 textutil）")
@@ -594,19 +741,15 @@ def evidence_file_preview(case_id: str, file_id: str, db: Session = Depends(get_
 
 
 @router.delete("/{case_id}")
-def delete_case(case_id: str, db: Session = Depends(get_db)):
+def delete_case(case: Case = Depends(case_owned), db: Session = Depends(get_db)):
     """删除案件：清案件材料库（向量 + DB）、检索记录，再删案件本体；
     SQLAlchemy cascade 自动带走 Party/EvidenceFile/RuleHit/ScoreSnapshot/MootRound/Report/AuditEvent。"""
-    case = db.query(Case).filter(Case.id == case_id).first()
-    if not case:
-        raise HTTPException(404, "案件不存在")
-
     # 1. 案件材料库（scope=case）先清 DB 行，与向量清理解耦（保证一致性）
     #    delete_knowledge 内部先删向量后删 DB 行，向量库一旦异常会把 DB 行删除吞掉，
     #    导致材料库残留。这里改为：先算好各条目向量块 id → 删并提交 DB 行 → 再 best-effort 清向量。
     from core.knowledge.service import chunk_text, get_store
     case_entries = db.query(KnowledgeEntry).filter(
-        KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case_id,
+        KnowledgeEntry.scope == "case", KnowledgeEntry.case_id == case.id,
     ).all()
     # 删除前按各条目内容算出向量块 id（content 随后随 DB 行消失）
     entry_chunk_ids: list = []
@@ -624,7 +767,7 @@ def delete_case(case_id: str, db: Session = Depends(get_db)):
             pass
 
     # 3. 检索记录无外键级联，手动清
-    db.query(RetrievalRecord).filter(RetrievalRecord.case_id == case_id).delete()
+    db.query(RetrievalRecord).filter(RetrievalRecord.case_id == case.id).delete()
 
     # 4. 删案件本体（级联带走其余子表）
     db.delete(case)

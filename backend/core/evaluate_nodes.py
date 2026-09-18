@@ -55,7 +55,49 @@ def _base(ctx: CaseContext) -> str:
 {injected}"""
 
 
-def evaluate_rights(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:
+def _format_pkulaw_block(pkulaw: Dict[str, Any]) -> str:
+    """把北大法宝检索结果压成 prompt 可用的文本块；无数据返回空串。
+
+    仅在确有法条/类案时注入，避免把「检索失败」的空壳塞进 prompt。
+    失败原因由调用方在 trace 与结果里单独显式露出。
+    """
+    if not pkulaw:
+        return ""
+    laws = pkulaw.get("laws") or []
+    cases = pkulaw.get("cases") or []
+    if not laws and not cases:
+        return ""
+    lines = ["## 北大法宝检索依据（外部法律数据库，作为评判的外部参照，不替代权威来源）"]
+    for l in laws[:5]:
+        if not isinstance(l, dict):
+            continue
+        title = l.get("title", "")
+        content = (l.get("content") or "")[:220]
+        lines.append(f"- 法条：{title} —— {content}")
+    for c in cases[:4]:
+        if not isinstance(c, dict):
+            continue
+        title = c.get("title", "")
+        court = c.get("court", "")
+        ahao = c.get("ahao", "")
+        summary = (c.get("summary") or "")[:200]
+        lines.append(f"- 类案：{title}（{court} {ahao}） —— {summary}")
+    return "\n".join(lines)
+
+
+def _pkulaw_payload(pkulaw: Dict[str, Any]) -> Dict[str, Any]:
+    """结构化保存北大法宝检索结果，供前端「外部依据」板块渲染。"""
+    return {
+        "status": pkulaw.get("status", "ok"),
+        "error": pkulaw.get("error"),
+        "summary": pkulaw.get("_summary", ""),
+        "laws": pkulaw.get("laws") or [],
+        "cases": pkulaw.get("cases") or [],
+    }
+
+
+def evaluate_rights(ctx: CaseContext, use_mock: bool = False,
+                    pkulaw: Dict[str, Any] = None) -> Dict[str, Any]:
     """子维度 1.1 权利基础（<60 触发红灯）"""
     if use_mock:
         from .mock import mock_rights
@@ -67,6 +109,8 @@ def evaluate_rights(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:
         "不正当竞争": "是否构成'有一定影响'的商品名称/包装装潢/企业名称、知名度证据充分性",
     }.get(ctx.cause_type, "")
     prompt = f"""{_base(ctx)}
+
+{_format_pkulaw_block(pkulaw)}
 
 ## 评估任务
 评估原告权利基础的稳固程度，重点关注：{focus}
@@ -81,10 +125,13 @@ def evaluate_rights(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:
     result = call_json(_SYSTEM, prompt, node="rights")
     if "error" not in result:
         result["red_light"] = (result.get("score") or 0) < RIGHTS_RED_LINE
+    if pkulaw is not None:
+        result["pkulaw"] = _pkulaw_payload(pkulaw)
     return result
 
 
-def evaluate_infringement(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:
+def evaluate_infringement(ctx: CaseContext, use_mock: bool = False,
+                          pkulaw: Dict[str, Any] = None) -> Dict[str, Any]:
     """子维度 1.2 侵权认定（构成要件逐一认定）"""
     if use_mock:
         from .mock import mock_infringement
@@ -98,6 +145,8 @@ def evaluate_infringement(ctx: CaseContext, use_mock: bool = False) -> Dict[str,
     rights_analysis = (ctx.dimension_results.get("rights", {}).get("result") or {}).get("analysis", "")
     prompt = f"""{_base(ctx)}
 
+{_format_pkulaw_block(pkulaw)}
+
 ## 权利基础评估结论（前序节点）
 {rights_analysis or "（未提供）"}
 
@@ -110,16 +159,22 @@ def evaluate_infringement(ctx: CaseContext, use_mock: bool = False) -> Dict[str,
   "elements": [{{"name": "要件名", "status": "满足|存疑|不满足", "analysis": "一句话"}}],
   "analysis": "综合分析（200字内）"
 }}"""
-    return call_json(_SYSTEM, prompt, node="infringement")
+    result = call_json(_SYSTEM, prompt, node="infringement")
+    if pkulaw is not None:
+        result["pkulaw"] = _pkulaw_payload(pkulaw)
+    return result
 
 
-def evaluate_procedure(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:
+def evaluate_procedure(ctx: CaseContext, use_mock: bool = False,
+                       pkulaw: Dict[str, Any] = None) -> Dict[str, Any]:
     """子维度 1.3 诉讼程序"""
     if use_mock:
         from .mock import mock_procedure
         return mock_procedure(ctx.cause_type)
 
     prompt = f"""{_base(ctx)}
+
+{_format_pkulaw_block(pkulaw)}
 
 {procedure_clause(ctx.cause_type, ctx.case_description)}
 
@@ -132,7 +187,10 @@ def evaluate_procedure(ctx: CaseContext, use_mock: bool = False) -> Dict[str, An
   "risks": [{{"item": "评估项", "level": "high|medium|low|none", "detail": "一句话"}}],
   "analysis": "综合分析（200字内）"
 }}"""
-    return call_json(_SYSTEM, prompt, node="procedure")
+    result = call_json(_SYSTEM, prompt, node="procedure")
+    if pkulaw is not None:
+        result["pkulaw"] = _pkulaw_payload(pkulaw)
+    return result
 
 
 def evaluate_damages(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:

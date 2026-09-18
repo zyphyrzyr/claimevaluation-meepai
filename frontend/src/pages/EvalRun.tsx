@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useMemo, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { STEP_MOTION } from '../lib/motion'
 import { cn } from '../lib/utils'
@@ -7,8 +7,13 @@ import { Card } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { ScoreBadge } from '../components/ui/ScoreBadge'
 import { StepperNode } from '../components/ui/StepperNode'
-import { EvalTrace } from '../components/EvalTrace'
-import type { EvalEvent } from '../api'
+import { buildTrace } from '../components/EvalTrace'
+import RunControlBar from '../components/RunControlBar'
+import MootPanel, {
+  type MootJudgeInfo,
+  type MootScoresUpdated,
+} from '../components/MootPanel'
+import type { EvalEvent, MootRound } from '../api'
 import { Basis, BasisList, sevPill, SEV_LABEL, signalMeaning } from '../components/Basis'
 
 // 流程顺序与后端 NODE_ORDER 对齐（orchestrator.py）
@@ -40,6 +45,29 @@ const rerunNodeOf = (node: string) => RERUN_AS[node] ?? node
 //   · CaseWorkbench：渲染左侧章节导航（点击 = 切换当前轴，不再整页滚动）
 // label 是导航用短名（去掉「轴」字，9rem 的窄列更清爽）；
 // axis 是单步内分区标题，已与 label 统一去掉「轴」字。
+/**
+ * 模拟法庭的运行时状态。
+ *
+ * 由父级（CaseWorkbench）持有而不是住在本组件里：本组件是「单块逐步」渲染，
+ * 切一次轴就卸载一次，庭审跑到一半切走再切回来会整场清零。
+ */
+export interface MootState {
+  /** 内嵌 = 评估后压力测试（系数回写）；独立演练 = 纯演练不回写 */
+  mode: 'embedded' | 'standalone'
+  /** 模型已生成的全部轮次（raw）：节奏控制缓冲区的"源" */
+  rounds: MootRound[]
+  /** 已揭示（显示）的轮次：缓冲区按 pace 从 rounds 里逐条放出，CourtRoom 只渲染这些 */
+  shownRounds: MootRound[]
+  running: boolean
+  /** 本次被用户中止：保留已说轮次，但不回写、不落库 */
+  stopped: boolean
+  judge: MootJudgeInfo | null
+  scoresUpdated: MootScoresUpdated | null
+  error: string
+  /** 播放节奏：speed = 每轮揭示间隔（毫秒），paused = 暂停揭示（模型仍在跑） */
+  pace: { speed: number; paused: boolean }
+}
+
 export const EVAL_AXES: {
   id: string
   label: string
@@ -110,6 +138,106 @@ function scaleLabel(s?: string) {
   return s === 'high' ? '高' : s === 'medium' ? '中' : s === 'low' ? '低' : (s ?? '—')
 }
 
+function fmtDur(ms?: number): string {
+  if (!ms || ms < 0) return ''
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+/**
+ * 单个节点完成后：在结果卡内折叠展示本次评估的过程（步骤/耗时），默认折叠。
+ * 运行中节点由 nodeCard 内联实时步骤，这里只补「已完成」的回看。
+ * traceEvents 仅在当次会话评估时被捕获；从历史结果进入则为空，组件返回 null。
+ */
+function NodeProcess({
+  node,
+  traceEvents,
+  states,
+}: {
+  node: string
+  traceEvents: EvalEvent[]
+  states: Record<string, NodeState>
+}) {
+  const groups = useMemo(() => buildTrace(traceEvents, states), [traceEvents, states])
+  const g = groups.find((x) => x.node === node)
+  const [open, setOpen] = useState(false)
+  if (!g || g.items.length === 0) return null
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-xs text-muted">
+          过程 · 已完成 {g.items.length} 步{g.durationMs ? ` · 累计 ${fmtDur(g.durationMs)}` : ''}
+        </span>
+        <span className="flex-1" />
+        <span className="text-xs text-muted">{open ? '收起' : '展开回看'}</span>
+      </button>
+      {open && (
+        <ul className="mt-2 space-y-1.5">
+          {g.items.map((it, i) => (
+            <li key={i} className="text-sm">
+              <div className="flex gap-2 items-start">
+                {it.kind === 'mcp' ? (
+                  <span className="shrink-0 mt-0.5 px-1.5 py-0.5 rounded border border-line text-[11px] text-muted">
+                    {it.vendor ?? '外部数据'}
+                  </span>
+                ) : (
+                  <span className="shrink-0 mt-[7px] w-1.5 h-1.5 rounded-full bg-line" />
+                )}
+                <span className={cn('text-muted', it.kind === 'mcp' && 'text-fg')}>{it.text}</span>
+              </div>
+              {it.detail && (
+                <p className="text-xs text-muted mt-0.5 ml-[14px] whitespace-pre-line">{it.detail}</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 参考材料准备（__recall__）是全局过程，不在某个轴内：在工作区内容顶部内联一条轻量提示，
+ * 替代原独立「评估过程」卡片里的同名分组。
+ */
+function InlineRecall({
+  traceEvents,
+  states,
+}: {
+  traceEvents: EvalEvent[]
+  states: Record<string, NodeState>
+}) {
+  const groups = useMemo(() => buildTrace(traceEvents, states), [traceEvents, states])
+  const g = groups.find((x) => x.node === '__recall__')
+  const [open, setOpen] = useState(false)
+  if (!g || g.items.length === 0) return null
+  return (
+    <div className="mb-4 rounded-xl border border-line bg-surface px-5 py-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 text-left"
+      >
+        <span className="text-sm font-medium text-fg">参考材料准备</span>
+        <span className="text-xs text-muted">已自动召回 {g.items.length} 条</span>
+        <span className="flex-1" />
+        <span className="text-xs text-muted">{open ? '收起' : '展开'}</span>
+      </button>
+      {open && (
+        <ul className="mt-2 space-y-1.5">
+          {g.items.map((it, i) => (
+            <li key={i} className="text-sm text-muted">{it.text}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /**
  * 评估详情（运行/完成时间线）。运行时状态由父级 CaseWorkbench 持有并下发，
  * 本组件只负责渲染；节点级重跑与「查看完整评估结果」通过回调上抛。
@@ -130,8 +258,23 @@ export default function EvalRun({
   onViewResult,
   onRerun,
   onStartMoot,
+  onStopMoot,
+  moot,
   traceEvents,
   voided,
+  onMootPaceChange,
+  onMootTogglePause,
+  onMootStep,
+  /** 评估运行控制条（暂停/继续/终止）透传：从父级 CaseWorkbench 移入轴标题栏右侧 */
+  runDone,
+  runTotal,
+  onRunPause,
+  onRunResume,
+  onRunStop,
+  /** 评估结果加载失败信息（容器层静默失败兜底）；非空时展示错误与重试 */
+  resultError,
+  /** 重试加载评估结果 */
+  onRetryResult,
 }: {
   caseId: string
   result: any
@@ -146,12 +289,32 @@ export default function EvalRun({
   onStart?: () => void
   onViewResult: () => void
   onRerun: (node: string, guidance: string) => Promise<void>
-  /** 启动模拟法庭：跳转 /cases/{id}/moot 内嵌模式（SSE 逐轮直播在那一页） */
+  /** 启动模拟法庭：就地在本轴开庭，不再跳转独立页面 */
   onStartMoot: () => void
+  /** 中止进行中的庭审：当前这轮说完后停止，不回写系数 */
+  onStopMoot: () => void
+  /** 模拟法庭运行时状态（父级持有） */
+  moot: MootState
   /** 评估过程事件流（node_step / mcp_call / 节点起止），由父级持有，避免切标签时丢失 */
   traceEvents: EvalEvent[]
   /** 本次评估被「终止」作废：已完成的节点结果已全部清空，需提示用户可重新评估 */
   voided?: boolean
+  /** 模拟法庭播放节奏控制：调速度 */
+  onMootPaceChange: (speed: number) => void
+  /** 模拟法庭播放节奏控制：暂停/继续揭示 */
+  onMootTogglePause: () => void
+  /** 模拟法庭播放节奏控制：单步（立即放出下一轮，暂停时也有效） */
+  onMootStep: () => void
+  /** 评估运行控制条（暂停/继续/终止）透传 */
+  runDone: number
+  runTotal: number
+  onRunPause: () => void
+  onRunResume: () => void
+  onRunStop: () => void
+  /** 评估结果加载失败信息（容器层静默失败兜底）；非空时展示错误与重试 */
+  resultError?: string | null
+  /** 重试加载评估结果 */
+  onRetryResult?: () => void
 }) {
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
@@ -177,7 +340,27 @@ export default function EvalRun({
   }
 
   // 尚未开始评估（本会话未运行且后端也无历史结果）
-  if (!result && phase === 'prep') {
+  // 例外：模拟法庭轴。独立演练不要求先跑评估，未评估的案件也要能就地开庭——
+  // 若这里一并挡掉，「仅开始模拟法庭」这条入口对草稿案件就是死的。
+  if (!result && phase === 'prep' && activeAxis !== 'eval-moot') {
+    // 评估结果没加载出来：区分「真没评估过」与「加载失败」。失败要明确报错 + 给重试，
+    // 否则就会表现为「所有评估都空详情」且控制台毫无痕迹。
+    if (resultError) {
+      return (
+        <div className="bg-[var(--danger-soft)] border border-[var(--danger)] rounded-xl p-8 text-center">
+          <p className="text-[var(--danger)] text-sm mb-3 font-medium">评估结果加载失败</p>
+          <p className="text-muted text-sm mb-4">{resultError}</p>
+          {onRetryResult && (
+            <button
+              onClick={onRetryResult}
+              className="bg-fg hover:opacity-90 text-canvas px-6 py-2.5 rounded-lg text-sm font-medium transition-colors"
+            >
+              重试加载
+            </button>
+          )}
+        </div>
+      )
+    }
     return (
       <div className="bg-surface border border-line rounded-xl p-8 text-center">
         <p className="text-muted text-sm mb-4">
@@ -295,9 +478,20 @@ export default function EvalRun({
         <p className="text-sm text-muted">正在处理这一步，稍等片刻…</p>
       )
     } else if (!d) {
-      body = <p className="text-sm text-muted">等前面的环节完成后会自动开始</p>
+      // 评估进行中：该环节还没轮到（不再误显示「待前面评估完成后自动开始」）
+      // 评估已完成却仍无结果：说明本次未产出该环节，可重跑，而非「等前面」
+      body = phase === 'running' || phase === 'paused'
+        ? <p className="text-sm text-muted">等待前序环节…</p>
+        : <p className="text-sm text-muted">本次未产出该环节结果（可在本轴重跑）</p>
     } else {
-      body = extra
+      body = (
+        <>
+          {extra}
+          {phase === 'done' && (
+            <NodeProcess node={node} traceEvents={traceEvents} states={states} />
+          )}
+        </>
+      )
     }
 
     return <StepperNode status={status} label={label} right={right}>{body}</StepperNode>
@@ -343,7 +537,7 @@ export default function EvalRun({
   // 三个法律维度的依据区块，只回答两件事：本维度依赖哪些证据要件、本维度为什么得这个分。
   // 幂平均的完整口径与「参考材料」清单各自只讲一次（前者在决策合成分，后者在证据盘点列明细），
   // 四个维度不再各抄一遍，界面因此干净很多。
-  const legalBasis = (label: string, score: any, categories: string[] = []) => {
+  const legalBasis = (label: string, score: any, categories: string[] = [], pkulaw?: any) => {
     const corr = result?.correction_coeff
     return (
       <BasisList>
@@ -355,9 +549,59 @@ export default function EvalRun({
           {corr != null && corr !== 1 ? `，再乘上模拟法庭给出的修正系数 ${corr}` : ''}
           。合成口径、以及「为什么用幂平均而不是算术平均」，统一在「决策合成」里说明，这里不再重复。
         </Basis>
+        {/* 北大法宝外部检索依据：必须与其余依据同处「判断依据」折叠面板内，
+            默认收起、展开后一并显示；此前挂在 BasisList 之外，导致面板收起时它仍常驻可见。 */}
+        {pkulaw && <PkulawBasis pk={pkulaw} />}
       </BasisList>
     )
   }
+
+  // 北大法宝外部检索依据（问题2 修复）：法律可行性三节点接入外部法律数据库，
+  // 把检索到的法条 / 类案显式透出，让评判「有外部依据」可见，而非只给一个分数。
+  const PkulawBasis = ({ pk }: { pk?: any }) => {
+    if (!pk) return null
+    const laws: any[] = pk.laws ?? []
+    const cases: any[] = pk.cases ?? []
+    if (pk.status === 'error' || pk.error) {
+      return (
+        <Basis title="外部检索依据（北大法宝）">
+          <span className="text-sm text-[var(--danger)]">
+            检索未成功：{pk.error ?? '未知错误'}。本次评判缺少外部法条/类案佐证，建议检查北大法宝配置后重跑本节点。
+          </span>
+        </Basis>
+      )
+    }
+    if (laws.length === 0 && cases.length === 0) {
+      return null
+    }
+    return (
+      <Basis title="外部检索依据（北大法宝）">
+        <p className="text-xs text-muted mb-1.5">{pk.summary || '已检索北大法宝作为外部法律参照（不替代权威来源）。'}</p>
+        {laws.length > 0 && (
+          <div className="space-y-1">
+            {laws.slice(0, 5).map((l: any, i: number) => (
+              <div key={i} className="text-sm text-muted">
+                <b className="text-fg">{l.title}</b>
+                {l.content ? `：${l.content}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
+        {cases.length > 0 && (
+          <div className="space-y-1 mt-1.5">
+            {cases.slice(0, 4).map((c: any, i: number) => (
+              <div key={i} className="text-sm text-muted">
+                <b className="text-fg">{c.title}</b>
+                {c.court || c.ahao ? `（${[c.court, c.ahao].filter(Boolean).join(' ')}）` : ''}
+                {c.summary ? `：${c.summary}` : ''}
+              </div>
+            ))}
+          </div>
+        )}
+      </Basis>
+    )
+  }
+
 
   const renderDetail = (node: string): ReactNode => {
     const d = detailOf(node)
@@ -525,7 +769,7 @@ export default function EvalRun({
                 </div>
               </div>
             )}
-            {legalBasis('权利基础', r.score, ['权利基础证据'])}
+            {legalBasis('权利基础', r.score, ['权利基础证据'], r.pkulaw)}
           </div>
         )
       case 'infringement':
@@ -541,7 +785,7 @@ export default function EvalRun({
               ))}
             </div>
             {r.analysis && <p className="text-sm text-muted mt-1">{r.analysis}</p>}
-            {legalBasis('侵权认定', r.score, ['侵权认定证据', '取证技术规范'])}
+            {legalBasis('侵权认定', r.score, ['侵权认定证据', '取证技术规范'], r.pkulaw)}
           </div>
         )
       case 'procedure':
@@ -557,7 +801,7 @@ export default function EvalRun({
               ))}
             </div>
             {r.analysis && <p className="text-sm text-muted mt-1">{r.analysis}</p>}
-            {legalBasis('诉讼程序', r.score, ['取证技术规范'])}
+            {legalBasis('诉讼程序', r.score, ['取证技术规范'], r.pkulaw)}
           </div>
         )
       case 'damages':
@@ -750,13 +994,11 @@ export default function EvalRun({
           </p>
         </div>
       )}
-      {/* 评估过程时间线：进行中实时追加、跑完可折叠回看。
-          只在「本次会话真的捕获到事件」时占位——刷新页面后事件流为空，
-          此时摊一个「没有捕获到过程记录」的空盒子只会白占地方、还显得像出错。 */}
+      {/* 评估过程不再用独立卡片：参考材料准备（__recall__）内联为一条轻量提示，
+          各节点的过程在对应结果卡内折叠展示（见 NodeProcess）。仅当本次会话真的
+          捕获到事件时才占位，刷新后事件流为空则整体不占地方。 */}
       {traceEvents.length > 0 && (
-        <div className="mb-4">
-          <EvalTrace events={traceEvents} states={states} phase={phase} />
-        </div>
+        <InlineRecall traceEvents={traceEvents} states={states} />
       )}
       {/* 窄屏兜底：左侧导航列在 xl 以下隐藏，用横向分段控件补上切换入口，否则其余轴无法访问 */}
       <div className="flex flex-wrap gap-2 mb-4 xl:hidden">
@@ -782,6 +1024,39 @@ export default function EvalRun({
 
       {error && (
         <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm mb-4">{error}</div>
+      )}
+
+      {/* 案件已评估、但后端没返回任何维度结果：多半是被「编辑案件 / 仅开始模拟法庭」
+          误清空，或评估中途异常未落库。明确提示，而不是让每个节点都显示「未产出」。 */}
+      {result &&
+        ['completed', 'partial', 'blocked', 'aborted'].includes(result.status) &&
+        phase !== 'running' &&
+        phase !== 'paused' &&
+        (!result.dimension_results ||
+          Object.keys(result.dimension_results).length === 0) && (
+          <div className="bg-[var(--warning-soft)] border border-[var(--warning)] rounded-lg p-3 mb-4 text-sm">
+            <div className="font-medium text-[var(--warning)]">该案件的评估结果数据缺失</div>
+            <p className="text-muted mt-1">
+              后端未返回任何维度结果。可在对应轴点「重跑」，或重新启动评估以恢复本案结论。
+            </p>
+          </div>
+        )}
+
+      {/* 极端情形：本次会话内评估已跑完（phase=done），但最后一次结果刷新失败、
+          且 result 仍为空。上方「未开始评估」分支只覆盖 phase=prep，这里补一层。 */}
+      {resultError && !result && phase === 'done' && (
+        <div className="bg-[var(--danger-soft)] border border-[var(--danger)] rounded-lg p-3 mb-4 text-sm">
+          <div className="font-medium text-[var(--danger)]">评估结果加载失败</div>
+          <p className="text-muted mt-1">{resultError}</p>
+          {onRetryResult && (
+            <button
+              onClick={onRetryResult}
+              className="mt-2 text-xs bg-fg hover:opacity-90 text-canvas rounded px-3 py-1.5"
+            >
+              重试加载
+            </button>
+          )}
+        </div>
       )}
 
       {/* 单块逐步：一次只渲染 activeGroup，切换走 STEP_MOTION（与案件详情一致）。
@@ -814,7 +1089,20 @@ export default function EvalRun({
                 </div>
               )}
               <span className="flex-1 h-px bg-line" />
-              {result?.scores?.final != null && (
+              {/* 运行控制条：评估进行中/暂停时挂到轴标题栏右侧（用户要求从页面顶部移入此处）；
+                  完成后让位给「查看完整评估结果」。 */}
+              {(phase === 'running' || phase === 'paused') && (
+                <RunControlBar
+                  className="shrink-0"
+                  phase={phase === 'paused' ? 'paused' : 'running'}
+                  done={runDone}
+                  total={runTotal}
+                  onPause={onRunPause}
+                  onResume={onRunResume}
+                  onStop={onRunStop}
+                />
+              )}
+              {result?.scores?.final != null && phase !== 'running' && phase !== 'paused' && (
                 <button
                   type="button"
                   onClick={onViewResult}
@@ -825,37 +1113,27 @@ export default function EvalRun({
               )}
             </div>
             {activeGroup.id === 'eval-moot' ? (
-              // 模拟法庭（可选）：不在自动流程里的庭审对抗入口，选中此轴时渲染专属面板
-              <div className="rounded-xl border border-line bg-canvas p-5 space-y-4">
-                <div className="flex items-center gap-2 text-sm">
-                  <span
-                    className={cn(
-                      'w-2 h-2 rounded-full shrink-0',
-                      mootDone ? 'bg-[var(--success)]' : 'bg-[var(--warning)]',
-                    )}
-                  />
-                  {mootDone ? (
-                    <span className="text-fg">
-                      已回写 · 修正系数 <b>{mootCoeff}</b>（法律可行性已按模拟法庭结论修正）
-                    </span>
-                  ) : (
-                    <span className="text-fg">未进行 · 修正系数 1.0（法律可行性暂未修正）</span>
-                  )}
-                </div>
-                <p className="text-sm text-muted">
-                  评估完成后的庭审对抗演练：五步庭审对抗 → 法官归纳修正系数 → 回写并重算决策合成。未进行时法律可行性按系数 1.0 计算。
-                </p>
-                {result?.scores?.final != null ? (
-                  <button
-                    onClick={onStartMoot}
-                    className="bg-fg hover:opacity-90 text-canvas rounded-lg px-4 py-2 text-sm font-medium transition-colors"
-                  >
-                    启动模拟法庭 →
-                  </button>
-                ) : (
-                  <p className="text-xs text-muted">完成主诉评估后可启动（红线拦截同样不可启动）</p>
-                )}
-              </div>
+              // 模拟法庭（可选）：就地开庭，状态全在父级（切轴不丢场）
+              <MootPanel
+                mode={moot.mode}
+                rounds={moot.shownRounds}
+                rawRounds={moot.rounds}
+                running={moot.running}
+                stopped={moot.stopped}
+                judge={moot.judge}
+                scoresUpdated={moot.scoresUpdated}
+                error={moot.error}
+                savedCoeff={mootCoeff}
+                canStart={moot.mode === 'standalone' || result?.scores?.final != null}
+                canStartHint="完成主诉评估后可启动（红线拦截同样不可启动）"
+                onStart={onStartMoot}
+                onStop={onStopMoot}
+                caseId={caseId}
+                pace={moot.pace}
+                onPaceChange={onMootPaceChange}
+                onTogglePause={onMootTogglePause}
+                onStep={onMootStep}
+              />
             ) : activeGroup.id === 'eval-business' ? (
               // 业务预期：总览卡已删（目标见头部 chip、子维度见小标题），chip 只切换子维度（判赔规模/回款能力；要名为判例价值）
               subNodes.length > 1 ? (

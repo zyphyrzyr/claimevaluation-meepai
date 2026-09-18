@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { api, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
-import EvalRun, { EVAL_AXES, NODE_ORDER } from './EvalRun'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { api, authApi, mootApi, humanError, runEvaluation, resumeEvaluation, type EvalEvent } from '../api'
+import EvalRun, { EVAL_AXES, NODE_ORDER, type MootState } from './EvalRun'
 import DecisionDashboard, { RESULT_SECTIONS } from './DecisionDashboard'
 import NewCaseForm, { FORM_SECTIONS, type CaseFormInitial } from '../components/NewCaseForm'
 import SectionNav from '../components/SectionNav'
-import RunControlBar from '../components/RunControlBar'
+import { useAuth } from '../auth/AuthProvider'
 
 type Tab = 'detail' | 'run' | 'result'
 
@@ -38,9 +38,24 @@ const STATUS_BADGE: Record<string, { text: string; dot: string }> = {
  */
 const NAV_STICKY = 'mt-[calc(25vh+3rem)] sticky top-[calc(25vh+4.25rem)]'
 
+const EMPTY_MOOT: MootState = {
+  mode: 'embedded',
+  rounds: [],
+  shownRounds: [],
+  running: false,
+  stopped: false,
+  judge: null,
+  scoresUpdated: null,
+  error: '',
+  pace: { speed: 2500, paused: false },
+}
+
 export default function CaseWorkbench() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const auth = useAuth()
+  const [claiming, setClaiming] = useState(false)
 
   const [detail, setDetail] = useState<any>(null)
   const [error, setError] = useState('')
@@ -57,14 +72,43 @@ export default function CaseWorkbench() {
   const [finished, setFinished] = useState('')
   const [injectedInfo, setInjectedInfo] = useState('')
   const [result, setResult] = useState<any>(null)
+  // 评估结果加载失败信息：此前 result 请求失败被 .catch(() => {}) 静默吞掉，
+  // 一旦失败 result 永远停在 null、界面空白且无任何报错，正是「所有评估都空详情」的元凶。
+  // 这里把失败暴露出来，并提供重试入口。
+  const [resultError, setResultError] = useState<string | null>(null)
   const [evalError, setEvalError] = useState('')
   // 评估过程事件流（node_step / mcp_call / 节点起止）：提升到容器层，理由同 states——
   // 标签切换会让子组件卸载，过程记录不能跟着丢。
   const [traceEvents, setTraceEvents] = useState<EvalEvent[]>([])
 
+  // 模拟法庭运行时状态：同样必须在容器层。评估详情是「单块逐步」渲染，
+  // 切一次轴就卸载一次 EvalRun——庭审跑到一半切去看法律可行性，回来就空了。
+  const [moot, setMoot] = useState<MootState>(EMPTY_MOOT)
+
+  // 揭示缓冲区：模型已生成的轮次存进 moot.rounds（raw），按 pace 逐条放出到
+  // shownRounds 供 CourtRoom 渲染。这样"模型生成"与"屏幕显示"解耦——调慢速度、
+  // 暂停、单步都不影响后端运行，只影响播放节奏，留出阅读思考时间。
+  // paceRef 把最新的暂停状态喂给定时器 tick（定时器只在 speed 变化时重建）。
+  const paceRef = useRef({ speed: EMPTY_MOOT.pace.speed, paused: EMPTY_MOOT.pace.paused })
+  useEffect(() => {
+    paceRef.current = moot.pace
+  }, [moot.pace])
+  useEffect(() => {
+    const id = setInterval(() => {
+      setMoot((prev) => {
+        if (paceRef.current.paused) return prev
+        if (prev.shownRounds.length >= prev.rounds.length) return prev
+        const next = prev.rounds[prev.shownRounds.length]
+        return { ...prev, shownRounds: [...prev.shownRounds, next] }
+      })
+    }, moot.pace.speed)
+    return () => clearInterval(id)
+  }, [moot.pace.speed])
+
   // 评估详情是否已经有可展示的轴：未评估时 EvalRun 只渲染一张「尚未开始评估」卡片，
   // 此时不给左侧导航，避免出现点不动的死链接。（与 EvalRun 的空状态判定同源）
-  const evalReady = Boolean(result) || phase !== 'prep'
+  // 庭审已开过场（或正在开）：就算评估没跑过也要给导航，否则模拟法庭轴成了死链接
+  const evalReady = Boolean(result) || phase !== 'prep' || moot.running || moot.rounds.length > 0
   // 当前展示的轴（单块逐步）：点击左侧导航 = 切换 activeAxis，与案件详情的 activeStep 同构
   const [activeAxis, setActiveAxis] = useState(EVAL_AXES[0].id)
   // 评估结果当前展示的块（可视化结果 / 详细结果），与上面两个同为「单块逐步」模型
@@ -77,6 +121,17 @@ export default function CaseWorkbench() {
     (n) => states[n] && states[n] !== 'running' && states[n] !== 'waiting',
   ).length
 
+  // 拉取评估结果：成功才写 result，失败把原因存进 resultError（不再静默吞掉）。
+  // 任何一次失败都会让界面从「悄悄空白」变成「明确报错 + 可重试」，根因一眼可见。
+  const loadResult = () => {
+    if (!id) return
+    setResultError(null)
+    api
+      .result(id)
+      .then((r) => setResult(r))
+      .catch((e) => setResultError(humanError(e) || '评估结果加载失败，请重试'))
+  }
+
   const loadDetail = () => {
     if (!id) return
     api
@@ -84,6 +139,7 @@ export default function CaseWorkbench() {
       .then((d) => {
         setDetail(d)
         setResult(null)
+        setResultError(null)
         setPhase('prep')
         setStates({})
         setFinished('')
@@ -91,7 +147,7 @@ export default function CaseWorkbench() {
         setEvalError('')
         setTraceEvents([])
       })
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(humanError(e)))
   }
 
   useEffect(() => {
@@ -104,7 +160,31 @@ export default function CaseWorkbench() {
     if (!detail || defaultChosen) return
     setDefaultChosen(true)
     if (id && EVALUATED_STATUSES.includes(detail.status)) {
-      api.result(id).then(setResult).catch(() => {})
+      loadResult()
+      // 已跑过的庭审：把历史记录填回场上，否则进来只看到「未进行」但系数已经回写过
+      api
+        .mootHistory(id)
+        .then((h) => {
+          if (!h?.transcript?.length) return
+          setMoot((m) =>
+            m.rounds.length
+              ? m
+              : {
+                  ...m,
+                  rounds: h.transcript,
+                  shownRounds: h.transcript,
+                  judge: {
+                    correction_coefficient: h.correction_coeff,
+                    defense_strength: 0,
+                    judge_summary: '',
+                    weak_points: [],
+                    focus_points: [],
+                    from_history: true,
+                  },
+                },
+          )
+        })
+        .catch(() => {})
     }
     // 刷新页面时若后端评估仍在跑/已暂停（case.status 仍是 evaluating），
     // 重新接上 SSE 流并同步 phase，否则会丢失进度与「暂停/恢复」控制权。
@@ -126,7 +206,13 @@ export default function CaseWorkbench() {
 
   const refreshResult = () => {
     if (!id) return
-    api.result(id).then(setResult).catch(() => {})
+    api
+      .result(id)
+      .then((r) => {
+        setResult(r)
+        setResultError(null)
+      })
+      .catch((e) => setResultError(humanError(e) || '评估结果加载失败'))
   }
 
   const onEvent = (e: EvalEvent) => {
@@ -235,6 +321,86 @@ export default function CaseWorkbench() {
     abortRef.current?.abort()
   }
 
+  // ---- 模拟法庭：就地开庭 / 中止 -------------------------------------------
+  //
+  // 早期版本是 navigate 到 /cases/:id/moot 独立页，那一页还会把整个 <html>
+  // 刷成暗色剧场，观感像跳去了另一个站点。现在庭审就在「评估详情 - 模拟法庭」
+  // 这一轴里跑，配色沿用浅色 token，状态住在容器层。
+
+  /** 开庭。mode: embedded = 评估后压力测试（系数回写）；standalone = 纯演练不回写 */
+  const startMoot = async (mode: 'embedded' | 'standalone' = 'embedded') => {
+    if (!id) return
+    setMoot({ ...EMPTY_MOOT, mode, running: true })
+    setActiveTab('run')
+    setActiveAxis('eval-moot')
+
+    const onEvent = (ev: any) => {
+      if (ev.event === 'round') {
+        setMoot((m) => ({ ...m, rounds: [...m.rounds, ev] }))
+      } else if (ev.event === 'moot_finished') {
+        setMoot((m) => ({ ...m, judge: ev }))
+      } else if (ev.event === 'scores_updated') {
+        setMoot((m) => ({ ...m, scoresUpdated: ev }))
+        // 内嵌模式回写了系数与决策合成：刷新结果页与案件状态，别让用户看到旧分
+        refreshResult()
+        refreshDetailOnly()
+      } else if (ev.event === 'moot_stopped') {
+        // 中止：已说轮次留在场上，但不回写、不落库
+        setMoot((m) => ({ ...m, running: false, stopped: true }))
+        refreshResult()
+      } else if (ev.event === 'moot_error') {
+        setMoot((m) => ({ ...m, error: ev.error ?? '庭审失败' }))
+      }
+    }
+
+    try {
+      if (mode === 'standalone') {
+        const d = detail ?? (await api.caseDetail(id))
+        await mootApi.runStandalone(
+          {
+            case_description: d.case_description ?? '',
+            cause_type: d.cause_type ?? '商标侵权',
+            viewpoints: d.context?.user_viewpoints ?? [],
+            case_id: id,
+          },
+          onEvent,
+        )
+      } else {
+        await mootApi.runEmbedded(id, onEvent)
+      }
+    } catch (e) {
+      setMoot((m) => ({ ...m, error: humanError(e) || String(e) }))
+    } finally {
+      setMoot((m) => ({ ...m, running: false }))
+    }
+  }
+
+  /**
+   * 中止庭审。
+   *
+   * 后端只在「取下一轮之前」检查停止标志——真实模式下一轮就是一次十秒级的
+   * LLM 调用，调用中途打断不了。所以这里按下后不立刻清场，等 moot_stopped
+   * 回来再收尾；对已经跑完的庭审调用是无害空操作（返回 stopped=false）。
+   */
+  const stopMoot = () => {
+    if (!id) return
+    mootApi.stop(id).catch(() => {})
+  }
+
+  /** 播放节奏：调速度（毫秒/轮） */
+  const setMootPace = (speed: number) =>
+    setMoot((m) => ({ ...m, pace: { ...m.pace, speed } }))
+  /** 播放节奏：暂停/继续揭示（模型仍在跑） */
+  const toggleMootPause = () =>
+    setMoot((m) => ({ ...m, pace: { ...m.pace, paused: !m.pace.paused } }))
+  /** 播放节奏：单步，立即放出下一轮（暂停时也有效） */
+  const mootStep = () =>
+    setMoot((m) => {
+      if (m.shownRounds.length >= m.rounds.length) return m
+      const next = m.rounds[m.shownRounds.length]
+      return { ...m, shownRounds: [...m.shownRounds, next] }
+    })
+
   const rerunNode = async (node: string, guidance: string) => {
     if (!id) return
     try {
@@ -261,14 +427,81 @@ export default function CaseWorkbench() {
     startEval()
   }
 
+  // ---- URL 直达：?tab=run&axis=eval-moot[&moot=embedded|standalone] ----
+  //
+  // 评估结果页的「启动模拟法庭」、以及新建案件后「仅开始模拟法庭」都靠它落位。
+  // 用 searchParams 而不是跳转独立路由：同一个 /cases/:id 路由不会重挂载组件，
+  // 已经跑起来的评估进度与庭审现场都不会因为这次跳转丢掉。
+
+  // tab / axis 只负责「落在哪一屏」；每次 URL 变化都跟一次，允许外部反复指定
+  useEffect(() => {
+    const tab = searchParams.get('tab')
+    const axis = searchParams.get('axis')
+    if (tab === 'run' || tab === 'result' || tab === 'detail') setActiveTab(tab)
+    if (axis === 'eval-moot') setActiveAxis('eval-moot')
+  }, [searchParams])
+
+  // moot=xxx 负责「顺带开庭」。用 ref 记已经处理过的参数值，避免 StrictMode
+  // 下重复触发把同一场庭审开两遍。用完立刻把它从地址里抹掉（replace，不留历史），
+  // 否则用户赛后刷新页面会莫名其妙又开一场——参数是一次性指令，不是持久状态。
+  const mootParam = searchParams.get('moot')
+  const mootAutoRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!id || !detail) return
+    if (mootParam !== 'embedded' && mootParam !== 'standalone') return
+    // 「已处理过」记的是**整条 query**而不是 moot 的值：同一次会话里
+    // 「结果页 → 启动模拟法庭」可以点第二次（第二次点开的仍然是 moot=embedded），
+    // 按值去重会把第二次静默吞掉。消费后参数会被抹掉，所以两次的 query 必然不同。
+    const key = searchParams.toString()
+    if (mootAutoRef.current === key) return
+    mootAutoRef.current = key
+    startMoot(mootParam)
+    const rest = new URLSearchParams(searchParams)
+    rest.delete('moot')
+    navigate(`/cases/${id}?${rest}`, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mootParam, id, detail])
+
+  /** 案件详情「仅开始模拟法庭」：就地开庭；若案件是刚新建的则换到它的地址再开 */
+  const onDetailStartMoot = (cid: string) => {
+    if (!cid) return
+    if (cid !== id) {
+      navigate(`/cases/${cid}?tab=run&axis=eval-moot&moot=standalone`)
+      return
+    }
+    setActiveTab('run')
+    setActiveAxis('eval-moot')
+    startMoot('standalone')
+  }
+
   if (error) return <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-4 text-sm">{error}</div>
   if (!detail) return <div className="text-muted text-sm">加载中…</div>
 
   const status = detail.status
   const st = STATUS_BADGE[status] ?? STATUS_BADGE.pending
   const evaluated = EVALUATED_STATUSES.includes(status)
+  // 整体重新评估需二次确认：仅「已完成/部分/受阻」这类确有余量结果可丢的状态，
+  // 不含 aborted（已被终止清空、无结果可丢）与 evaluating（运行中本就禁启）。
+  const reEvalNeedsConfirm = ['completed', 'partial', 'blocked'].includes(status)
 
   const fileCount = detail.evidence_files?.length ?? 0
+  const isPublic = detail.is_public === true
+
+  const claim = async () => {
+    if (!id) return
+    setClaiming(true)
+    try {
+      await authApi.claimCase(id)
+      await auth.refresh()
+      setDefaultChosen(false)
+      setRefreshTick((t) => t + 1)
+    } catch {
+      // 认领失败最常见的两种：没登录（401，拦截器已弹框）、已被别人认领（403）。
+      // 两种都不需要额外提示——前者弹框里会说明，后者刷新后案件就看不见了。
+    } finally {
+      setClaiming(false)
+    }
+  }
 
   return (
     <div className="max-w-[67rem] mx-auto xl:grid xl:grid-cols-[9rem_minmax(0,1fr)] xl:gap-8">
@@ -332,6 +565,24 @@ export default function CaseWorkbench() {
           </span>
         </div>
 
+        {/* 公共示例案件：先交代「这不是你的、改不了、怎么才能改」。
+            不放进表单卡片里，是为了让它出现在页面顶部——用户一进来就看到，
+            而不是填完一堆字段才发现保存按钮是灰的。 */}
+        {isPublic && (
+          <div className="flex flex-wrap items-center gap-3 mt-3 rounded-lg border border-line bg-surface px-3 py-2.5">
+            <span className="text-xs text-muted">
+              这是公共示例案件，所有人可见、只读。认领到自己账号后可编辑与评估。
+            </span>
+            <button
+              onClick={claim}
+              disabled={claiming}
+              className="ml-auto text-xs text-fg underline hover:opacity-70 disabled:opacity-50 whitespace-nowrap"
+            >
+              {claiming ? '认领中…' : '认领到我的账号'}
+            </button>
+          </div>
+        )}
+
         {/* 摘要带：把关键事实前置，进页面即可确认是哪个案子、什么目标、证据齐不齐 */}
         <div className="flex flex-wrap gap-2 mt-3">
           <SummaryChip label="案由" value={detail.cause_type} />
@@ -362,26 +613,17 @@ export default function CaseWorkbench() {
             <CaseDetailTab
               detail={detail}
               evaluated={evaluated}
+              reEvalNeedsConfirm={reEvalNeedsConfirm}
               activeStep={activeStep}
               onActiveStepChange={setActiveStep}
               onSaved={onDraftSaved}
               onStarted={onDraftStarted}
-              onStartMoot={(cid) => navigate(`/cases/${cid}/moot?mode=standalone`)}
+              onStartMoot={onDetailStartMoot}
+              readOnly={isPublic}
             />
           )}
           {activeTab === 'run' && (
             <>
-              {(phase === 'running' || phase === 'paused') && (
-                <RunControlBar
-                  className="mb-4"
-                  phase={phase === 'paused' ? 'paused' : 'running'}
-                  done={doneCount}
-                  total={NODE_ORDER.length}
-                  onPause={pauseEval}
-                  onResume={resumeEval}
-                  onStop={stopEval}
-                />
-              )}
               <EvalRun
               caseId={id!}
               result={result}
@@ -394,11 +636,23 @@ export default function CaseWorkbench() {
               onStart={startEval}
               onViewResult={() => setActiveTab('result')}
               onRerun={rerunNode}
-              onStartMoot={() => navigate(`/cases/${id}/moot`)}
+              onStartMoot={() => startMoot('embedded')}
+              onStopMoot={stopMoot}
+              moot={moot}
+              onMootPaceChange={setMootPace}
+              onMootTogglePause={toggleMootPause}
+              onMootStep={mootStep}
               traceEvents={traceEvents}
+              runDone={doneCount}
+              runTotal={NODE_ORDER.length}
+              onRunPause={pauseEval}
+              onRunResume={resumeEval}
+              onRunStop={stopEval}
               // finished 只在 SSE 事件里填过，刷新页面后为空；
               // 因此再兜一层后端结果状态，保证「终止后刷新」仍能说清为什么没有结果。
               voided={finished === 'aborted' || result?.status === 'aborted'}
+              resultError={resultError}
+              onRetryResult={loadResult}
             />
             </>
           )}
@@ -438,19 +692,25 @@ function SummaryChip({ label, value }: { label: string; value?: string | null })
 function CaseDetailTab({
   detail,
   evaluated,
+  reEvalNeedsConfirm,
   activeStep,
   onActiveStepChange,
   onSaved,
   onStarted,
   onStartMoot,
+  readOnly = false,
 }: {
   detail: any
   evaluated: boolean
+  /** 有结果且非中止态：整体重新评估前需二次确认 */
+  reEvalNeedsConfirm: boolean
   activeStep: string
   onActiveStepChange: (id: string) => void
   onSaved: () => void
   onStarted: () => void
   onStartMoot: (caseId: string) => void
+  /** 公共示例案件：表单整体禁用，改不了也跑不了评估 */
+  readOnly?: boolean
 }) {
   const initial: CaseFormInitial = {
     name: detail.name ?? '',
@@ -470,6 +730,8 @@ function CaseDetailTab({
       initial={initial}
       activeStep={activeStep}
       onActiveStepChange={onActiveStepChange}
+      readOnly={readOnly}
+      reEvalNeedsConfirm={reEvalNeedsConfirm}
       notice={evaluated ? '已有评估结果，修改后建议重新评估' : undefined}
       onCreated={(cid, status) => {
         if (status === 'pending') onStarted()

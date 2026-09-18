@@ -86,3 +86,16 @@ body {
   /* 结论横幅基础样式 */
   .verdict-banner { @apply rounded-xl border px-5 py-4; }
 }
+
+/* ============================================================
+   庭审「发言中」呼吸点
+   三个点错开延迟依次起伏，比整块 animate-pulse 更像「有人在说话」。
+   只在这一个组件里用，所以不占 tailwind 的 animation 配置。
+   ============================================================ */
+@keyframes court-bounce {
+  0%, 70%, 100% { transform: translateY(0); opacity: 0.35; }
+  35% { transform: translateY(-3px); opacity: 1; }
+}
+.court-dot {
+  animation: court-bounce 1.2s ease-in-out infinite;
+}

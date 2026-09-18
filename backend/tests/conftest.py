@@ -40,6 +40,59 @@ os.environ.setdefault("USE_MOCK", "True")
 _ISOLATED_ENV_PATH = TEST_DATA_DIR / "env" / ".env"
 
 
+# ---------------------------------------------------------- 默认登录态
+
+DEFAULT_TEST_EMAIL = "tester@softip.local"
+# 默认用户的 id 也挂到环境变量上：个别用例要直接往库里种「属于测试用户」的行，
+# 而 **不能** 用 `from tests.conftest import ...` 拿常量 —— 导入 conftest 会
+# 重新执行本文件顶部的 shutil.rmtree(TEST_DATA_DIR)，把已建好的测试库删掉，
+# 表现为一片「attempt to write a readonly database」。
+TEST_USER_ID_ENV = "SOFT_IP_TEST_USER_ID"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _default_logged_in_user(_isolate_env_file):
+    """让全部既有用例以「一个已登录用户」的身份运行。
+
+    依赖 _isolate_env_file 是为了保证它在 env 隔离**之后**执行：这个夹具
+    会 import main，而 env 隔离必须在任何模块读 .env 之前生效。
+
+    多用户隔离上线后，建案 / 改案 / 删案 / 启评估 / 删经验这些都要求登录。
+    既有 400+ 个用例写的时候还没有账号这回事，逐个补登录步骤不现实；
+    在依赖层统一注入一个默认用户，语义上正是改造前的隐含假设——
+    「有个人正在用这个系统」。
+
+    故意注入在依赖层而不是去改每个用例：这样用例代码保持原样，
+    而专门验证鉴权的用例（test_l0_auth / test_l1_multitenant_isolation）
+    可以通过再次 override 换成「未登录」或「另一个用户」，互不干扰。
+    """
+    from main import app
+    from core.auth import current_user_optional, require_user
+    from core.database import User, SessionLocal, init_db
+
+    init_db()
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == DEFAULT_TEST_EMAIL).first()
+        if user is None:
+            user = User(id="test-user", email=DEFAULT_TEST_EMAIL,
+                        password_hash="", display_name="测试用户")
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        holder = {"user": user}
+    finally:
+        db.close()
+
+    os.environ[TEST_USER_ID_ENV] = user.id
+    app.dependency_overrides[require_user] = lambda: holder["user"]
+    app.dependency_overrides[current_user_optional] = lambda: holder["user"]
+    yield holder["user"]
+    app.dependency_overrides.pop(require_user, None)
+    app.dependency_overrides.pop(current_user_optional, None)
+    os.environ.pop(TEST_USER_ID_ENV, None)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_env_file():
     """

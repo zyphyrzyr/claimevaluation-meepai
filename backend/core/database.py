@@ -26,6 +26,35 @@ def generate_id():
     return str(uuid.uuid4())[:8]
 
 
+class User(Base):
+    """登录账号（邮箱 + 密码）。
+
+    密码只存 pbkdf2 派生值，永不存明文；哈希格式与校验见 core/auth.py。
+    """
+    __tablename__ = "users"
+
+    id = Column(String(20), primary_key=True, default=generate_id)
+    email = Column(String(200), unique=True, nullable=False, index=True)
+    password_hash = Column(String(200), nullable=False)
+    display_name = Column(String(100))
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class UserSession(Base):
+    """登录会话。
+
+    服务端存表而不是发 JWT：本系统要能「退出即失效」——
+    JWT 的常见做法是退出只清客户端，旧 token 在被盗后仍然有效。
+    表里一条记录对应浏览器一个 cookie，退出就是删这一行。
+    """
+    __tablename__ = "user_sessions"
+
+    token = Column(String(80), primary_key=True)
+    user_id = Column(String(20), ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.now)
+    expires_at = Column(DateTime, nullable=False)
+
+
 class Case(Base):
     __tablename__ = "cases"
 
@@ -37,6 +66,8 @@ class Case(Base):
     status = Column(String(50), default="pending")        # pending/evaluating/partial/completed/blocked
     case_description = Column(Text)
     context_json = Column(JSON)                           # CaseContext 共享状态总线
+    # 归属：NULL = 公共（迁移前的存量数据，人人只读可见）；非空 = 该用户私有
+    user_id = Column(String(20), ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -165,6 +196,11 @@ class KnowledgeEntry(Base):
     source_type = Column(String(10))                   # A 证据文档 / B 手动粘贴 / C 观点沉淀 / D 独立建库
     title = Column(String(200))
     content = Column(Text)
+    # 归属：NULL = 公共经验（存量数据，人人可见、不可删）；非空 = 该用户私有。
+    # scope=case 的材料库虽然有 case_id 隔离，但这个字段同样写上——
+    # 向量库那边的过滤条件对两种 scope 是同一套，少写一个就会出现
+    # 「SQL 里隔离了、召回时没隔离」的裂缝。
+    user_id = Column(String(20), ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.now)
     # 原先这里有一个 stale 列（「与权威源冲突标待更新」）。它从未被写出过：
     # 全项目没有任何一处把它置 True，因为系统里并不存在「权威源」这个概念。
@@ -187,8 +223,39 @@ class AuditEvent(Base):
     case = relationship("Case", back_populates="audit_events")
 
 
+# 建表之后要补的列：表名 → (列名, DDL 片段)
+#
+# 为什么必须在这里补：`create_all` **只建缺失的表，不会给已存在的表加列**。
+# 新增的 users / user_sessions 会自动建出来，但 cases / knowledge_entries 上
+# 后续加的 user_id 必须 ALTER，否则启动后一查就报 no such column。
+#
+# 放在启动路径上而不是让运维跑脚本：这是幂等的 schema 自愈，
+# 换台机器、拉个旧库都能直接用。（`scripts/add_user_id_columns.py` 保留，
+# 用于想在启动前先看会改什么、或单独执行的场景。）
+_ADDED_COLUMNS = (
+    ("cases", "user_id", "TEXT REFERENCES users(id)"),
+    ("knowledge_entries", "user_id", "TEXT REFERENCES users(id)"),
+)
+
+
+def _ensure_columns() -> None:
+    with engine.begin() as conn:
+        for table, column, ddl in _ADDED_COLUMNS:
+            exists = conn.exec_driver_sql(
+                "select 1 from sqlite_master where type='table' and name=?", (table,)
+            ).fetchone()
+            if not exists:
+                continue
+            cols = {r[1] for r in conn.exec_driver_sql(f"pragma table_info({table})")}
+            if column in cols:
+                continue
+            conn.exec_driver_sql(f"alter table {table} add column {column} {ddl}")
+            print(f"[init_db] 补列 {table}.{column}（存量行留空 = 公共）")
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _ensure_columns()
 
 
 def get_db():

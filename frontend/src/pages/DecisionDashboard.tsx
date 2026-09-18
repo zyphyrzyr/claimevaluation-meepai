@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as echarts from 'echarts'
 import { api, exportUrls, knowledgeApi } from '../api'
@@ -160,6 +160,7 @@ export default function DecisionDashboard({
   onSectionChange?: (id: string) => void
 } = {}) {
   const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const [data, setData] = useState<any>(null)
   const [error, setError] = useState('')
   const [busyNode, setBusyNode] = useState<string>('')
@@ -613,8 +614,11 @@ export default function DecisionDashboard({
 
       {/* ④ 下一步动作：放在切换区之外，两块下方都可见 */}
       <div className="flex flex-wrap items-center gap-3">
+        {/* 启动模拟法庭：回个案工作台的「评估详情 - 模拟法庭」轴就地开庭。
+            早先是 window.location.href 跳独立页面，会整页刷新、丢掉当前结果页状态；
+            现在走同路由的 searchParams，CaseWorkbench 不重挂载，也不再切暗色剧场。 */}
         <button
-          onClick={() => { window.location.href = `/cases/${id}/moot` }}
+          onClick={() => navigate(`/cases/${id}?tab=run&axis=eval-moot&moot=embedded`)}
           className="bg-brand text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-fg transition-colors"
         >
           启动模拟法庭

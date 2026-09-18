@@ -18,6 +18,8 @@ from .service import (
     info,
     orphan_chunk_ids,
     heal_orphan_vectors,
+    ensure_vector_user_id,
+    PUBLIC_USER_ID,
 )
 from .vector_store import store_backend_name, store_degraded_reason
 
@@ -34,6 +36,8 @@ __all__ = [
     "info",
     "orphan_chunk_ids",
     "heal_orphan_vectors",
+    "ensure_vector_user_id",
+    "PUBLIC_USER_ID",
     "store_backend_name",
     "store_degraded_reason",
 ]
