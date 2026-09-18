@@ -213,27 +213,14 @@ function InlineRecall({
 }) {
   const groups = useMemo(() => buildTrace(traceEvents, states), [traceEvents, states])
   const g = groups.find((x) => x.node === '__recall__')
-  const [open, setOpen] = useState(false)
-  if (!g || g.items.length === 0) return null
+  if (!g) return null
+  // 头部直接用事件带出的材料数（g.count），不再数 trace 事件条数，
+  // 避免「头部 1 条 / 正文 8 条」的自相矛盾。
+  const n = typeof g.count === 'number' ? g.count : g.items.length
   return (
-    <div className="mb-4 rounded-xl border border-line bg-surface px-5 py-3">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 text-left"
-      >
-        <span className="text-sm font-medium text-fg">参考材料准备</span>
-        <span className="text-xs text-muted">已自动召回 {g.items.length} 条</span>
-        <span className="flex-1" />
-        <span className="text-xs text-muted">{open ? '收起' : '展开'}</span>
-      </button>
-      {open && (
-        <ul className="mt-2 space-y-1.5">
-          {g.items.map((it, i) => (
-            <li key={i} className="text-sm text-muted">{it.text}</li>
-          ))}
-        </ul>
-      )}
+    <div className="mb-4 rounded-xl border border-line bg-surface px-5 py-3 flex items-center gap-2">
+      <span className="text-sm font-medium text-fg">参考材料准备</span>
+      <span className="text-xs text-muted">已自动召回 {n} 条</span>
     </div>
   )
 }

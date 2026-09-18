@@ -218,6 +218,7 @@ def run_evaluation(case_id: str, db: Session = Depends(get_db),
             recalled = _auto_recall(db, case, ctx, user_id=case.user_id)
             ctrl.events.put({"event": "recall_done", "node": "",
                              "label": f"已自动召回 {recalled} 条参考材料注入评估节点",
+                             "count": recalled,
                              "status": "ok"})
 
             # 每产出一个维度结果即落库 context_json，使前端「节点完成即刷新详情」
