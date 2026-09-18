@@ -71,6 +71,8 @@ export interface EvalEvent {
   duration_ms?: number
   /** node_finished：一句话结论 */
   summary?: string
+  /** recall_done：自动召回的材料条数（供头部直接显示，避免数事件条数） */
+  count?: number
 }
 
 // ---------------------------------------------------------------- 401 拦截

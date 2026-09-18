@@ -70,7 +70,6 @@ export default function CaseWorkbench() {
   const abortRef = useRef<AbortController | null>(null)
   const [states, setStates] = useState<Record<string, any>>({})
   const [finished, setFinished] = useState('')
-  const [injectedInfo, setInjectedInfo] = useState('')
   const [result, setResult] = useState<any>(null)
   // 评估结果加载失败信息：此前 result 请求失败被 .catch(() => {}) 静默吞掉，
   // 一旦失败 result 永远停在 null、界面空白且无任何报错，正是「所有评估都空详情」的元凶。
@@ -143,7 +142,6 @@ export default function CaseWorkbench() {
         setPhase('prep')
         setStates({})
         setFinished('')
-        setInjectedInfo('')
         setEvalError('')
         setTraceEvents([])
       })
@@ -234,8 +232,8 @@ export default function CaseWorkbench() {
     } else if (e.event === 'flow_blocked') {
       refreshResult()
     } else if (e.event === 'recall_done') {
-      // 后台自动召回完成（方案 B）：材料注入全程后台化，这里只做信息展示
-      setInjectedInfo(`${e.label ?? '自动召回完成'}（明细见审计轨迹）`)
+      // 后台自动召回完成（方案 B）：材料注入全程后台化，数量已由 EvalRun 的
+      // 「参考材料准备」头部直接展示，这里不再单独弹蓝条（避免与头部重复）。
     } else if (e.event === 'flow_finished') {
       setFinished(e.status ?? '')
       setPhase('done')
@@ -260,7 +258,6 @@ export default function CaseWorkbench() {
   const startEval = () => {
     if (!id) return
     setEvalError('')
-    setInjectedInfo('')
     setStates({})
     setTraceEvents([])
     const ac = new AbortController()
@@ -663,12 +660,6 @@ export default function CaseWorkbench() {
             />
           )}
         </div>
-
-        {injectedInfo && (
-          <div className="bg-[var(--info-soft)] text-[var(--info)] rounded-lg px-4 py-2 text-xs mt-4">
-            {injectedInfo}
-          </div>
-        )}
       </div>
     </div>
   )

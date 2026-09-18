@@ -31,6 +31,8 @@ export interface TraceGroup {
   durationMs?: number
   summary?: string
   items: TraceItem[]
+  /** 参考材料召回的材料条数（recall_done 事件携带），用于头部直接显示而非数事件 */
+  count?: number
 }
 
 /** 把 SSE 事件流折叠成「按节点归组」的过程记录 */
@@ -53,9 +55,10 @@ export function buildTrace(events: EvalEvent[], states: Record<string, NodeState
     if (e.event === 'recall_done') {
       // 后端的 recall_done 是「无节点」事件（node 为空串），label 里带的是完整句子。
       // 直接用 label 当分组标题会变成「已自动召回 8 条…」这种句子做标题，所以固定一个组名，
-      // 句子本身放到明细行里。
+      // 句子本身放到明细行里。count 是材料数，单独带出来供头部显示，避免去数事件条数。
       const g = ensure('__recall__', '参考材料准备')
       g.status = (e.status as NodeState) ?? 'ok'
+      if (typeof e.count === 'number') g.count = e.count
       g.items.push({
         kind: 'step',
         text: e.label || '已完成参考材料召回',
