@@ -199,12 +199,13 @@ def stop_moot(case_id: str, case: Case = Depends(case_owned)):
 @router.get("/{case_id}")
 def get_moot(case_id: str, db: Session = Depends(get_db),
              case: Case = Depends(case_readable)):
-    """查询已保存的庭审记录与修正系数"""
+    """查询已保存的庭审记录与修正系数（含法官归纳结构化结果）"""
     ctx = _load_ctx(case)
     return {
         "case_id": case.id,
         "transcript": ctx.moot_transcript,
         "correction_coeff": ctx.correction_coeff,
+        "judge": ctx.moot_judge or {},
     }
 
 
