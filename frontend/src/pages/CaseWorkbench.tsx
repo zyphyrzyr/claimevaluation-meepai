@@ -63,6 +63,8 @@ export default function CaseWorkbench() {
   const [activeStep, setActiveStep] = useState<string>(FORM_SECTIONS[0].id)
   const [defaultChosen, setDefaultChosen] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
+  // 证据解析轮询定时器：新建/编辑案件后证据异步解析，详情页定时刷新直到没有 pending 文件
+  const evidencePollRef = useRef<number | null>(null)
 
   // 评估运行时状态提升到容器层：确保 SSE 流不会被「标签切换」触发的子组件卸载中断
   const [phase, setPhase] = useState<'prep' | 'running' | 'paused' | 'done'>('prep')
@@ -133,6 +135,10 @@ export default function CaseWorkbench() {
 
   const loadDetail = () => {
     if (!id) return
+    if (evidencePollRef.current) {
+      clearTimeout(evidencePollRef.current)
+      evidencePollRef.current = null
+    }
     api
       .caseDetail(id)
       .then((d) => {
@@ -144,9 +150,34 @@ export default function CaseWorkbench() {
         setFinished('')
         setEvalError('')
         setTraceEvents([])
+        // 证据仍在后台解析：启动轮询直到全部解析完成，再自动刷新文本
+        if (d.evidence_files?.some((f) => f.parse_status === 'pending')) {
+          pollEvidence()
+        }
       })
       .catch((e) => setError(humanError(e)))
   }
+
+  /** 轮询证据解析状态：只更新 detail，不动评估等其他状态；全部离开 pending 后自动停止 */
+  const pollEvidence = () => {
+    if (!id) return
+    api
+      .caseDetail(id)
+      .then((d) => {
+        setDetail(d)
+        if (d.evidence_files?.some((f) => f.parse_status === 'pending')) {
+          evidencePollRef.current = window.setTimeout(pollEvidence, 2500)
+        }
+      })
+      .catch(() => {})
+  }
+
+  // 组件卸载时清理证据轮询定时器
+  useEffect(() => {
+    return () => {
+      if (evidencePollRef.current) clearTimeout(evidencePollRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     loadDetail()

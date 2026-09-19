@@ -4,6 +4,8 @@
 
 from typing import Dict, List, Optional
 import re
+import threading
+import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -294,6 +296,135 @@ def _write_evidence_files(records: list, case_id: str, db: Session) -> None:
             ef.storage_uri = file_store.save_original(case_id, ef.id, r["filename"], raw)
 
 
+def _parse_one_content(content: bytes, filename: str) -> dict:
+    """同步解析单个文件字节（非 zip），供后台线程复用；返回 record dict。"""
+    if is_pdf_file(filename):
+        result = parse_pdf(content, filename)
+    elif is_image_file(filename):
+        result = ocr_image(content, filename)
+    elif filename.lower().endswith(".docx"):
+        result = extract_text_from_file(content, filename)
+    elif filename.lower().endswith(".doc"):
+        text = file_store.doc_bytes_to_text(content, filename)
+        result = {"success": bool(text), "text": text or "",
+                  "error": "" if text else "无法解析 .doc（本环境缺少 textutil 或转换失败）"}
+    else:
+        result = {"success": False, "text": "",
+                  "error": "不支持的文件格式，仅支持 PDF/PNG/JPG/JPEG/DOC/DOCX/ZIP"}
+    return {
+        "filename": filename,
+        "content_type": mimetypes.guess_type(filename)[0] or "",
+        "text": result.get("text", "") if result.get("success") else "",
+        "status": "ok" if result.get("success") else "failed",
+        "raw": content,
+    }
+
+
+def _persist_pending_files(db: Session, case_id: str, uploaded: list) -> None:
+    """把上传文件落盘为 parse_status=pending 的 EvidenceFile（不解析），由后台线程解析。
+
+    uploaded 是 [(filename, content_type, content_bytes), ...]，已在 async 请求里 read 完成。
+    """
+    for filename, content_type, content in uploaded:
+        ef = EvidenceFile(
+            case_id=case_id,
+            file_name=filename,
+            file_type=content_type,
+            parse_status="pending",
+            parsed_text="",
+            storage_uri="",
+        )
+        db.add(ef)
+        db.flush()  # 先拿 ef.id，再用它命名落盘，规避文件名路径穿越
+        ef.storage_uri = file_store.save_original(case_id, ef.id, filename, content)
+
+
+def _merge_evidence_texts(db: Session, case_id: str, filenames: list) -> None:
+    """后台线程内调用：把本次新解析文件的文本合并进 context.evidence_texts，并重建本案材料库。
+
+    只追加 filenames 里、且 existing 尚未包含「【证据文件: 名】」片段的文件，
+    避免旧文件文本被重复追加（同步路径已把旧片段写进 evidence_texts）。
+    """
+    case = db.get(Case, case_id)
+    if not case:
+        return
+    ctx = CaseContext.from_dict(case.context_json or {})
+    di = dict(ctx.defendant_info or {})
+    existing = di.get("evidence_texts", "") or ""
+    ok_files = (db.query(EvidenceFile)
+                .filter(EvidenceFile.case_id == case_id,
+                        EvidenceFile.file_name.in_(filenames),
+                        EvidenceFile.parse_status == "ok")
+                .all())
+    records = []
+    for ef in ok_files:
+        if ef.parsed_text and f"【证据文件: {ef.file_name}】" not in existing:
+            records.append({"filename": ef.file_name, "text": ef.parsed_text})
+    snippet = _evidence_snippets(records)
+    if not snippet:
+        return
+    base = existing.strip()
+    di["evidence_texts"] = (base + "\n\n" if base else "") + snippet
+    ctx.defendant_info = di
+    case.context_json = ctx.to_dict()
+    from sqlalchemy.orm import attributes
+    attributes.flag_modified(case, "context_json")
+    db.commit()
+    _rebuild_case_knowledge(db, case_id, di.get("evidence_texts", ""))
+
+
+def _process_pending_evidence(case_id: str) -> None:
+    """后台线程入口：解析该案件所有 pending 证据文件（含 zip 展开），完成后合并文本。"""
+    db = SessionLocal()
+    try:
+        pending = (db.query(EvidenceFile)
+                   .filter(EvidenceFile.case_id == case_id,
+                           EvidenceFile.parse_status == "pending")
+                   .all())
+        newly_parsed = []
+        for ef in pending:
+            path = file_store.original_path(ef.storage_uri)
+            content = path.read_bytes() if path else None
+            if content is None:
+                ef.parse_status = "failed"
+                ef.parsed_text = ""
+                db.commit()
+                continue
+            if is_zip_file(ef.file_name):
+                zip_result = parse_zip_archive(content, ef.file_name)
+                db.delete(ef)
+                recs = zip_result.get("records", [])
+                _write_evidence_files(recs, case_id, db)
+                newly_parsed.extend(r["filename"] for r in recs)
+                db.commit()
+            else:
+                rec = _parse_one_content(content, ef.file_name)
+                ef.parse_status = rec["status"]
+                ef.parsed_text = rec["text"]
+                newly_parsed.append(ef.file_name)
+                db.commit()
+        if newly_parsed:
+            _merge_evidence_texts(db, case_id, newly_parsed)
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _run_async_parse(case_id: str) -> None:
+    """守护线程跑后台解析，不阻塞请求返回。"""
+    threading.Thread(target=_process_pending_evidence, args=(case_id,), daemon=True).start()
+
+
+def _resume_pending_evidence(db: Session) -> None:
+    """启动自愈：把残留 pending 的证据文件所属案件重新排队后台解析（进程重启兜底）。"""
+    rows = (db.query(EvidenceFile.case_id)
+            .filter(EvidenceFile.parse_status == "pending")
+            .distinct().all())
+    for (case_id,) in rows:
+        _run_async_parse(case_id)
+
+
 @router.post("", response_model=CaseOut)
 async def create_case(
     request: Request,
@@ -313,9 +444,16 @@ async def create_case(
     if payload.goal_type not in GOAL_TYPES:
         raise HTTPException(400, f"不支持的业务目标: {payload.goal_type}")
 
-    # ---- 草稿模式：名称已在校验通过，其余字段留空也可存；上传文件一并解析落库 ----
+    # 草稿模式：上传文件先读字节、落盘 pending、秒回，后台线程解析（避免同步 OCR 超时）；
+    # 正式建案保留同步解析（评估本就要等，且评估依赖证据文本先就绪）。
+    uploaded = []
+    if files and payload.draft:
+        for f in files:
+            if f.filename:
+                uploaded.append((f.filename, f.content_type or "", await f.read()))
+
     parse_result = {"records": [], "zip_summaries": []}
-    if files:
+    if files and not payload.draft:
         parse_result = await _parse_evidence(files)
     file_records = parse_result["records"]
     zip_summaries = parse_result["zip_summaries"]
@@ -323,9 +461,6 @@ async def create_case(
 
     if payload.draft:
         parties = _build_parties(payload)
-        if parsed_text:
-            base = payload.evidence_texts.strip()
-            payload.evidence_texts = (base + "\n\n" if base else "") + parsed_text
         ctx = _build_context(payload, parties)
         case = Case(
             name=payload.name,
@@ -338,7 +473,8 @@ async def create_case(
         )
         db.add(case)
         db.flush()
-        _write_evidence_files(file_records, case.id, db)
+        # 异步解析：落盘 pending 原件秒回，后台线程解析后回填文本与材料库
+        _persist_pending_files(db, case.id, uploaded)
         ctx.case_id = case.id
         case.context_json = ctx.to_dict()
         db.commit()
@@ -348,10 +484,12 @@ async def create_case(
                 ingest_case_materials(db, case.id, payload.evidence_texts)
             except Exception:
                 pass
+        if uploaded:
+            _run_async_parse(case.id)
         return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                        goal_type=case.goal_type, status=case.status,
                        created_at=case.created_at.isoformat(),
-                       parse_summary=_build_parse_summary(file_records, zip_summaries))
+                       parse_summary=None)
 
     # ---- 正式建案：全字段必填校验 ----
     if not payload.client_org.strip():
@@ -518,15 +656,12 @@ async def update_draft(
     ctx = _build_context(payload, parties)
     ctx.case_id = case.id
 
-    # 重新解析上传文件并追加到证据文本（旧文件记录保留，新上传的追加上去）
-    parse_result = await _parse_evidence(files) if files else {"records": [], "zip_summaries": []}
-    file_records = parse_result["records"]
-    zip_summaries = parse_result["zip_summaries"]
-    parsed_text = _evidence_snippets(file_records)
-    if parsed_text:
-        base = ctx.defendant_info["evidence_texts"].strip()
-        ctx.defendant_info["evidence_texts"] = (base + "\n\n" if base else "") + parsed_text
-    _write_evidence_files(file_records, case.id, db)
+    # 异步解析：上传文件落盘 pending，后台线程解析后回填文本（不再同步 OCR）
+    uploaded = []
+    for f in files:
+        if f.filename:
+            uploaded.append((f.filename, f.content_type or "", await f.read()))
+    _persist_pending_files(db, case.id, uploaded)
 
     # 同步 Party 表（删除旧的，写最新）
     for p in db.query(Party).filter(Party.case_id == case.id).all():
@@ -557,13 +692,17 @@ async def update_draft(
     case.context_json = ctx.to_dict()
     db.commit()
 
-    # 证据文本变化后重建本案材料库（先清后增，防重复条目）
-    _rebuild_case_knowledge(db, case.id, ctx.defendant_info["evidence_texts"])
+    # 证据文本变化后重建本案材料库（先清后增，防重复条目）。
+    # 有新上传文件时，材料库由后台解析完成后的 _merge_evidence_texts 统一重建，避免过早重建漏掉解析文本。
+    if uploaded:
+        _run_async_parse(case.id)
+    else:
+        _rebuild_case_knowledge(db, case.id, ctx.defendant_info["evidence_texts"])
 
     return CaseOut(id=case.id, name=case.name, cause_type=case.cause_type,
                    goal_type=case.goal_type, status=case.status,
                    created_at=case.created_at.isoformat(),
-                   parse_summary=_build_parse_summary(file_records, zip_summaries))
+                   parse_summary=None)
 
 
 @router.post("/{case_id}/start-evaluation", response_model=CaseOut)
@@ -571,6 +710,14 @@ def start_evaluation(case: Case = Depends(case_owned), db: Session = Depends(get
     """启动评估：校验带 * 的必填项，补全当事人与 context，置 pending。草稿/已评估案件均可重新评估；评估进行中禁止。"""
     if case.status == "evaluating":
         raise HTTPException(400, "评估运行中，请等待本次评估完成后再启动评估")
+
+    # 证据仍在后台解析时禁止启动评估：评估编排器要读完整证据文本，此时启动会漏掉未解析完的文件。
+    pending_count = (db.query(EvidenceFile)
+                     .filter(EvidenceFile.case_id == case.id,
+                             EvidenceFile.parse_status == "pending")
+                     .count())
+    if pending_count:
+        raise HTTPException(409, f"证据仍在解析中（{pending_count} 个文件），请稍候再启动评估")
 
     ctx = CaseContext.from_dict(case.context_json or {})
     ctx.case_id = case.id

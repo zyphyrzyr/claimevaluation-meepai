@@ -329,11 +329,21 @@ export default function NewCaseForm({
     }
   }
 
+  /** 等待证据后台解析完成（最多约 120 秒），供「保存并启动评估」前调用 */
+  async function waitForEvidenceReady(cid: string) {
+    for (let i = 0; i < 60; i++) {
+      const d = await api.caseDetail(cid)
+      if (!d.evidence_files?.some((f) => f.parse_status === 'pending')) return
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+  }
+
   /** 真正执行「落库 + 启动评估」：供首次启动与「二次确认后重跑」共用 */
   async function doStartEval() {
     if (caseId) {
-      const updated = await api.updateDraft(caseId, buildPayload(true))
-      setZipSummary(updated.parse_summary ?? null)
+      await api.updateDraft(caseId, buildPayload(true))
+      // 上传证据已异步解析：等后台解析完成再启动评估，否则评估会漏掉未解析完的证据文本
+      await waitForEvidenceReady(caseId)
       await api.startEvaluation(caseId)
       onCreated(caseId, 'pending')
     } else {
@@ -548,8 +558,14 @@ export default function NewCaseForm({
                         className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-line transition-colors"
                       >
                         <FileStatusBadge
-                          ok={f.parse_status === 'ok'}
-                          label={f.parse_status === 'ok' ? '已解析' : '解析失败'}
+                          ok={f.parse_status === 'ok' ? true : f.parse_status === 'pending' ? null : false}
+                          label={
+                            f.parse_status === 'ok'
+                              ? '已解析'
+                              : f.parse_status === 'pending'
+                                ? '解析中'
+                                : '解析失败'
+                          }
                         />
                         <span className="flex-1 min-w-0 truncate text-sm text-fg">{f.file_name}</span>
                         <button
