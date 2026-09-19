@@ -152,7 +152,8 @@ def test_rerun():
     before_final = before["scores"]["final"]
 
     out = req(f"/evaluation/{cid}/rerun", "POST",
-              {"node": "rights", "guidance": "商标续展证明已补齐，请重新评估权利基础"})
+              {"node": "rights", "guidance": "商标续展证明已补齐，请重新评估权利基础",
+               "cascade": False})
     dims = out["dimension_results"]
 
     check("下游侵权认定标记 stale", dims.get("infringement", {}).get("status") == "stale",
@@ -166,10 +167,21 @@ def test_rerun():
 
     # P1-2 已修：依赖图指向真实的子维度键，重跑证据盘点应失效判赔规模
     out2 = req(f"/evaluation/{cid}/rerun", "POST",
-               {"node": "evidence_review", "guidance": "补充了销量公证书"})
+               {"node": "evidence_review", "guidance": "补充了销量公证书", "cascade": False})
     damages_status = out2["dimension_results"].get("damages", {}).get("status")
     check("重跑证据盘点后判赔规模失效", damages_status == "stale",
           f"实际 {damages_status}")
+
+    # 计划 C：级联重跑（默认）下重跑 rights，下游侵权认定被真正重算而非 stale
+    out3 = req(f"/evaluation/{cid}/rerun", "POST",
+               {"node": "rights", "guidance": "对方商标已被提撤三，请重估权利稳定性"})
+    dims3 = out3["dimension_results"]
+    check("级联重跑：下游侵权认定被重算(ok)",
+          dims3.get("infringement", {}).get("status") == "ok",
+          f"实际 {dims3.get('infringement', {}).get('status')}")
+    check("级联重跑回传 rerun_nodes 含侵权认定",
+          any(s["node"] == "infringement" for s in out3.get("rerun_nodes", [])),
+          f"{out3.get('rerun_nodes')}")
 
     # 前端展示契约：stale_nodes / effect / thresholds 必须齐全
     check("rerun 回传待重跑节点清单",

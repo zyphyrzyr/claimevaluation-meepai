@@ -125,11 +125,19 @@ def get_cause_profile(cause_type: str) -> dict:
 _ROLE_SYSTEM_BASE = {}  # 在三个 SYSTEM 常量定义后回填，见文件末尾
 
 
-def build_system_prompt(role: str, cause_type: str) -> str:
-    """角色系统提示词 + 该案由下的画像（plaintiff / defendant / judge）"""
+def build_system_prompt(role: str, cause_type: str, legal_context_block: str = "") -> str:
+    """角色系统提示词 + 该案由下的画像（plaintiff / defendant / judge）。
+
+    legal_context_block：moot_court.context_sources 渲染的「可引用依据」片段，
+    三方共享（公开法律法规 / 类案 / 个人经验库 + 法定基准）。注入到 system prompt，
+    使各方发言都能锚定真实依据；被告方仍不在此块之外拿到原告内部评估结论。
+    """
     if role not in _ROLE_SYSTEM_BASE:
         raise ValueError(f"未知角色：{role}")
-    return _ROLE_SYSTEM_BASE[role] + "\n\n" + get_cause_profile(cause_type)[role]
+    base = _ROLE_SYSTEM_BASE[role] + "\n\n" + get_cause_profile(cause_type)[role]
+    if legal_context_block:
+        return base + "\n\n" + legal_context_block
+    return base
 
 # ============================================================
 # 角色系统提示词（固定人设，贯穿全程）
@@ -173,8 +181,11 @@ DEFENDANT_SYSTEM = """你是被告方的代理律师，专注于知识产权诉�
 
 ## 关键约束 -- 信息不对称
 - 你只知道案情描述中的信息（相当于原告起诉状中陈述的事实）
-- 你无权访问原告内部的单方评估结果（权利基础评分、侵权认定评分等）
-- 你不知道原告掌握了哪些具体证据（除非案情描述中明确写明）
+- 你无权访问原告内部的单方评估结果（权利基础评分、侵权认定评分等），
+  也不知道原告掌握了哪些具体证据（除非案情描述中明确写明）
+- 但你可以引用**公开的法律法规、参考类案与个人经验库**——这些已随 system prompt
+  的「可引用依据」块一并提供给你，与原告同样可见；你的信息不对称仅限「不知原告底牌」，
+  而非「查不到公开法律」
 - 在质证环节，你应当对原告证据的真实性、合法性、关联性提出合理质疑
 
 ## 发言要求
@@ -442,6 +453,8 @@ JUDGE_SUMMARY_USER = """## 当前环节：法官归纳
 
 请严格按照以下 JSON 格式输出你的法官归纳（只返回 JSON，不要任何其他文字）：
 
+（本案法条、类案与经验库均在 system prompt 的「可引用依据」块中；legal_basis / precedents / experience_refs 须从中引用，不得自创）
+
 ```json
 {{
   "focus_points": [
@@ -477,6 +490,15 @@ JUDGE_SUMMARY_USER = """## 当前环节：法官归纳
     "alternative_explanation": "替代性解释的分析",
     "procedural_defense": "程序性抗辩的分析"
   }},
+  "legal_basis": [
+    {{"article": "引用的法条（须来自 system prompt 的「可引用依据」）", "cited_text": "引用要点", "applied_to": "用于支撑哪一方/哪一争议焦点"}}
+  ],
+  "precedents": [
+    {{"name": "类案名称（须来自「可引用依据」）", "court": "审理法院", "holding": "裁判要旨", "applied_to": "用于支撑哪一方/哪一争议焦点"}}
+  ],
+  "experience_refs": [
+    {{"title": "经验库条目标题（须来自「可引用依据」）", "applied_to": "结合的办案思路"}}
+  ],
   "correction_coefficient": 0.70-1.30,
   "coefficient_reasoning": "修正系数的推理过程（100字以内）",
   "weak_points": ["原告论证薄弱点1", "原告论证薄弱点2"],
@@ -499,6 +521,8 @@ JUDGE_SUMMARY_USER = """## 当前环节：法官归纳
   - > 1.00 = 被告抗辩无力，原告论证比单方评估更强
 - defense_strength：被告整体抗辩强度的综合评价
 - weak_points：原告论证链条中暴露出的薄弱环节
+- legal_basis / precedents / experience_refs：必须引用 system prompt「可引用依据」块中
+  列出的法条 / 类案 / 经验，不得自创；applied_to 说明用于支撑哪一方、哪一争议焦点
 - summary_structured：按民事判决书规范格式化输出，三大模块（争议焦点/裁判理由/裁判结论），总字数≥800字，使用 Markdown 格式（## / （一）/ 1. 2. 等）
 
 只返回 JSON。"""

@@ -340,3 +340,29 @@ def precedent_clause(cause_type: str) -> str:
     b = get_legal_basis(cause_type)
     return f"""## 本案由判例价值的判断重点（{b.cause_type}）
 {_join(b.precedent_focus)}"""
+
+
+def moot_clause(cause_type: str) -> str:
+    """模拟法庭三方共享的案由法定基准（合并赔偿/程序/抗辩/判例要点为一段）。
+
+    供 moot_court/context_sources 注入三方 system prompt：始终是零成本的
+    事实性依据，即便评估流程没跑过北大法宝也能兜底。
+    """
+    b = get_legal_basis(cause_type)
+    lines = [
+        f"## 本案由法定基准（{b.cause_type}）",
+        f"- 赔偿计算顺位：{b.damage_order}",
+        f"- 法定赔偿区间：{b.statutory_range}",
+        f"- 惩罚性赔偿：{b.punitive}",
+        f"- 适用注意：{b.statutory_caveat}",
+        f"- 诉讼时效：{b.limitation}",
+        f"- 地域管辖：{b.jurisdiction_venue}",
+        f"- 级别管辖：{b.jurisdiction_level}",
+        f"- 前置程序：{b.preconditions}",
+        "本案由常见抗辩：",
+    ]
+    for d in b.defenses:
+        lines.append(f"  - {d}")
+    lines.append(f"- 判例价值判断重点：{'；'.join(b.precedent_focus)}")
+    lines.append(f"- 依据：{'；'.join(b.sources)}")
+    return "\n".join(lines)

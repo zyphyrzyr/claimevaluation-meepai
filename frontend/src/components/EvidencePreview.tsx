@@ -54,7 +54,7 @@ export default function EvidencePreview({
       // doc/docx 还没进后端、本机无法转换，提示保存后预览
       body = (
         <div className="p-6 text-sm text-muted">
-          该文件尚未保存，保存草稿后即可在线预览。
+          该文件尚未保存，保存后即可在线预览。
         </div>
       )
     }

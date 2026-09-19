@@ -306,6 +306,11 @@ export default function EvalRun({
   const [rerunTarget, setRerunTarget] = useState<string | null>(null)
   const [rerunGuidance, setRerunGuidance] = useState('')
   const [rerunBusy, setRerunBusy] = useState(false)
+  // 轴内维度选中态。**必须声明在所有 return 之前**：下面是「未开始评估」的提前返回，
+  // 首次加载时 result 为空会命中它；若把本 hook 放在提前返回之后，等 result 到达时就变成
+  // 「Rendered more hooks than during the previous render」→ 整页白屏。
+  // 刷新「评估详情」直接落到 run 标签页时必现（走左侧导航切过去时 result 已加载，故不触发）。
+  const [activeNode, setActiveNode] = useState<string | null>(null)
 
   const thresholds: Thresholds =
     result?.thresholds ?? { go: 78, patch: 62, quadrant_mid: 78, power_mean_p: -0.5 }
@@ -378,7 +383,7 @@ export default function EvalRun({
 
   // 轴内维度切换：多节点轴一次只显示一个维度。activeNode 记忆轴内选中；
   // 选中节点不属于当前轴（刚切轴）时回退到该轴第一个节点。
-  const [activeNode, setActiveNode] = useState<string | null>(null)
+  // （activeNode 的 useState 已上移到提前返回之前，见上方注释。）
   // 业务预期轴的可切换小标题是子维度（判赔规模/回款能力；要名为判例价值）；其他轴用 activeGroup.nodes
   const chipNodes = activeGroup.id === 'eval-business' ? subNodes : activeGroup.nodes
   const currentNode = chipNodes.includes(activeNode ?? '') ? (activeNode as string) : chipNodes[0]
@@ -410,38 +415,47 @@ export default function EvalRun({
       </>
     )
 
-    let body: ReactNode
-    if (isSkipped) {
-      body = <p className="text-sm text-muted">未执行（被前置红线拦截）</p>
-    } else if (rerunTarget === node) {
-      body = (
-        <div className="mt-1">
-          <textarea
-            value={rerunGuidance}
-            onChange={(e) => setRerunGuidance(e.target.value)}
-            placeholder="可选：补充引导意见，将注入后续所有节点"
-            rows={2}
-            className="w-full text-sm border border-line rounded-lg p-2 bg-canvas focus:outline-none focus:border-fg"
-          />
-          <div className="flex gap-2 mt-2">
-            <button
-              onClick={() => doRerun(node)}
-              disabled={rerunBusy}
-              className="text-xs bg-fg hover:opacity-90 text-canvas rounded px-3 py-1.5 disabled:opacity-50"
-            >{rerunBusy ? '重跑中…' : '确认重跑'}</button>
-            <button
-              onClick={() => { setRerunTarget(null); setRerunGuidance('') }}
-              className="text-xs border border-line rounded px-3 py-1.5 hover:bg-surface"
-            >取消</button>
-          </div>
+    // 重跑输入面板。此前点「重跑」是**整块替换正文**——卡片只剩输入框，重跑前的旧结论
+    // 全被顶掉，用户没法边看旧结论边写引导意见（2026-09-19 反馈）。
+    // 现改为正文前置块：表单在上、旧结果原样留在下面，并注明下方是重跑前结果。
+    const rerunForm = (
+      <div className="mb-3 rounded-lg border border-line bg-surface p-3">
+        <div className="flex items-baseline justify-between gap-3 mb-1.5">
+          <span className="text-xs font-medium text-fg">重跑「{label}」</span>
+          <span className="text-[11px] text-muted">可选：补充引导意见，将注入后续所有节点</span>
         </div>
-      )
+        <textarea
+          value={rerunGuidance}
+          onChange={(e) => setRerunGuidance(e.target.value)}
+          placeholder="例：对方商标 2024 年已被提撤三，请据此重新评估权利稳定性。"
+          rows={2}
+          className="w-full text-sm border border-line rounded-lg p-2 bg-canvas focus:outline-none focus:border-fg"
+        />
+        <div className="flex gap-2 mt-2">
+          <button
+            onClick={() => doRerun(node)}
+            disabled={rerunBusy}
+            className="text-xs bg-fg hover:opacity-90 text-canvas rounded px-3 py-1.5 disabled:opacity-50"
+          >{rerunBusy ? '重跑中…' : '确认重跑'}</button>
+          <button
+            onClick={() => { setRerunTarget(null); setRerunGuidance('') }}
+            className="text-xs border border-line rounded px-3 py-1.5 hover:bg-surface"
+          >取消</button>
+        </div>
+      </div>
+    )
+
+    // 先把「正文」（不含重跑表单）算出来，再把表单作为前置块拼上去，
+    // 保证重跑输入与旧结果同屏可见。
+    let detailBody: ReactNode
+    if (isSkipped) {
+      detailBody = <p className="text-sm text-muted">未执行（被前置红线拦截）</p>
     } else if (status === 'running' && !d) {
       // 运行中不再只显示「计算中…」——把这一环节已经走过的步骤实时列出来
       const steps = traceEvents.filter(
         (e) => (e.event === 'node_step' || e.event === 'mcp_call') && e.node === node,
       )
-      body = steps.length > 0 ? (
+      detailBody = steps.length > 0 ? (
         <ul className="space-y-1.5">
           {steps.map((s, i) => (
             <li key={i} className="text-sm text-muted">
@@ -467,11 +481,11 @@ export default function EvalRun({
     } else if (!d) {
       // 评估进行中：该环节还没轮到（不再误显示「待前面评估完成后自动开始」）
       // 评估已完成却仍无结果：说明本次未产出该环节，可重跑，而非「等前面」
-      body = phase === 'running' || phase === 'paused'
+      detailBody = phase === 'running' || phase === 'paused'
         ? <p className="text-sm text-muted">等待前序环节…</p>
         : <p className="text-sm text-muted">本次未产出该环节结果（可在本轴重跑）</p>
     } else {
-      body = (
+      detailBody = (
         <>
           {extra}
           {phase === 'done' && (
@@ -480,6 +494,18 @@ export default function EvalRun({
         </>
       )
     }
+
+    const body = (rerunTarget === node && !isSkipped) ? (
+      <>
+        {rerunForm}
+        {d && (
+          <p className="text-[11px] text-muted mb-2">
+            下方为本次重跑前的旧结果；确认重跑后将自动刷新。
+          </p>
+        )}
+        {detailBody}
+      </>
+    ) : detailBody
 
     return <StepperNode status={status} label={label} right={right}>{body}</StepperNode>
   }

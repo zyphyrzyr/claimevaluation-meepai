@@ -8,7 +8,7 @@ import ConfirmDialog from './ConfirmDialog'
 
 /**
  * 新建/编辑案件表单：从 NewCase 页面抽取的可复用组件。
- * - 创建模式（无 caseId）：底部「保存草稿」（仅校验名称）/「开始评估」（校验全部 *）
+ * - 创建模式（无 caseId）：底部「保存」（仅校验名称）/「保存并启动评估」（校验全部 *）
  * - 编辑模式（传 caseId + initial）：回填草稿字段，保存同样两按钮，启动评估前先落库最新改动
  * 不直接路由，结果由父级通过 onCreated(caseId, status) 决定后续行为。
  * 配色已迁到双主题 token（原硬编码配色全部去除）。
@@ -821,7 +821,7 @@ export default function NewCaseForm({
             disabled={submitting || readOnly}
             className="px-4 py-2.5 rounded-lg border border-line text-fg hover:bg-surface disabled:opacity-50 text-sm font-medium transition-colors"
           >
-            {submitting ? '保存中…' : '保存草稿'}
+            {submitting ? '保存中…' : '保存'}
           </button>
           <button
             type="button"

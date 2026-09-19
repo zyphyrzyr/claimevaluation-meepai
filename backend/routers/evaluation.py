@@ -407,6 +407,7 @@ def evaluation_result(case_id: str, db: Session = Depends(get_db),
 class RerunRequest(BaseModel):
     node: str
     guidance: str = ""
+    cascade: bool = True  # True=级联重跑下游；False=仅本节点（下游标 stale）
 
 
 @router.get("/{case_id}/audit")
@@ -438,11 +439,11 @@ def case_audit(case_id: str, limit: int = 200, db: Session = Depends(get_db),
 @router.post("/{case_id}/rerun")
 def rerun_node(case_id: str, payload: RerunRequest, db: Session = Depends(get_db),
                case: Case = Depends(case_owned)):
-    """节点级重跑（§6.4）：引导注入 + 重跑 + 下游失效传播 + 规则环节瞬时重算"""
+    """节点级重跑（§6.4）：引导注入 + 重跑 + 级联重算下游（或仅本节点标 stale）+ 规则环节瞬时重算"""
     ctx = _load_ctx(case)
     orch = Orchestrator(ctx)
     try:
-        orch.rerun_node(payload.node, guidance=payload.guidance)
+        orch.rerun_node(payload.node, guidance=payload.guidance, cascade=payload.cascade)
     except ValueError as e:
         raise HTTPException(400, str(e))
     # 必须在 _save_ctx 之前取：_save_ctx 落库后会清空 audit_trail
@@ -452,11 +453,15 @@ def rerun_node(case_id: str, payload: RerunRequest, db: Session = Depends(get_db
              if d.get("status") == "stale"]
     last_event = ctx.audit_trail[-1] if ctx.audit_trail else None
     effect = (last_event or {}).get("effect", "")
+    rerun_meta = getattr(orch, "_last_rerun", {}) or {}
 
     _save_ctx(db, case, ctx)
     return {"ok": True,
             "dimension_results": ctx.dimension_results,
             "scores": ctx.scores,
             "recommendation": ctx.recommendation,
-            "stale_nodes": stale,          # 前端据此展示「待确认重跑」
+            "stale_nodes": stale,          # 前端据此展示「待确认重跑 / 参考」
+            "rerun_nodes": [{"node": n, "label": NODE_LABELS.get(n, n)}
+                            for n in rerun_meta.get("rerun_nodes", [])],
+            "cascade": rerun_meta.get("cascade", True),
             "effect": effect}

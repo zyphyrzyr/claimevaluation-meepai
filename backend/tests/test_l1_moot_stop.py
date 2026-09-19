@@ -234,7 +234,7 @@ def test_stop_aborts_running_moot(owner, monkeypatch):
     started = threading.Event()
     release = threading.Event()
 
-    def _fake_run(ctx, recall_context=""):
+    def _fake_run(ctx, shared_legal_context=""):
         def gen():
             started.set()
             yield {"event": "round", "step": 1, "step_name": "开庭陈述",

@@ -50,6 +50,17 @@ export default function KnowledgeBase() {
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
 
+  // 文件导入（单文件预览 + 批量）
+  const [importBusy, setImportBusy] = useState(false)
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchFiles, setBatchFiles] = useState<File[]>([])
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batchResult, setBatchResult] = useState<{
+    ok: number
+    failed: number
+    results: { filename: string; ok: boolean; error?: string; title?: string }[]
+  } | null>(null)
+
   const load = () => {
     knowledgeApi.entries({ scope: 'global' })
       .then(setEntries)
@@ -105,6 +116,43 @@ export default function KnowledgeBase() {
     }
   }
 
+  /**
+   * 单文件导入：抽取文本后填进「新增经验」抽屉的内容框，标题留空时自动填文件名
+   * （去扩展名）。内容框已有文字则保留，不覆盖用户的手动输入。
+   */
+  const importToEditor = async (file: File) => {
+    setImportBusy(true)
+    setError('')
+    try {
+      const res = await knowledgeApi.uploadFile(file)
+      setTitle((prev) => prev.trim() || (file.name.replace(/\.[^.]+$/, '') || '未命名文件'))
+      setContent((prev) => (prev.trim() ? prev : res.text))
+      setNotice(`已从「${res.filename}」导入 ${res.chars.toLocaleString()} 字，可校对后再入库。`)
+    } catch (e) {
+      setError(humanError(e))
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  const startBatch = async () => {
+    if (!batchFiles.length) return
+    setBatchBusy(true)
+    setError('')
+    setBatchResult(null)
+    try {
+      const res = await knowledgeApi.importFiles(batchFiles)
+      setBatchResult(res)
+      setBatchFiles([])
+      auth.refresh()
+      load()
+    } catch (e) {
+      setError(humanError(e))
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
   const remove = async (id: string, name: string) => {
     if (!confirm(`删除知识库条目「${name}」？向量将同步清除。`)) return
     try {
@@ -147,12 +195,20 @@ export default function KnowledgeBase() {
             末尾还挂着向量后端与 embedding 型号——那是给开发看的实现细节，
             摆在客户面前既占地方又漏了技术栈，整段撤掉。 */}
         <h1 className="text-xl font-medium">个人知识库</h1>
-        <button
-          onClick={() => { setAddOpen(true); setNotice('') }}
-          className="shrink-0 bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-        >
-          + 新增经验
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => { setAddOpen(true); setNotice('') }}
+            className="bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            + 新增经验
+          </button>
+          <button
+            onClick={() => { setBatchOpen(true); setBatchResult(null) }}
+            className="border border-line hover:border-brand text-fg px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            批量导入
+          </button>
+        </div>
       </div>
 
       {error && <div className="bg-[var(--danger-soft)] text-[var(--danger)] rounded-lg p-3 text-sm">{error}</div>}
@@ -282,6 +338,24 @@ export default function KnowledgeBase() {
 
       <SlideOver open={addOpen} onClose={() => setAddOpen(false)} title="新增经验条目" widthClass="w-[36rem]">
         <div className="space-y-4">
+          <div className="flex items-center gap-3 pb-1">
+            <label className="flex items-center gap-1.5 text-xs text-muted hover:text-fg cursor-pointer transition-colors">
+              <input
+                type="file"
+                accept=".txt,.md,.docx,.pdf"
+                className="hidden"
+                disabled={importBusy}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0]
+                  if (file) await importToEditor(file)
+                  e.target.value = ''
+                }}
+              />
+              📎 从文件导入
+            </label>
+            {importBusy && <span className="text-xs text-muted">导入中…</span>}
+            <span className="text-[11px] text-muted">抽取后填入下方，可校对再入库（仅文档类）</span>
+          </div>
           <div>
             <label className="text-xs text-muted block mb-1.5">标题</label>
             <input
@@ -316,6 +390,54 @@ export default function KnowledgeBase() {
               取消
             </button>
           </div>
+        </div>
+      </SlideOver>
+
+      <SlideOver open={batchOpen} onClose={() => setBatchOpen(false)} title="批量导入文件" widthClass="w-[36rem]">
+        <div className="space-y-4">
+          <p className="text-xs text-muted">
+            支持 .txt / .md / .docx / .pdf，每个文件生成一条「手动录入」经验（标题=文件名去扩展名）。
+            单文件失败不影响其他文件。
+          </p>
+          <input
+            type="file"
+            multiple
+            accept=".txt,.md,.docx,.pdf"
+            onChange={(e) => setBatchFiles(Array.from(e.target.files ?? []))}
+            className="block w-full text-sm text-muted"
+          />
+          {batchFiles.length > 0 && (
+            <ul className="text-xs text-muted space-y-1 max-h-40 overflow-auto">
+              {batchFiles.map((f) => (
+                <li key={f.name}>{f.name}</li>
+              ))}
+            </ul>
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={startBatch}
+              disabled={batchBusy || batchFiles.length === 0}
+              className="bg-brand hover:bg-fg text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-40 transition-colors"
+            >
+              {batchBusy ? '导入中…' : `开始导入（${batchFiles.length} 个）`}
+            </button>
+            <button onClick={() => setBatchOpen(false)} className="text-sm text-muted hover:text-fg px-3 py-2">
+              关闭
+            </button>
+          </div>
+          {batchResult && (
+            <div className="bg-canvas rounded-lg p-3 text-xs space-y-1">
+              <div className="font-medium">
+                完成：成功 {batchResult.ok} 条 / 失败 {batchResult.failed} 条
+              </div>
+              {batchResult.results.map((r, i) => (
+                <div key={i} className={r.ok ? 'text-[var(--success)]' : 'text-[var(--danger)]'}>
+                  {r.ok ? '✓' : '✗'} {r.filename}
+                  {r.ok ? '' : ` — ${r.error}`}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </SlideOver>
     </div>

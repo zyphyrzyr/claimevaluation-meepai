@@ -218,10 +218,10 @@ export const api = {
   deleteCase: (id: string) =>
     request<{ ok: boolean }>(`/cases/${id}`, { method: 'DELETE' }),
   result: (id: string) => request<any>(`/evaluation/${id}/result`),
-  rerun: (id: string, node: string, guidance: string) =>
+  rerun: (id: string, node: string, guidance: string, cascade = true) =>
     request<any>(`/evaluation/${id}/rerun`, {
       method: 'POST',
-      body: JSON.stringify({ node, guidance }),
+      body: JSON.stringify({ node, guidance, cascade }),
     }),
   // 评估三态控制（暂停 / 恢复 / 终止 / 状态查询）
   pauseEvaluation: (id: string) =>
@@ -405,6 +405,25 @@ export const knowledgeApi = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  // 单文件：抽取文本供前端预览/编辑后再入库（不直接落库）
+  uploadFile: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<{ filename: string; text: string; page_count: number; chars: number }>(
+      '/knowledge/upload-file',
+      { method: 'POST', body: form },
+    )
+  },
+  // 批量：每个文件直接生成一条全局经验（source_type=B，标题=文件名）
+  importFiles: (files: File[]) => {
+    const form = new FormData()
+    files.forEach((f) => form.append('files', f))
+    return request<{
+      ok: number
+      failed: number
+      results: { filename: string; ok: boolean; error?: string; id?: string; title?: string; chars?: number }[]
+    }>('/knowledge/import-files', { method: 'POST', body: form })
+  },
   deleteEntry: (id: string) => request<{ ok: boolean }>(`/knowledge/entries/${id}`, { method: 'DELETE' }),
   search: (payload: { query: string; case_id?: string; scope?: string; top_k?: number }) =>
     request<SearchHit[]>('/knowledge/search', { method: 'POST', body: JSON.stringify(payload) }),

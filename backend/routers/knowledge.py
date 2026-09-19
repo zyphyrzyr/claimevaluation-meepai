@@ -4,11 +4,11 @@
 - 案件材料自动入库（来源 A）、评分链路手动勾选注入、观点沉淀（来源 C）
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from typing import Optional
+from typing import List, Optional
 
 from core.auth import (
     case_owned, case_readable, current_user_optional, entry_owned, require_user,
@@ -19,6 +19,7 @@ from core.knowledge import (
     add_knowledge, delete_knowledge, list_entries, search_knowledge,
     ingest_case_materials, info,
 )
+from core.text_extractor import extract_text_from_file
 from routers.evaluation import _load_ctx, _save_ctx
 
 router = APIRouter()
@@ -64,6 +65,89 @@ def create_entry(payload: EntryCreate, db: Session = Depends(get_db),
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "id": entry.id}
+
+
+# ---------------------------------------------------------- 文件导入（来源 B：手动录入）
+
+# 个人知识库仅支持文档类（txt/md/docx/pdf）；图片 OCR 走案件证据链，不在此处。
+_KB_ALLOWED = ('.txt', '.md', '.markdown', '.docx', '.pdf')
+_KB_MAX_SIZE = 20 * 1024 * 1024  # 20MB，独立于案情描述的 5MB 限制
+
+
+async def _kb_extract(file: UploadFile):
+    """校验扩展名/大小并抽取文本；异常一律以 HTTPException 抛出，供单文件/批量复用。
+
+    关键守卫：扫描版 PDF 无文字层时 extract_text_from_file 仍返回 success=true 但
+    text 为空——若不过滤，前端会把空文本填进内容框，用户点入库时只会被「内容为空」禁用，
+    却看不出原因。所以这里显式拦截空文本。
+    """
+    name = (file.filename or '').lower()
+    if not name:
+        raise HTTPException(400, "请选择要上传的文件")
+    if not name.endswith(_KB_ALLOWED):
+        raise HTTPException(
+            400,
+            "仅支持文档类文件：.txt / .md / .docx / .pdf（扫描件请先转成带文字层的 PDF）",
+        )
+    content = await file.read()
+    if len(content) > _KB_MAX_SIZE:
+        raise HTTPException(400, "文件超过 20MB 上限")
+    result = extract_text_from_file(content, file.filename)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error", "文件解析失败"))
+    text = (result.get("text") or "").strip()
+    if not text:
+        raise HTTPException(
+            400,
+            "未提取到任何文字（可能是扫描版 PDF 无文字层）。请改用带文字层的 PDF，或直接粘贴文本。",
+        )
+    return file.filename, text, result.get("page_count", 0)
+
+
+@router.post("/upload-file")
+async def upload_file(file: UploadFile = File(...), user: User = Depends(require_user)):
+    """单文件：抽取文本供前端预览/编辑后再入库（不直接落库）。
+
+    返回 {filename, text, page_count, chars}，前端把 text 填入「内容」框；
+    标题留空时自动填文件名（去扩展名），用户校对后点「入个人知识库」。
+    """
+    filename, text, page_count = await _kb_extract(file)
+    return {"filename": filename, "text": text, "page_count": page_count, "chars": len(text)}
+
+
+@router.post("/import-files")
+async def import_files(
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    """批量导入：每个文件直接生成一条全局经验（source_type=B，标题=文件名去扩展名）。
+
+    单文件失败不影响其他文件；逐条返回 ok/error，前端汇总成功/失败数。
+    """
+    out = []
+    for f in files:
+        try:
+            fname, text, _ = await _kb_extract(f)
+        except HTTPException as e:
+            out.append({"filename": f.filename or "未命名文件", "ok": False, "error": e.detail})
+            continue
+        title = (f.filename or "未命名文件").rsplit(".", 1)[0] or "未命名文件"
+        title = title[:120]
+        try:
+            entry = add_knowledge(
+                db, scope="global", source_type="B",
+                title=title, content=text, user_id=user.id,
+            )
+            out.append({"filename": f.filename, "ok": True, "id": entry.id,
+                        "title": title, "chars": len(text)})
+        except Exception as e:  # noqa: BLE001
+            out.append({"filename": f.filename, "ok": False, "error": f"入库失败：{e}"})
+    return {
+        "ok": sum(1 for r in out if r["ok"]),
+        "failed": sum(1 for r in out if not r["ok"]),
+        "results": out,
+    }
 
 
 @router.delete("/entries/{entry_id}")

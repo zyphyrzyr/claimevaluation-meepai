@@ -135,24 +135,39 @@ def generate_recommendation(
     red_flags: List[Dict[str, Any]],
     is_complete: bool = True,
     missing_dimensions: Optional[Iterable[str]] = None,
+    stale_dimensions: Optional[Iterable[str]] = None,
     dimension_scores: Optional[Dict[str, float]] = None,
     confidence: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     决策建议：
       红线 block → 暂不建议起诉（硬门禁，不看分数）
-      数据不完整 → 评估未完成（不输出误导性结论）
+      含过期维度（仍算得出分）→ 结论仅供参考（标「参考」，不隐藏、不误导）
+      数据不完整（failed/缺失，算不出分）→ 评估未完成（不输出误导性结论）
       ≥ SCORE_THRESHOLD_GO 建议优先启动
       ≥ SCORE_THRESHOLD_PATCH 补充短板后启动（指出最低分子维度）
       < SCORE_THRESHOLD_PATCH 暂缓
     """
     missing_dimensions = list(missing_dimensions or [])
+    stale_dimensions = list(stale_dimensions or [])
 
     if has_block_red_flag(red_flags):
         return {
             "recommendation": "暂不建议起诉",
             "reason": "存在程序性红线问题（时效/主体资格等），需优先解决，本结论不受评分影响",
             "level": "block",
+        }
+
+    if stale_dimensions and final_score is not None and is_complete:
+        # 过期维度旧分仍参与聚合（所以 final_score 算得出、is_complete 为真），
+        # 但结论须明确标注「参考」而非正常结论——既不让陈旧分静默复用误导，
+        # 也不再像旧逻辑那样因 stale 一票否决导致整案结论消失。
+        dims = "、".join(stale_dimensions)
+        return {
+            "recommendation": "结论仅供参考（含过期维度）",
+            "reason": (f"「{dims}」因上游被重跑、尚未重新评估，当前结论基于其上次结果；"
+                       f"建议对其重跑后再采信。"),
+            "level": "stale",
         }
 
     if not is_complete or final_score is None:

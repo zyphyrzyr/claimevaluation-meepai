@@ -31,10 +31,10 @@ def call_llm_json(system_prompt: str, user_prompt: str, temperature: float = 0.2
 class PlaintiffAgent:
     """原告代理律师 Agent - 拥有完整案件信息和单方评估结果"""
 
-    def __init__(self, cause_type: str = CAUSE_TRADEMARK):
+    def __init__(self, cause_type: str = CAUSE_TRADEMARK, legal_context_block: str = ""):
         self.cause_type = cause_type
         self.profile = prompts.get_cause_profile(cause_type)
-        self.system_prompt = prompts.build_system_prompt("plaintiff", cause_type)
+        self.system_prompt = prompts.build_system_prompt("plaintiff", cause_type, legal_context_block)
         self.role_name = "原告代理律师"
         self.history = []
 
@@ -95,10 +95,10 @@ class PlaintiffAgent:
 class DefendantAgent:
     """被告代理律师 Agent - 只知道公开案情，不知道原告内部评估"""
 
-    def __init__(self, cause_type: str = CAUSE_TRADEMARK):
+    def __init__(self, cause_type: str = CAUSE_TRADEMARK, legal_context_block: str = ""):
         self.cause_type = cause_type
         self.profile = prompts.get_cause_profile(cause_type)
-        self.system_prompt = prompts.build_system_prompt("defendant", cause_type)
+        self.system_prompt = prompts.build_system_prompt("defendant", cause_type, legal_context_block)
         self.role_name = "被告代理律师"
         self.history = []
 
@@ -143,10 +143,10 @@ class DefendantAgent:
 class JudgeAgent:
     """法官 Agent - 中立评判，产出修正系数"""
 
-    def __init__(self, cause_type: str = CAUSE_TRADEMARK):
+    def __init__(self, cause_type: str = CAUSE_TRADEMARK, legal_context_block: str = ""):
         self.cause_type = cause_type
         self.profile = prompts.get_cause_profile(cause_type)
-        self.system_prompt = prompts.build_system_prompt("judge", cause_type)
+        self.system_prompt = prompts.build_system_prompt("judge", cause_type, legal_context_block)
         self.role_name = "审判法官"
         self.history = []
 
