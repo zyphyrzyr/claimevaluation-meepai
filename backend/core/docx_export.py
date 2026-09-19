@@ -15,10 +15,11 @@ import re
 from typing import List, Optional
 
 from docx import Document
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Cm, Pt, RGBColor
 
 DOCX_MIME = ("application/vnd.openxmlformats-officedocument"
              ".wordprocessingml.document")
@@ -134,6 +135,84 @@ def _add_field(run, instr: str) -> None:
     run._r.append(end)
 
 
+# 正文表格：可用宽度 = A4 21cm − 左右边距 3.17cm×2 = 14.66cm
+_TABLE_WIDTH_CM = 14.66
+
+
+def _split_row(line: str) -> List[str]:
+    """把一行 `| a | b |` 切成单元格文本（去首尾竖线，逐格 strip）"""
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _is_table_sep(line: str) -> bool:
+    """表格分隔行：如 `| --- | ---: |`，去掉 | : - 空格后应只剩空"""
+    return bool(re.fullmatch(r"[\s|:\-]+", line)) and "-" in line
+
+
+def _table_col_widths(n: int) -> List[float]:
+    """列宽比例：2 列时名称列稍宽（得分列窄）；其余均分"""
+    if n == 2:
+        return [0.62, 0.38]
+    return [1.0 / n] * n
+
+
+def _shade(cell, fill: str) -> None:
+    """单元格底色（表头深蓝 / 数据行斑马纹）"""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:fill"), fill)
+    tc_pr.append(shd)
+
+
+def _repeat_header_row(row) -> None:
+    """标记表头行「跨页重复」（w:tblHeader），与 PDF 的 repeatRows 对齐"""
+    tr_pr = row._tr.get_or_add_trPr()
+    tbl_header = OxmlElement("w:tblHeader")
+    tbl_header.set(qn("w:val"), "true")
+    tr_pr.append(tbl_header)
+
+
+def _add_table(doc: Document, header: List[str], rows: List[List[str]]) -> None:
+    """
+    渲染一张表格：深蓝表头白字 + 斑马纹数据行，中文字体宋体。
+
+    python-docx 的 add_table 默认列宽不匀，这里按 _table_col_widths 显式设宽，
+    否则 4 列缺口表会被 Word 摊成等宽、文字挤压。
+    """
+    ncols = len(header)
+    table = doc.add_table(rows=0, cols=ncols)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    widths = [Cm(_TABLE_WIDTH_CM * r) for r in _table_col_widths(ncols)]
+
+    # 表头
+    hdr = table.add_row().cells
+    for j, text in enumerate(header):
+        _shade(hdr[j], _PRIMARY)
+        hdr[j].width = widths[j]
+        p = hdr[j].paragraphs[0]
+        run = p.add_run(text)
+        _style(run, size=9.5, bold=True, color="FFFFFF")
+    _repeat_header_row(table.rows[0])
+
+    # 数据行（奇数行浅灰斑马纹）
+    for r_i, row in enumerate(rows):
+        cells = table.add_row().cells
+        for j in range(ncols):
+            cells[j].width = widths[j]
+            text = row[j] if j < len(row) else ""
+            p = cells[j].paragraphs[0]
+            _add_runs(p, text)
+            for run in p.runs:
+                run.font.size = Pt(9.5)
+            if r_i % 2 == 1:
+                _shade(cells[j], "F2F6FA")
+
+    doc.add_paragraph()  # 表格后空行，避免与下一段贴死
+
+
 def _brand_run(paragraph, text: str, size: float) -> None:
     """页眉页脚文字：辅助灰 + 小字号"""
     run = paragraph.add_run(text)
@@ -215,16 +294,32 @@ def markdown_to_docx(markdown: str, *, title: Optional[str] = None,
         # 否则「生成日期」会压在报告主标题上面，层级倒挂。
         meta_flushed = False
 
-    for raw in (markdown or "").splitlines():
+    lines = (markdown or "").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
         line = raw.rstrip()
         stripped = line.strip()
 
         if not stripped:
+            i += 1
+            continue
+
+        # 表格块：当前行以 | 开头，且下一行是分隔行（| --- | ---: |）
+        if stripped.startswith("|") and i + 1 < len(lines) and _is_table_sep(lines[i + 1].strip()):
+            header = _split_row(stripped)
+            rows: List[List[str]] = []
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                rows.append(_split_row(lines[i].strip()))
+                i += 1
+            _add_table(doc, header, rows)
             continue
 
         # 分隔线要在标题判定之前：--- 也可能被当成 setext 标题，这里不需要
         if re.fullmatch(r"-{3,}|\*{3,}", stripped):
             _rule(doc)
+            i += 1
             continue
 
         heading = re.match(r"^(#{1,4})\s+(.*)$", stripped)
@@ -234,25 +329,30 @@ def markdown_to_docx(markdown: str, *, title: Optional[str] = None,
                 for m in meta_lines:
                     _meta_paragraph(m)
                 meta_flushed = True
+            i += 1
             continue
 
         if stripped.startswith(">"):
             _quote(doc, stripped.lstrip(">").strip())
+            i += 1
             continue
 
         bullet = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
         if bullet:
             _bullet(doc, bullet.group(2).strip(), indent_level=len(bullet.group(1)) // 2)
+            i += 1
             continue
 
         numbered = re.match(r"^\s*(\d+)[.、]\s+(.*)$", line)
         if numbered:
             _bullet(doc, f"{numbered.group(1)}. {numbered.group(2).strip()}")
+            i += 1
             continue
 
         paragraph = doc.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(4)
         _add_runs(paragraph, stripped)
+        i += 1
 
     if not meta_flushed:  # 正文没有 H1 时兜底：meta 仍要出现
         for m in meta_lines:

@@ -115,6 +115,45 @@ class TestMarkdownMapping:
         fitz.open(stream=io.BytesIO(out), filetype="pdf")
 
 
+TABLE_MD = """\
+# 主诉评估结果：表格测试案
+
+## 一、维度明细
+
+| 评估维度 | 得分 |
+| --- | ---: |
+| 权利基础 | 78.0 |
+| 侵权认定 | 75.0 |
+
+## 二、证据盘点与缺口清单
+
+| 缺口项 | 类别 | 支撑要件 | 补证建议 |
+| --- | --- | --- | --- |
+| 商标注册证原件 | 权利基础 | 权利有效性 | 需补充续展证明并核对核定使用类别 |
+"""
+
+
+class TestTableRendering:
+    """维度汇总表 / 证据缺口表是 GFM 管道表格，必须渲染成真表格而非裸竖线"""
+
+    def test_table_content_is_present(self):
+        text = _text(markdown_to_pdf_bytes(TABLE_MD, meta=["生成日期：2026-09-20"]))
+        for word in ["评估维度", "得分", "权利基础", "缺口项", "补证建议"]:
+            assert word in text, f"表格内容未渲染：{word}"
+
+    def test_no_raw_pipe_or_separator_leaks_into_text(self):
+        """竖线与分隔行是表格语法字符，漏到正文里就说明表格没被识别"""
+        text = _text(markdown_to_pdf_bytes(TABLE_MD))
+        assert "|" not in text
+        assert "---" not in text
+
+    def test_bare_table_without_separator_does_not_crash(self):
+        """只有表头行、没有分隔行的残缺表格：按普通文本渲染，不许崩"""
+        out = markdown_to_pdf_bytes("| 孤行 | 不成表 |")
+        assert out[:4] == b"%PDF"
+        fitz.open(stream=io.BytesIO(out), filetype="pdf")
+
+
 # ============================================================
 # C. 中文渲染（最容易漏的一项）
 # ============================================================

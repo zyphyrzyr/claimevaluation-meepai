@@ -200,3 +200,40 @@ class TestSectionNumbering:
         md = _md(CAUSE_TRADEMARK, "要钱", pkulaw=True)
         assert "法律检索与引用核验" not in md
         assert self._numbers(md) == list("一二三四")
+
+
+# ============================================================
+# 4. 维度得分汇总表 + 证据缺口表（报告表格化）
+# ============================================================
+
+class TestTableSections:
+
+    def test_summary_table_lists_only_computed_dimensions(self):
+        """要钱路径没有判例价值维度，汇总表也不能列它——与正文明细保持一致"""
+        md = _md(CAUSE_TRADEMARK, "要钱")
+        assert "| 评估维度 | 得分 |" in md, "维度得分汇总表缺失"
+        assert "| 权利基础 |" in md
+        assert "| 判例价值 |" not in md
+
+    def test_summary_table_includes_precedent_on_fame_path(self):
+        md = _md(CAUSE_TRADEMARK, "要名")
+        assert "| 判例价值 |" in md, "要名路径的汇总表应包含判例价值行"
+
+    def test_summary_table_places_it_before_dimension_details(self):
+        """汇总表要出现在维度明细节标题之后、第一个维度小节之前，先总后分"""
+        md = _md(CAUSE_TRADEMARK, "要钱")
+        sec_title = md.index("## 二、维度明细")
+        table = md.index("| 评估维度 | 得分 |")
+        first_dim = md.index("### 权利基础")
+        assert sec_title < table < first_dim
+
+    def test_gap_list_renders_as_table(self):
+        ctx, memo = _memo(CAUSE_TRADEMARK, "要钱")
+        md = memo["markdown"]
+        if ctx.gap_list:
+            assert "| 缺口项 | 类别 | 支撑要件 | 补证建议 |" in md, "证据缺口表缺失"
+            for g in ctx.gap_list:
+                assert g.get("item", "") in md, f"缺口项没进表格：{g.get('item')}"
+        else:
+            assert "无重大证据缺口" in md
+        assert "- [ ]" not in md, "缺口清单不应再是复选框列表"
