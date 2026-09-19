@@ -7,14 +7,55 @@ import { useState, type ReactNode } from 'react'
 export const SEV_LABEL: Record<string, string> = { pass: '通过', warning: '警示', block: '拦截' }
 
 /**
+ * 标题旁的「为什么这么算」小问号。
+ *
+ * 判断依据的正文要留给「本案发生了什么」，方法论（公式、规则定义、口径）
+ * 搬到这里悬停可见——它每个案子都一样，印在正文里只会把案件事实挤掉。
+ */
+export function Hint({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className="relative inline-flex align-middle">
+      <button
+        type="button"
+        aria-label="算法说明"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onClick={() => setOpen((v) => !v)}
+        className="w-3.5 h-3.5 rounded-full border border-line text-[9px] leading-none
+                   text-muted hover:text-fg hover:border-fg transition-colors
+                   inline-flex items-center justify-center"
+      >
+        ?
+      </button>
+      {open && (
+        <span
+          className="absolute left-0 top-5 z-20 w-64 rounded-md border border-line
+                     bg-surface p-2 text-[11px] leading-relaxed text-muted shadow-sm"
+        >
+          {text}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/**
  * 判断依据的通用区块。布局为「左侧固定标签 + 右侧正文」的定义列表，
  * 替代原先一片左竖线堆叠的写法——多类依据（证据 / 评分 / 规则 / 外部数据）横向对齐后更好扫读。
  * 窄屏（sm 以下）自动折成上下两行，避免标签挤掉正文宽度。
+ *
+ * hint：算法说明，显示在标题旁的小问号里，不占正文。
  */
-export function Basis({ title, children }: { title: string; children: ReactNode }) {
+export function Basis({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-1 sm:flex-row sm:gap-4">
-      <div className="shrink-0 text-xs font-medium text-fg sm:w-24 sm:pt-0.5">{title}</div>
+      <div className="shrink-0 text-xs font-medium text-fg sm:w-24 sm:pt-0.5 flex items-center gap-1">
+        <span>{title}</span>
+        {hint ? <Hint text={hint} /> : null}
+      </div>
       <div className="min-w-0 flex-1 text-sm text-muted leading-relaxed">{children}</div>
     </div>
   )
