@@ -199,7 +199,7 @@ export default function Workbench() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="搜索案件名称、原告或被告，如「栖木 顾家」"
+            placeholder="搜索案件名称、原告或被告，如「LV 茉莉奶白」"
             className="w-full border border-line rounded-lg pl-3 pr-8 py-2 text-sm focus:outline-none focus:border-brand"
           />
           {q && (
