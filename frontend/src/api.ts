@@ -451,10 +451,10 @@ export const knowledgeApi = {
     }),
   // 手动勾选注入接口已随「评估准备」页一并移除（方案 B：注入由后端自动召回完成），
   // 对应后端 POST /knowledge/cases/{id}/inject 亦已删除。
-  deposit: (caseId: string, title: string, content: string) =>
-    request<{ ok: boolean; id: string }>(`/knowledge/cases/${caseId}/deposit`, {
+  // 观点沉淀：内容由后端用案件上下文生成评估结果完整原文（不再由前端拼装摘要）
+  deposit: (caseId: string) =>
+    request<{ ok: boolean; id: string; title: string }>(`/knowledge/cases/${caseId}/deposit`, {
       method: 'POST',
-      body: JSON.stringify({ title, content }),
     }),
 }
 

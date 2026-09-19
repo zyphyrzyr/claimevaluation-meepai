@@ -19,6 +19,7 @@ from core.knowledge import (
     add_knowledge, delete_knowledge, list_entries, search_knowledge,
     ingest_case_materials, info,
 )
+from core.report_generator import generate_memo
 from core.text_extractor import extract_text_from_file
 from routers.evaluation import _load_ctx, _save_ctx
 
@@ -202,20 +203,24 @@ def ingest(case_id: str, payload: IngestRequest, db: Session = Depends(get_db),
 # 的 knowledge_auto_recall 事件承载，可查且可复现。
 
 
-class DepositRequest(BaseModel):
-    title: str
-    content: str
-
-
 @router.post("/cases/{case_id}/deposit")
-def deposit(case_id: str, payload: DepositRequest, db: Session = Depends(get_db),
+def deposit(case_id: str, db: Session = Depends(get_db),
             case: Case = Depends(case_owned), user: User = Depends(require_user)):
-    """来源 C：本案讨论/评估结论沉淀到全局经验库（跨案复用）"""
-    content = payload.content.strip()
+    """来源 C：本案评估结果**完整原文**沉淀到全局经验库（跨案复用）。
+
+    内容不再由前端拼装摘要，而是后端用 case 上下文重新生成 markdown 全文——
+    与「下载评估结果」导出的 Word/PDF 严格同源（同一个 generate_memo）。
+    这样观点沉淀永远等于评估结果原文，不会因前端逻辑漂移。
+
+    本端点无请求体：前端只传 case_id，任何旧客户端传入的 body 都会被忽略。
+    """
+    ctx = _load_ctx(case)
+    content = generate_memo(case.name, ctx)["markdown"].strip()
     if not content:
-        raise HTTPException(400, "沉淀内容不能为空")
+        raise HTTPException(400, "评估结果为空，无法沉淀")
     # 沉淀出来的全局经验记在自己名下：它是跨案复用的私有经验，
     # 不该变成所有人都看得到、却谁都删不掉的公共数据。
     entry = add_knowledge(db, scope="global", source_type="C",
-                          title=payload.title, content=content, user_id=user.id)
+                          title=f"{case.name} 评估结果", content=content,
+                          user_id=user.id)
     return {"ok": True, "id": entry.id, "title": entry.title}

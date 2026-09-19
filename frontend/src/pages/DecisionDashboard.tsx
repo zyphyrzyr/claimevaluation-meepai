@@ -166,8 +166,6 @@ export default function DecisionDashboard({
   const [busyNode, setBusyNode] = useState<string>('')
   // 下载评估结果：一个按钮展开选格式，展开态与收起遮罩都挂在这里
   const [showExport, setShowExport] = useState(false)
-  // 沉淀到经验库需要案件名与案由，结果接口里没有这两项，单独取一次
-  const [caseMeta, setCaseMeta] = useState<any>(null)
   const [depositing, setDepositing] = useState(false)
   const [deposited, setDeposited] = useState(false)
   const [depositError, setDepositError] = useState('')
@@ -182,11 +180,6 @@ export default function DecisionDashboard({
     if (id) api.result(id).then(setData).catch((e) => setError(String(e)))
   }
   useEffect(reload, [id])
-
-  useEffect(() => {
-    // 取不到案件名不影响看结果，所以失败静默——沉淀时退回「本案」兜底
-    if (id) api.caseDetail(id).then(setCaseMeta).catch(() => {})
-  }, [id])
 
   const rerun = async (node: string, guidance: string, cascade = true): Promise<RerunResult> => {
     if (!id) throw new Error('缺少案件 ID')
@@ -290,28 +283,17 @@ export default function DecisionDashboard({
   }
 
   /**
-   * 把本次结论沉淀进案件经验库。
+   * 把本次评估结果**完整原文**沉淀进个人知识库（观点沉淀，来源 C）。
    *
-   * 原先这个入口在「决策备忘录」页，该页下架后挪到这里。
-   * 沉淀的是「结论 + 分数 + 置信度 + 主要短板」这几句，而不是整篇报告：
-   * 经验库是给后续案件召回参考的，需要的是可复用的判断，不是文档全文。
+   * 内容由后端用案件上下文重新生成（与「下载评估结果」导出的 Word/PDF 同源，
+   * 同一份 markdown），前端只负责触发、不再自行拼装摘要。
    */
   const depositToKnowledge = async () => {
     if (!id || depositing || deposited) return
     setDepositing(true)
     setDepositError('')
     try {
-      const name = caseMeta?.name ?? '本案'
-      const cause = caseMeta?.cause_type ?? ''
-      const content = [
-        `结论：${levelText}（主诉决策分 ${num(final)}）`,
-        `法律可行性 ${num(legal)} 与业务预期 ${num(business)} 的均衡水平 ${num(final)}；置信度 ${num(confidence)}%。`,
-        recommendation?.reason ? `· ${recommendation.reason}` : '',
-        evidence?.completeness != null
-          ? `· 证据完整度 ${num(evidence.completeness)}%，${gaps.length} 项缺口待补。`
-          : '',
-      ].filter(Boolean).join('\n')
-      await knowledgeApi.deposit(id, `${name} 评估结论${cause ? `（${cause}）` : ''}`, content)
+      await knowledgeApi.deposit(id)
       setDeposited(true)
     } catch (e) {
       // 不把整页切成错误态：沉淀失败不该让人看不到评估结果
