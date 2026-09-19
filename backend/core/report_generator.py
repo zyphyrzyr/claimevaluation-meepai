@@ -179,7 +179,7 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     lines = []
     lines.append(f"# 主诉评估结果：{data['case_name']}")
     lines.append("")
-    lines.append(f"> 案由：{data['cause_type']} ｜ 业务目标：{data['goal_type']} ｜ "
+    lines.append(f"> 案由：{data['cause_type']} · 业务目标：{data['goal_type']} · "
                  f"评估模型：v4 二维主诉决策模型")
     lines.append("")
     sec.add(lines, "核心结论")
@@ -197,7 +197,7 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
         lines.append("### 红线检查")
         lines.append("")
         for f in data["red_flags"]:
-            mark = {"block": "⛔", "warning": "⚠️", "pass": "✅"}.get(f.get("severity"), "·")
+            mark = {"block": "【阻断】", "warning": "【警告】", "pass": "【通过】"}.get(f.get("severity"), "·")
             lines.append(f"- {mark} {f.get('rule_name', '')}：{f.get('reason', '')}")
         lines.append("")
 
@@ -249,9 +249,9 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     if dim["recovery"]:
         lines.append(f"### 回款能力（{_fmt(dim['recovery'].get('recovery_ability'))} 分）")
         for f in dim["recovery"].get("red_flags", []):
-            lines.append(f"- ⚠️ {f}")
+            lines.append(f"- 【警告】 {f}")
         for f in dim["recovery"].get("green_flags", []):
-            lines.append(f"- ✅ {f}")
+            lines.append(f"- 【通过】 {f}")
         lines.append("")
 
     # 证据缺口
@@ -398,7 +398,7 @@ def render_pkulaw_section(pk: Dict[str, Any], numbering=None) -> List[str]:
         err = pk.get("error") or "北大法宝增强未成功，但未记录具体原因"
         title = "法律检索与引用核验（北大法宝）"
         lines = [numbering.heading(title) if numbering is not None else f"## {title}", ""]
-        lines.append(f"> ⚠️ **北大法宝增强未成功**：{err}")
+        lines.append(f"> 【警告】 **北大法宝增强未成功**：{err}")
         lines.append("")
         lines.append("_（本报告未包含法宝法条/类案参考，不影响已完成的评估结论；"
                      "可检查 PKULAW_API_TOKEN 配置后重新生成报告。）_")

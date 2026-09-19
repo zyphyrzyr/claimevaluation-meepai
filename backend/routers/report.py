@@ -97,7 +97,8 @@ def download_result_docx(case_id: str, pkulaw: bool = False,
 
     # 不另传 title：markdown 正文开头已有 H1「主诉评估结果：{案件名}」，
     # 再传一遍会在 Word 里出现两个一模一样的标题。
-    content = markdown_to_docx_bytes(markdown, meta=_meta_lines(case, ctx))
+    content = markdown_to_docx_bytes(markdown, meta=_meta_lines(case, ctx),
+                                     header_text=case.name)
     return _docx_response(content, f"{case.name}-评估结果.docx")
 
 
@@ -109,7 +110,8 @@ def download_result_pdf(case_id: str, pkulaw: bool = False,
     ctx = _load_ctx(case)
     markdown = generate_memo(case.name, ctx, pkulaw=pkulaw)["markdown"]
 
-    content = markdown_to_pdf_bytes(markdown, meta=_meta_lines(case, ctx))
+    content = markdown_to_pdf_bytes(markdown, meta=_meta_lines(case, ctx),
+                                    header_text=case.name)
     return Response(
         content=content,
         media_type=PDF_MIME,
