@@ -4,7 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import * as echarts from 'echarts'
 import { api, exportUrls, knowledgeApi } from '../api'
 import RerunControl, { RerunResult } from '../components/RerunControl'
-import { tierOf } from '../lib/tiers'
+import { tierOf, recoveryTierOf, RECOVERY_TIER_LABEL } from '../lib/tiers'
+import { damagesText } from '../lib/damagesWording'
 import { STEP_MOTION } from '../lib/motion'
 import { SEV_LABEL, signalMeaning } from '../components/Basis'
 
@@ -232,6 +233,9 @@ export default function DecisionDashboard({
     patch: thresholds?.patch ?? 62,
     quadrant_mid: thresholds?.quadrant_mid ?? 78,
     power_mean_p: thresholds?.power_mean_p ?? -0.5,
+    recovery_base: thresholds?.recovery_base ?? 78,
+    recovery_ok: thresholds?.recovery_ok ?? 70,
+    recovery_weak: thresholds?.recovery_weak ?? 45,
   }
   const mid = t.quadrant_mid
 
@@ -240,6 +244,11 @@ export default function DecisionDashboard({
   const tierWord = (score: any) => {
     const tr = tierOf(score, t)
     return tr ? TIER_TEXT[tr] : '未评分'
+  }
+  // 回款能力是概率型指标，档位锚在「记录干净」的基准分上，不能套决策分的 62/78
+  const recoveryTierWord = (score: any) => {
+    const rt = recoveryTierOf(score, t)
+    return rt ? RECOVERY_TIER_LABEL[rt] : '未评分'
   }
 
   // 受控（左侧导航驱动）时只渲染当前块；不受控时两块都渲染
@@ -508,20 +517,18 @@ export default function DecisionDashboard({
                   <ul className="space-y-1.5">
                     <li className="text-sm text-muted leading-relaxed">
                       <b className="text-fg">判赔规模</b> {num(dr('damages').score)} 分（{tierWord(dr('damages').score)}）：
-                      {dr('damages').p50 != null && (
-                        `最可能判赔约 ${num(dr('damages').p50)} 万元（偏保守 ${num(dr('damages').p10)} 万、顺利可达 ${num(dr('damages').p90)} 万），相对预估的维权投入，大致能收回 ${num(dr('damages').return_multiple)} 倍。`
-                      )}
+                      {damagesText(dr('damages'))}
                       {dr('damages').analysis ? ` ${dr('damages').analysis}` : ''}
-                      {dr('damages').scale_support === 'low' && ' 案情交代的侵权规模对高判赔支撑偏弱，判赔可能贴着下限走。'}
+                      {dr('damages').scale_support === 'low' && ' 规模证据偏弱，判赔可能贴着下限走。'}
                     </li>
                     <li className="text-sm text-muted leading-relaxed">
-                      <b className="text-fg">回款能力</b> {num(recoveryAbility)} 分（{tierWord(recoveryAbility)}）：
+                      <b className="text-fg">回款能力</b> {num(recoveryAbility)} 分（{recoveryTierWord(recoveryAbility)}）：
                       赢了官司不等于拿得到钱。按被告的工商状态与涉诉记录，胜诉后实际能收回款项的可能性约为{' '}
                       <b className="text-fg">{num(recoveryAbility)}%</b>。
                       {dr('recovery').analysis ? ` ${dr('recovery').analysis}` : ''}
                       {recoveryRedFlags.length > 0 || recoveryGreenFlags.length > 0
                         ? ` 本次命中 ${recoveryRedFlags.length} 项不利迹象、${recoveryGreenFlags.length} 项有利迹象：`
-                        : ' 本次没有命中明显的不利或有利迹象，回款可能性停留在中性水平附近。'}
+                        : ` 本次没有命中任何加扣分项，${num(recoveryAbility)} 分是规则表对「公开记录查不到问题」的默认取值（基准 ${num(t.recovery_base)} 分），不代表已核实被告具备偿付能力。`}
                       {(recoveryRedFlags.length > 0 || recoveryGreenFlags.length > 0) && (
                         <ul className="mt-1 space-y-0.5">
                           {recoveryRedFlags.map((f, i) => (

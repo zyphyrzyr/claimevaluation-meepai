@@ -3,6 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { STEP_MOTION } from '../lib/motion'
 import { cn } from '../lib/utils'
 import { type Thresholds, type NodeState } from '../lib/tiers'
+import {
+  damagesParts,
+} from '../lib/damagesWording'
 import { Card } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { ScoreBadge } from '../components/ui/ScoreBadge'
@@ -128,16 +131,26 @@ function fmtNum(v: any): string {
   if (Number.isNaN(f)) return String(v)
   return Number.isInteger(f) ? String(f) : f.toFixed(1)
 }
+
+/**
+ * 材料标题瘦身。
+ * 库里存的是「证据材料-1:【证据文件: 证据1-商标注册证（第110630号）…」这种带前缀和
+ * 内容摘要的长串，原样铺开既读不了、也对不上用户上传的文件名，所以只留可读的短名。
+ */
+function shortMaterialTitle(t: any): string {
+  const s = String(t ?? '')
+  if (!s) return '未命名材料'
+  let out = s.replace(/^[^:：]*[:：]\s*/, '')
+  out = out.replace(/^【[^】]*】\s*/, '')
+  out = out.replace(/（[^（）]*…?$/, '')
+  return out.length > 24 ? `${out.slice(0, 24)}…` : out
+}
 function riskColor(l?: string) {
   if (l === 'high') return 'bg-[var(--danger-soft)] text-[var(--danger)]'
   if (l === 'medium') return 'bg-[var(--warning-soft)] text-[var(--warning)]'
   if (l === 'low') return 'bg-[var(--success-soft)] text-[var(--success)]'
   return 'bg-surface text-muted'
 }
-function scaleLabel(s?: string) {
-  return s === 'high' ? '高' : s === 'medium' ? '中' : s === 'low' ? '低' : (s ?? '—')
-}
-
 function fmtDur(ms?: number): string {
   if (!ms || ms < 0) return ''
   if (ms < 1000) return `${ms}ms`
@@ -313,7 +326,10 @@ export default function EvalRun({
   const [activeNode, setActiveNode] = useState<string | null>(null)
 
   const thresholds: Thresholds =
-    result?.thresholds ?? { go: 78, patch: 62, quadrant_mid: 78, power_mean_p: -0.5 }
+    result?.thresholds ?? {
+      go: 78, patch: 62, quadrant_mid: 78, power_mean_p: -0.5,
+      recovery_base: 78, recovery_ok: 70, recovery_weak: 45,
+    }
   const goalType: string = result?.goal_type ?? '要钱'
   const blocked = Boolean(result?.dimension_results?.red_gate?.result?.blocked)
   // 模拟法庭状态（与评估结果页同口径：correction_coeff 存在且 ≠1 视为已回写）
@@ -557,10 +573,12 @@ export default function EvalRun({
         <Basis title="证据依据">
           <EvItems categories={categories} />
         </Basis>
-        <Basis title="评分依据">
-          {label}得分 {fmtNum(score)} 分，与另外两个法律维度一起经「幂平均」合成法律可行性
-          {corr != null && corr !== 1 ? `，再乘上模拟法庭给出的修正系数 ${corr}` : ''}
-          。合成口径、以及「为什么用幂平均而不是算术平均」，统一在「决策合成」里说明，这里不再重复。
+        <Basis
+          title="评分依据"
+          hint="法律可行性 = 权利基础、侵权认定、诉讼程序三个维度的幂平均（p<0，短板主导：任一维度低，整体就被拉下来，不像算术平均能被高分掩盖）。再乘模拟法庭的修正系数（0.7–1.3）。"
+        >
+          本维度 {fmtNum(score)} 分，与另外两个法律维度合成法律可行性
+          {corr != null && corr !== 1 ? `，并已乘上模拟法庭修正系数 ${corr}` : ''}。
         </Basis>
         {/* 北大法宝外部检索依据：必须与其余依据同处「判断依据」折叠面板内，
             默认收起、展开后一并显示；此前挂在 BasisList 之外，导致面板收起时它仍常驻可见。 */}
@@ -569,7 +587,32 @@ export default function EvalRun({
     )
   }
 
-  // 北大法宝外部检索依据（问题2 修复）：法律可行性三节点接入外部法律数据库，
+  /**
+ * 长文本截断 + 展开。
+ * 法条与类案摘要原文动辄几百字，整段铺开会把真正要看的本案结论挤到屏幕外；
+ * 默认只给一眼能读完的部分，想看全文再点开。
+ */
+function Clamped({ text, limit = 90 }: { text: string; limit?: number }) {
+  const [open, setOpen] = useState(false)
+  if (!text) return null
+  const long = text.length > limit
+  return (
+    <span>
+      {long && !open ? `${text.slice(0, limit)}…` : text}
+      {long && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="ml-1 text-[11px] text-fg underline underline-offset-2"
+        >
+          {open ? '收起' : '展开'}
+        </button>
+      )}
+    </span>
+  )
+}
+
+// 北大法宝外部检索依据（问题2 修复）：法律可行性三节点接入外部法律数据库，
   // 把检索到的法条 / 类案显式透出，让评判「有外部依据」可见，而非只给一个分数。
   const PkulawBasis = ({ pk }: { pk?: any }) => {
     if (!pk) return null
@@ -595,7 +638,7 @@ export default function EvalRun({
             {laws.slice(0, 5).map((l: any, i: number) => (
               <div key={i} className="text-sm text-muted">
                 <b className="text-fg">{l.title}</b>
-                {l.content ? `：${l.content}` : ''}
+                {l.content ? <>：<Clamped text={String(l.content)} /></> : ''}
               </div>
             ))}
           </div>
@@ -606,7 +649,7 @@ export default function EvalRun({
               <div key={i} className="text-sm text-muted">
                 <b className="text-fg">{c.title}</b>
                 {c.court || c.ahao ? `（${[c.court, c.ahao].filter(Boolean).join(' ')}）` : ''}
-                {c.summary ? `：${c.summary}` : ''}
+                {c.summary ? <>：<Clamped text={String(c.summary)} limit={120} /></> : ''}
               </div>
             ))}
           </div>
@@ -615,6 +658,108 @@ export default function EvalRun({
     )
   }
 
+
+  // 企查查 8 阶段结果 → 一句话摘要。此前前端只 Object.keys() 数了阶段个数，
+  // 接口早就返回了 stages 明细却没人读（评测 P1-3）。
+  const qccStageSummary = (key: string, data: any): string => {
+    if (data == null) return '—'
+    if (key === 'A_主体锁定') {
+      return data.ok
+        ? `已锁定：${data.locked_name ?? '—'}（${data.match_status || '已匹配'}）`
+        : `未锁定：${data.error ?? '无候选主体'}`
+    }
+    // C 阶段：hits 是「维度 → 命中条数」。此前 hits 对象取不到摘要值被过滤掉，
+    // 只剩 total_hit_dimensions 这个内部字段名被拼进文案（界面上显示
+    // 「风险整体分诊 total_hit_dimensions 3」），而真正要看的「命中了哪几个维度」反而丢了。
+    if (key.startsWith('C_')) {
+      const dims = Object.keys(data.hits ?? {}).filter((k: string) => !k.startsWith('_'))
+      const n = data.total_hit_dimensions ?? dims.length
+      if (n > 0) {
+        return `命中 ${n} 个风险维度`
+          + (dims.length ? `：${dims.slice(0, 5).join('、')}${dims.length > 5 ? ' 等' : ''}` : '')
+      }
+      return String(data._summary ?? '未命中风险维度')
+    }
+    if (typeof data === 'string') return data
+    if (!Array.isArray(data) && typeof data === 'object') {
+      const counts = Object.entries(data)
+        .filter(([k]) => !k.startsWith('_'))
+        .map(([k, v]: [string, any]) =>
+          [k, (v && typeof v === 'object' ? (v._summary ?? v._count) : v)])
+        .filter(([, v]) => v !== undefined && v !== null && v !== '')
+      const nonZero = counts.filter(([, v]) =>
+        typeof v === 'number' ? v > 0 : !/^0(条|件)?$/.test(String(v)))
+      if (nonZero.length > 0) return nonZero.map(([k, v]) => `${k} ${v}`).join('；')
+      if (counts.length > 0) return `${counts.length} 个维度全部为 0 条`
+      if (data._summary) return String(data._summary)
+    }
+    return String(data._summary ?? '已获取')
+  }
+
+  // 企查查外部事实展示：逐条列出真正查到的工商字段。
+  // 原实现是一段规则说明书 + 硬编码分档阈值，只插了 damages_adjustment 一个变量，
+  // 还写「据此给出判赔调整」——而那个标签在代码里从未参与任何金额计算，因果链是虚构的。
+  const QccFacts = ({ facts, simulated }: { facts?: any; simulated?: boolean }) => {
+    const e = facts?.entity ?? {}
+    const s = facts?.scale ?? {}
+    const rows: { label: string; value: string }[] = []
+    // 0 也是查到的事实（「商标 0 件」「线上渠道 0 个」恰恰能驳斥材料里的规模主张），
+    // 所以只跳过 null/空串，不能跳过 0。
+    const put = (label: string, v: any, suffix = '') => {
+      if (v === null || v === undefined || v === '') return
+      rows.push({ label, value: `${v}${suffix}` })
+    }
+    put('统一社会信用代码', e.credit_code)
+    put('法定代表人', e.legal_rep)
+    put('登记状态', e.reg_status)
+    put('成立日期', e.established)
+    put('注册资本', e.registered_capital)
+    put('参保人数', e.insured_count, ' 人')
+    put('人员规模标注', e.staff_scale)
+    put('所属行业', e.industry)
+    put('所在地', e.region)
+    put('商标资产', s.trademark_count, ' 件')
+    put('被诉历史', s.litigation_history, ' 件')
+    const channels: any[] = [s.online_shops, s.app, s.miniprogram, s.wechat_mp, s.douyin]
+    if (channels.some((c) => c != null)) {
+      const total = channels.reduce((a, b) => a + (Number(b) || 0), 0)
+      rows.push({
+        label: '线上渠道',
+        value: `${total} 个（店铺 ${s.online_shops ?? 0}、APP ${s.app ?? 0}、小程序 ${s.miniprogram ?? 0}、公众号 ${s.wechat_mp ?? 0}、抖音 ${s.douyin ?? 0}）`,
+      })
+    }
+
+    return (
+      <div className="space-y-1.5">
+        {simulated && (
+          <div className="text-xs px-2 py-1 rounded bg-[var(--warning-soft)] text-[var(--warning)] inline-block">
+            以下为模拟数据（USE_MOCK=True），并非企查查真实查询结果
+          </div>
+        )}
+        {e.name_matches_query === false && (
+          <div className="text-sm text-[var(--danger)]">
+            ⚠️ 实际锁定的主体「{e.name || e.locked_name || '未知'}」与所查名称「{e.queried_name}」不一致，
+            下列事实可能属于另一家公司，请核实被告名称后重跑本节点。
+          </div>
+        )}
+        {rows.length === 0 ? (
+          <div className="text-sm">
+            本次未取到被告的工商登记事实（企查查未配置、未查询或查询失败），
+            这一步的判断完全依据案情材料。
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-1">
+            {rows.map((row) => (
+              <div key={row.label} className="text-sm flex gap-2">
+                <span className="text-muted shrink-0 w-28">{row.label}</span>
+                <span className="text-fg min-w-0 break-all">{row.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   const renderDetail = (node: string): ReactNode => {
     const d = detailOf(node)
@@ -648,16 +793,21 @@ export default function EvalRun({
               </div>
             )}
             <BasisList>
-              <Basis title="证据依据">
-                每项要件都带法律出处（如「{matrix[0]?.item ?? '—'}」对应 {matrix[0]?.basis ?? '—'}），
-                系统据此逐项判定齐备 / 不足 / 缺失，再按 齐备 1 分、不足 0.5 分、缺失 0 分算出完整度
-                {r.completeness ?? 0}%。这份清单同时决定红线检查中「权利证明」「侵权证据」「损失证据」
-                三条规则能否放行。
+              <Basis
+                title="证据依据"
+                hint="完整度算法：齐备记 1 分、不足记 0.5 分、缺失记 0 分，取平均后换算成百分比。每项要件都带法律出处。这份清单同时决定红线检查中「权利证明」「侵权证据」「损失证据」三条规则能否放行。"
+              >
+                共 {matrix.length} 项要件，其中 {sufficient.length} 项齐备
+                {lacking > 0 ? `、${lacking} 项不足或缺失` : ''}，
+                证据完整度 <b className="text-fg">{r.completeness ?? 0}%</b>。
               </Basis>
               {recalled.length > 0 && (
-                <Basis title="参考材料">
-                  系统按案由与案情自动检索到 {recalled.length} 条相关材料，已注入后续所有判断环节：
-                  {recalled.slice(0, 3).map((m: any) => m.title).join('、')}
+                <Basis
+                  title="参考材料"
+                  hint="系统按「案由 + 业务目标 + 案情描述」自动检索本案材料库与全局经验库，命中项会注入后续每个判断环节的提示词，用户无需手动勾选。"
+                >
+                  自动召回 {recalled.length} 条：
+                  {recalled.slice(0, 3).map((m: any) => shortMaterialTitle(m.title)).join('、')}
                   {recalled.length > 3 ? ` 等 ${recalled.length} 条` : ''}。
                 </Basis>
               )}
@@ -674,33 +824,60 @@ export default function EvalRun({
         )
       }
       case 'red_gate': {
-        // 红线检查的依据要说清三件事：规则从哪来、每条看了什么、为什么某些能拦停流程。
+        // 判断依据要说清「哪几条没过、为什么」，而不是把六条规则的定义和图例再抄一遍——
+        // 规则清单与「通过/警示/拦截」的含义是常量，放进标题旁的小问号即可。
         const hits: any[] = r.hits ?? []
         const nPass = hits.filter((h: any) => h.severity === 'pass').length
         const nWarn = hits.filter((h: any) => h.severity === 'warning').length
         const nBlock = hits.filter((h: any) => h.severity === 'block').length
+        const warnHits = hits.filter((h: any) => h.severity === 'warning')
+        const blockHits = hits.filter((h: any) => h.severity === 'block')
         // 这三条规则不是独立判断的，它们的输入正是证据盘点的结果
         const evidenceFed = hits.filter((h: any) =>
           ['权利证明', '侵权证据', '损失证据'].some((k) => (h.rule_name ?? '').includes(k)),
         )
+        const GATE_HINT =
+          '六条程序性规则：诉讼时效、主体资格、仲裁条款、权利证明、侵权证据、损失证据。'
+          + '判定标准写死在引擎里、不调用模型，所以同一份材料重跑结果完全一致。'
+          + '通过 = 不构成障碍；警示 = 可继续推进，但建议补强；拦截 = 硬性障碍，评估就此终止。'
         const gateBasis = (
           <BasisList>
-            <Basis title="规则依据">
-              这一步不看模型输出，而是逐条套用 {hits.length} 条程序性规则（诉讼时效、主体资格、仲裁条款、
-              权利证明、侵权证据、损失证据）。本次结果为 {nPass} 条通过、{nWarn} 条警示、{nBlock} 条拦截。
-              规则的判定标准写死在引擎里，所以同一份材料重跑结果稳定、不会因为换模型而漂移。
+            <Basis title="规则依据" hint={GATE_HINT}>
+              {hits.length} 条规则走完：
+              <b className="text-fg">{nPass} 条通过</b>
+              {nWarn > 0 ? <>、<b className="text-[var(--warning)]">{nWarn} 条警示</b></> : null}
+              {nBlock > 0 ? <>、<b className="text-[var(--danger)]">{nBlock} 条拦截</b></> : null}
+              。
+              {warnHits.length > 0 && (
+                <div className="mt-1">
+                  警示项：
+                  {warnHits.map((h: any) => (
+                    <span key={h.rule_code} className="mr-2">
+                      {h.rule_name}
+                      {h.reason ? `（${h.reason}）` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {blockHits.length > 0 && (
+                <div className="mt-1">
+                  拦截项：
+                  {blockHits.map((h: any) => (
+                    <span key={h.rule_code} className="mr-2">
+                      {h.rule_name}
+                      {h.reason ? `（${h.reason}）` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
             </Basis>
-            <Basis title="证据依据">
+            <Basis
+              title="证据依据"
+              hint="其中「权利证明」「侵权证据」「损失证据」三条不独立判断，输入正是证据盘点的核对结果：材料齐备即放行、缺失即拦截。"
+            >
               {evidenceFed.length > 0
-                ? `其中「${evidenceFed.map((h: any) => h.rule_name).join('」「')}」这几条直接读取证据盘点的核对结果（当前完整度 ${r.completeness ?? ev.completeness ?? 0}%），材料齐备即放行、缺失即拦截。`
-                : `这一步不单独读材料，全部输入来自证据盘点与案情描述（当前证据完整度 ${ev.completeness ?? 0}%）。`}
-            </Basis>
-            <Basis title="结果含义">
-              通过 = 不构成障碍，直接进入后续判断；警示 = 可以继续推进，但建议补强相关材料；
-              拦截 = 命中硬性障碍，评估会就此终止——因为后面的权利基础、侵权认定即使算出来也没有落地意义。
-              {r.blocked
-                ? '本次已命中拦截，因此后续环节未执行。'
-                : '本次没有命中拦截，因此后续环节正常执行。'}
+                ? `「${evidenceFed.map((h: any) => h.rule_name).join('」「')}」这 ${evidenceFed.length} 条读取了证据盘点结果（当前完整度 ${r.completeness ?? ev.completeness ?? 0}%）。`
+                : `本步不单独读材料，输入来自证据盘点与案情描述（当前完整度 ${ev.completeness ?? 0}%）。`}
             </Basis>
           </BasisList>
         )
@@ -822,33 +999,46 @@ export default function EvalRun({
           <div>
             <ScoreBadge score={r.score} t={t} />
             <p className="text-sm text-muted mt-2 leading-relaxed">
-              按同类案件的判赔水平推算，本案最可能拿到 <b className="text-fg">{fmtNum(r.p50)} 万元</b> 左右
-              （偏保守的情形约 {fmtNum(r.p10)} 万元，顺利的情形可达 {fmtNum(r.p90)} 万元）。
-              相对预估的维权投入，大致能收回 <b className="text-fg">{fmtNum(r.return_multiple)} 倍</b>。
-              案情里交代的侵权规模对高判赔的支撑度为「{scaleLabel(r.scale_support)}」
-              {r.scale_support === 'low' ? '——规模证据偏弱，判赔可能贴着下限走。' : '。'}
+              {damagesParts(r, true).map((p, i) =>
+                p.bold ? (
+                  <b key={i} className="text-fg">{p.text}</b>
+                ) : (
+                  <span key={i}>{p.text}</span>
+                )
+              )}
             </p>
             <BasisList>
               <Basis title="证据依据">
                 <EvItems categories={['损害赔偿证据']} />
               </Basis>
-              <Basis title="规则与算法依据">
-                判赔区间不是拍脑袋给的：先以本案由的<b>法定赔偿区间</b>划定上下边界，
-                再参考<b>同类案件的判赔水平</b>定出中位锚点，最后结合案情里交代的侵权规模，
-                推出「偏保守 / 最可能 / 顺利」三种情形各自对应的判赔额。
-                「回报倍数」＝最可能的判赔额 ÷ 预估总成本（律师费、诉讼费、公证取证费等，按 8–15 万估）。
-                这一维度得 {fmtNum(r.score)} 分，会与回款能力一起经幂平均合成「业务预期」——
-                判得再多、收不回来也白搭；收得回来但判得太少，同样不划算，所以两者取的是短板。
+              <Basis
+                title="规则与算法依据"
+                hint="推导顺序：先以本案由的法定赔偿区间划定上下边界，再参照同类案件判赔水平定中位锚点，最后结合案情里的侵权规模推出三档金额。回报倍数 ＝ 最可能的判赔额 ÷ 预估总成本（律师费、诉讼费、公证取证费等，约 8–15 万元）。本维度与回款能力按短板效应合成业务预期：判得再多收不回来也白搭，收得回来但判得太少同样不划算。"
+              >
+                判赔额按「法定区间 → 同类案件水平 → 本案侵权规模」三步推得，本维度 {fmtNum(r.score)} 分。
               </Basis>
-              {(qccMetrics.damages_adjustment || (qccMetrics.time_extra_months ?? 0) > 0) && (
-                <Basis title="外部数据依据">
-                  被告的经营规模来自企查查查询，据此给出判赔调整「{qccMetrics.damages_adjustment ?? '基准'}」——
-                  线上店铺、APP、小程序、公众号、抖音号等销售渠道越多，说明侵权铺得越广、可主张的判赔越高
-                  （渠道 ≥5 个上调，商标资产 ≥20 件按成熟品牌上调，几乎无渠道则下调）。
-                  {(qccMetrics.time_extra_months ?? 0) > 0 && (
-                    <>同时预计诉讼周期会比常规多约 {qccMetrics.time_extra_months} 个月，
-                      这个延长量由被告的被诉历史件数、终本案件数与被执行次数累加而来。</>
-                  )}
+              <Basis title="外部数据依据">
+                <QccFacts facts={qccMetrics.facts} simulated={qccMetrics.simulated} />
+                {qccMetrics.facts?.scale_tier && (
+                  <p className="mt-1.5">
+                    被告规模档位：<b className="text-fg">{qccMetrics.facts.scale_tier}</b>
+                    （{qccMetrics.facts.scale_tier_basis}），仅用于核对被告体量，
+                    <b className="text-fg">不参与判赔金额计算</b>。
+                  </p>
+                )}
+                {(qccMetrics.time_extra_months ?? 0) > 0 && (
+                  <p className="mt-1.5">
+                    预计诉讼周期比常规多约 <b className="text-fg">{qccMetrics.time_extra_months}</b> 个月
+                    （由被诉历史、终本案件、被执行次数等累加）。
+                  </p>
+                )}
+              </Basis>
+              {r.external_conflict && (
+                <Basis title="材料与外部数据的矛盾">
+                  <span className="text-[var(--warning)]">{r.external_conflict}</span>
+                  <p className="mt-1.5">
+                    已据此下调对侵权规模的采信程度（见上方「规模支撑度」），判赔额按工商客观数据校正后的规模重算。
+                  </p>
                 </Basis>
               )}
               {r.analysis && <Basis title="模型判断">{r.analysis}</Basis>}
@@ -860,31 +1050,61 @@ export default function EvalRun({
         return (
           <div>
             {r.recovery_ability != null ? (
-              <ScoreBadge score={r.recovery_ability} t={t} />
+              <ScoreBadge score={r.recovery_ability} t={t} kind="recovery" />
             ) : (
               <span className="text-xs text-muted">未获取到被告企业画像，回款能力无法计算（业务预期将标注未完成）</span>
             )}
+            {/* 基准说明并入正文同一段：它是口径说明而非异常，不值得单独一块。
+                判定条件只看 signals_hit（规则表消费过的加扣分项）——
+                基准 78 之后「无信号」的含义仍是「没有下调依据」，要跟用户说清。 */}
             <p className="text-sm text-muted mt-2 leading-relaxed">
-              {r.recovery_ability != null
-                ? `赢了官司不等于拿得到钱。系统按被告的工商状态与涉诉记录，判断胜诉后实际能够收回款项的可能性约为 ${fmtNum(r.recovery_ability)}%。`
-                : '缺少被告的企业画像，这一步无法给出回款结论，业务预期会因此标记为未完成。'}
+              {r.recovery_ability != null ? (
+                <>
+                  赢了官司不等于拿得到钱。系统按被告的工商状态与涉诉记录，判断胜诉后实际能够收回款项的可能性约为{' '}
+                  {fmtNum(r.recovery_ability)}%。
+                  {(qccMetrics.facts?.signals_hit ?? 0) === 0 && (
+                    qccMetrics.time_only_hits?.length > 0
+                      ? ` 本次只查到 ${qccMetrics.time_only_hits.join('、')}，这类记录只计入诉讼周期（预估 +${qccMetrics.time_extra_months ?? 0} 个月），不扣减回款能力——${fmtNum(r.recovery_ability)} 分是「公开记录查不到偿付问题」的默认取值。`
+                      : ` 本次查询没有命中任何加扣分项，${fmtNum(r.recovery_ability)} 分是规则表对「公开记录查不到问题」的默认取值，不代表已核实被告具备偿付能力。`
+                  )}
+                </>
+              ) : (
+                '缺少被告的企业画像，这一步无法给出回款结论，业务预期会因此标记为未完成。'
+              )}
             </p>
             <BasisList>
-              <Basis title="外部数据依据">
-                回款能力的原始数据全部来自企查查的被告画像，共 8 个环节
-                {stageKeys.length > 0
-                  ? `，本次实际取到 ${stageKeys.length} 个环节的结果：${stageKeys.map(qccStageLabel).join('、')}。`
-                  : '（本次未取到阶段明细）。'}
-                查询口径是先按名称模糊搜索出候选主体，再按行业与所在地消歧后锁定被告本体，避免查错公司。
-                这一步全程不调用大模型，所以不消耗模型额度。
+              <Basis
+                title="外部数据依据"
+                hint="查询口径：先按名称模糊搜索候选主体，再用行业与所在地消歧、锁定被告本体，避免查错公司。全程不调用大模型。"
+              >
+                数据来自企查查被告画像，本次取到 {stageKeys.length} / 8 个环节
+                {stageKeys.length > 0 ? `：${stageKeys.map(qccStageLabel).join('、')}。` : '（未取到阶段明细）。'}
               </Basis>
-              <Basis title="规则与算法依据">
-                这一步不靠模型判断，而是套用一张固定的规则表——同一份材料无论跑多少次，结果都完全一样。
-                算法从「回款前景中性」的 50% 起算：被告每出现一项不利迹象就往下调
-                （失信、多次被执行、终本案件、经营异常、核心资产被冻结质押等），
-                每出现一项有利迹象就往上调（上市公司、财务公开、实际控制人有可追溯资产等）；
-                一旦出现注销、清算或破产重整，则因主体已不存在、判决无从执行，回款直接归零。
-                全部迹象叠加、并截断在 0–100% 之间后，就得到本步的回款可能性。
+              {stageKeys.length > 0 && (
+                <Basis title="8 环节明细">
+                  <div className="space-y-1">
+                    {stageKeys.map((k: string) => {
+                      const line = qccStageSummary(k, qccStages[k])
+                      // 「已获取 / —」这类没有信息量的行不占版面：读了等于没读
+                      if (!line || line === '—' || line === '已获取') return null
+                      return (
+                        <div key={k} className="text-sm flex gap-2 items-start">
+                          <span className="shrink-0 text-fg w-24">{qccStageLabel(k)}</span>
+                          <span className="text-muted min-w-0 break-words">{line}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </Basis>
+              )}
+              <Basis
+                title="规则与算法依据"
+                hint={`从 ${fmtNum(t.recovery_base ?? 78)} 分起算：失信 −60、被执行≥3次 −35、终本≥3次 −25、严重违法 −20、经营异常 −12、核心资产冻结质押≥3类 −45、欠税等轻微项各 −5（合计封顶 −10）；上市 +10、财务公开 +6、实控人有可追溯资产 +5。出现注销 / 清算 / 破产重整则直接归零。加减后截断在 0–100。规则写死在引擎里，同一份材料重跑结果完全一致。`}
+              >
+                {qccMetrics.recovery_delta != null && qccMetrics.recovery_delta !== 0
+                  ? `本次共命中加扣分项，合计 ${qccMetrics.recovery_delta > 0 ? '+' : ''}${fmtNum(qccMetrics.recovery_delta)} 分，
+                     ${fmtNum(t.recovery_base ?? 78)} → ${fmtNum(r.recovery_ability)} 分。`
+                  : `本次未命中任何加扣分项，维持在基准 ${fmtNum(r.recovery_ability)} 分。`}
               </Basis>
               <Basis title="风险与利好信号">
                 {r.red_flags?.length > 0 || r.green_flags?.length > 0 ? (
@@ -906,13 +1126,9 @@ export default function EvalRun({
                         </li>
                       ))}
                     </ul>
-                    <div>
-                      把这些迹象综合折算之后，本次胜诉后的回款可能性约为{' '}
-                      <b className="text-fg">{fmtNum(r.recovery_ability)}%</b>。
-                    </div>
                   </div>
                 ) : (
-                  '本次没有命中任何明显的不利或有利迹象，因此回款可能性停留在中性水平附近——既没有明显的收款障碍，也没有额外的加分项。'
+                  '未命中任何加扣分项。'
                 )}
               </Basis>
             </BasisList>
@@ -947,13 +1163,29 @@ export default function EvalRun({
       case 'synthesize': {
         const syn = d.result ?? {}
         const dimScore = (n: string) => result?.dimension_results?.[n]?.result?.score
+        const legal = syn.scores?.legal_feasibility
+        const biz = syn.scores?.business_expectation
         return (
           <div>
-            <p className="text-sm text-muted leading-relaxed">
-              这一步不重新判断案情，只是把前面已经算出的分数按固定公式合成两步：先分别聚合出「法律可行性」
-              与「业务预期」，再把两者合成本案的<b className="text-fg">主诉决策分</b>
-              {syn.scores?.final != null ? ` ${fmtNum(syn.scores?.final)} 分` : ''}。
-              结论建议、置信度、二维矩阵与节点级重跑都在「评估结果」里，这里只保留合成算法的推导过程。
+            {/* 与其他节点一致：结论分直接亮徽标，总分 + 两个上游分一眼可比 */}
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <span className="flex items-center gap-1.5">
+                <ScoreBadge score={syn.scores?.final} t={t} />
+                <span className="text-xs text-muted">主诉决策分</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <ScoreBadge score={legal} t={t} />
+                <span className="text-xs text-muted">法律可行性</span>
+              </span>
+              <span className="flex items-center gap-1.5">
+                <ScoreBadge score={biz} t={t} />
+                <span className="text-xs text-muted">业务预期</span>
+              </span>
+            </div>
+            <p className="text-sm text-muted leading-relaxed mt-2">
+              主诉决策分 {fmtNum(syn.scores?.final)}，由法律可行性 {fmtNum(legal)} 与业务预期 {fmtNum(biz)}
+              按短板效应合成——法律上站得住但收不回钱，或反过来，都不足以支撑起诉。
+              两步合成的逐步算式见下方「判断依据」。
             </p>
             {syn.missing?.length > 0 && (
               <div className="text-sm text-[var(--warning)] mt-2">
@@ -964,7 +1196,6 @@ export default function EvalRun({
             <BasisList>
               <Basis title="评分依据">
                 <div className="space-y-1.5">
-                  <div>下面三步用到的都是前面节点已经算出的分数，逐步读法：</div>
                   <div>
                     <b className="text-fg">法律可行性</b>：把权利基础 {fmtNum(dimScore('rights'))} 分、
                     侵权认定 {fmtNum(dimScore('infringement'))} 分、诉讼程序 {fmtNum(dimScore('procedure'))} 分，

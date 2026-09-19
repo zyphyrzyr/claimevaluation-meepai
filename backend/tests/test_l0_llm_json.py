@@ -23,9 +23,16 @@ from core import config
 from core.config import LLM_FAST_MODEL, LLM_STRONG_MODEL, STRONG_MODEL_NODES
 
 
-def _fake_response(content: str):
-    """伪造 urlopen 返回对象"""
-    body = json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+def _fake_response(content: str, finish_reason: str = "stop"):
+    """伪造 urlopen 返回对象。
+
+    finish_reason 必须能指定：它是区分「模型不会写 JSON」与「额度不够没写完」
+    的唯一证据，而截断重试这条路径完全靠它驱动。
+    """
+    body = json.dumps({
+        "choices": [{"message": {"content": content},
+                     "finish_reason": finish_reason}]
+    }).encode("utf-8")
     return io.BytesIO(body)
 
 
@@ -39,19 +46,34 @@ def llm_ready(monkeypatch):
         "llm_api_key": "test-key",
         "llm_base_url": "https://api.example.invalid",
     })
-    captured = {}
+    captured = {"requests": []}
 
     def fake_urlopen(req, timeout=None):
-        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        payload = json.loads(req.data.decode("utf-8"))
+        captured["requests"].append(payload)
+        captured["payload"] = payload
         captured["timeout"] = timeout
-        return _fake_response(captured["content"])
+        # 支持按调用次序给出不同响应：截断重试要先给一个断的、再给一个完整的
+        sequence = captured.get("sequence")
+        if sequence:
+            content, reason = sequence.pop(0)
+        else:
+            content = captured.get("content", "")
+            reason = captured.get("finish_reason", "stop")
+        return _fake_response(content, reason)
 
     monkeypatch.setattr(llm_gateway.urllib.request, "urlopen", fake_urlopen)
 
-    def respond(content: str):
+    def respond(content: str, finish_reason: str = "stop"):
         captured["content"] = content
+        captured["finish_reason"] = finish_reason
+
+    def respond_sequence(items):
+        """按调用次序给响应：[(内容, finish_reason), ...]"""
+        captured["sequence"] = list(items)
 
     captured["respond"] = respond
+    captured["respond_sequence"] = respond_sequence
     return captured
 
 
@@ -298,7 +320,8 @@ class TestProviderSwap:
         monkeypatch.setattr(llm_gateway, "_settings", config.get_runtime_settings)
 
         _call(llm_ready, '{"score": 80}', node="rights")
-        assert llm_ready["payload"]["max_tokens"] == 4000
+        assert (llm_ready["payload"]["max_tokens"]
+                == llm_gateway.DEFAULT_JSON_MAX_TOKENS)
 
     def test_every_llm_setting_is_env_driven(self, monkeypatch):
         """这五个键少一个可配，换供应商就得改源码——那就不是配置驱动了"""
@@ -463,3 +486,83 @@ class TestJsonModelFallback:
         llm_gateway.call_json("sys", "user", node="rights")
         assert cap["payload"]["model"] == "chat-x"
         assert cap["payload"].get("response_format") == {"type": "json_object"}
+
+
+# ============================================================
+# F. 输出预算：被 max_tokens 截断 ≠ 模型不会写 JSON
+# ============================================================
+
+class TestJsonOutputBudget:
+    """
+    法官归纳实测自然长度约 4600 tokens（system prompt 注入「可引用依据」块后更长）。
+    预算低于它时输出会在字符串中间断开，json.loads 报 "Unterminated string"，
+    而旧实现的报错只有一句「JSON 解析失败」——指向格式，真实原因却是额度。
+    库里 4 场真实庭审的法官归纳因此全部失败，且一直被当成格式问题排查。
+    """
+
+    def test_default_budget_leaves_room_for_the_judge_summary(self):
+        # 4608 是实测值，再留一档余量给更啰嗦的案子
+        assert llm_gateway.DEFAULT_JSON_MAX_TOKENS >= 8000
+
+    def test_retry_ceiling_stays_within_deepseek_limit(self):
+        assert llm_gateway.JSON_MAX_TOKENS_CEILING <= 8192
+
+
+class TestTruncationRetry:
+    """finish_reason=length 时放大预算重试一次——原样重发只会再断一次"""
+
+    GOOD = '{"score": 80, "analysis": "稳固"}'
+
+    def test_truncated_then_complete_is_retried_and_parsed(self, llm_ready):
+        llm_ready["respond_sequence"]([
+            (self.GOOD[:-3], "length"),   # 写到一半被掐断
+            (self.GOOD, "stop"),
+        ])
+        result = llm_gateway.call_json("sys", "user", node="rights", max_tokens=4000)
+        assert result["score"] == 80
+        budgets = [p["max_tokens"] for p in llm_ready["requests"]]
+        assert len(budgets) == 2, "截断必须触发重试"
+        assert budgets[1] > budgets[0], "重试必须放大预算，否则只是再断一次"
+
+    def test_complete_output_does_not_cost_a_second_request(self, llm_ready):
+        llm_ready["respond"](self.GOOD)
+        llm_gateway.call_json("sys", "user", node="rights", max_tokens=4000)
+        assert len(llm_ready["requests"]) == 1
+
+    def test_still_truncated_reports_length_not_format(self, llm_ready):
+        """重试后仍失败：报错必须带 finish_reason=length，否则又会误判成格式问题"""
+        llm_ready["respond_sequence"]([
+            (self.GOOD[:-3], "length"),
+            (self.GOOD[:-3], "length"),
+        ])
+        result = llm_gateway.call_json("sys", "user", node="rights", max_tokens=4000)
+        assert "error" in result
+        assert result["finish_reason"] == "length"
+        assert result["model"], "报错必须带上实际打的模型，否则无从判断是谁在截断"
+
+    def test_failed_retry_falls_back_to_the_first_response(self, monkeypatch, llm_ready):
+        """重试请求本身失败（供应商上限更低 → 400）时，不能把可诊断的失败顶掉"""
+        calls = []
+
+        def flaky_urlopen(req, timeout=None):
+            payload = json.loads(req.data.decode("utf-8"))
+            calls.append(payload)
+            if len(calls) == 1:
+                return _fake_response(self.GOOD[:-3], "length")
+            raise urllib.error.HTTPError(
+                "http://x", 400, "err", {},
+                io.BytesIO(json.dumps("max_tokens too large").encode()))
+
+        monkeypatch.setattr(llm_gateway.urllib.request, "urlopen", flaky_urlopen)
+        result = llm_gateway.call_json("sys", "user", node="rights", max_tokens=4000)
+        assert "error" in result
+        assert result["finish_reason"] == "length"
+        assert len(calls) == 2
+
+    def test_error_keeps_enough_raw_to_locate_the_break(self, llm_ready):
+        """raw 只留 500 字时，法官归纳在 7000 字处断开是根本看不见的"""
+        broken = '{"score": 80, "analysis": "' + "很长的分析" * 500
+        result = _call(llm_ready, broken)
+        assert "error" in result
+        assert llm_gateway.RAW_SNIPPET_LIMIT > 500
+        assert len(result["raw"]) == llm_gateway.RAW_SNIPPET_LIMIT

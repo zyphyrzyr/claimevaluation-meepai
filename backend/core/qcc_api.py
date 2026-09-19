@@ -5,12 +5,18 @@
 """
 
 import json
+import re
 import urllib.request
 import urllib.error
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from .config import get_runtime_settings
+from .config import (
+    get_runtime_settings,
+    RECOVERY_BASE_SCORE,
+    RECOVERY_TIER_OK,
+    RECOVERY_TIER_WEAK,
+)
 
 API_BASE = "https://agent.qcc.com/mcp"
 
@@ -159,7 +165,7 @@ def _rpc_failed(rpc_result: dict) -> str:
     """识别 RPC 失败并返回人类可读原因；无失败返回空串。
 
     专用于把被 _rpc_call 吞掉的 401 / 网络错误显式暴露出来，
-    避免上层把「鉴权失败」误当成「检索到 0 条」或「回款概率 50%」。
+    避免上层把「鉴权失败」误当成「检索到 0 条」或「回款能力 78 分」。
     """
     if not isinstance(rpc_result, dict):
         return ""
@@ -328,7 +334,7 @@ def _search_enterprise(d: dict) -> Dict:
         "_summary": "",
         "stages": {},
         "metrics": {
-            "recovery_probability": 50.0,
+            "recovery_probability": RECOVERY_BASE_SCORE,
             "damages_p50": None,
             "time_extra_months": 0,
             "red_flags": [],
@@ -393,12 +399,21 @@ def _search_enterprise(d: dict) -> Dict:
 
     # ── H: 指标计算 ──
     metrics = _stage_h_calc_metrics(stage_b, stage_c, stage_d, stage_e, stage_f, stage_g)
+    # 结构化事实在这里补而不是在阶段 H 里算：H 拿不到 A 阶段锁定的主体名，
+    # 而「所查的名字 vs 实际锁定的主体」是判断有没有查错人的唯一依据——
+    # 查错人会让后面所有事实都张冠李戴且毫无报错。
+    metrics["facts"] = _build_facts(
+        stage_a, stage_b, stage_c, stage_d, stage_f, stage_g,
+        metrics.get("red_flags", []), metrics.get("green_flags", []),
+        queried_name=name)
+    metrics["scale_tier"] = metrics["facts"]["scale_tier"]
     result["metrics"] = metrics
 
     # 最终摘要
     summary_parts.append("")
     summary_parts.append(f"💰 回款概率: {metrics['recovery_probability']:.0f}%")
-    summary_parts.append(f"📈 判赔调整: {metrics.get('damages_adjustment','基准')}")
+    summary_parts.append(f"📐 被告规模档位: {metrics.get('damages_adjustment','未分档')}"
+                         f"（{metrics.get('scale_tier_basis','无工商硬指标')}）")
     summary_parts.append(f"⏱ 时间延长: +{metrics['time_extra_months']}月")
     if metrics["red_flags"]:
         summary_parts.append(f"🚨 风险信号: {'; '.join(metrics['red_flags'][:5])}")
@@ -740,13 +755,41 @@ def _stage_g_litigation_timeline(locked_name: str) -> dict:
 
 
 # ── 阶段 H ──
+# ── 加减分罚则表（基准 RECOVERY_BASE_SCORE = 78，见 config）──────────────
+#
+# 为什么从乘法改成加减分：
+#   乘法下「有利信号」在高基准上会撞顶（78 × 1.3 = 101），而惩罚被稀释
+#   （经营异常 ×0.8 = 62，落在中性区间，不足以把回款打成弱）。
+#   加减分才能让「有不利往下扣、有利往上加」字面成立，且每一项都能在界面上
+#   写成人话——「失信被执行 −60」用户能核对，「×0.1」不能。
+PENALTY_DISHONEST = 60.0          # 失信：基本等于执行不能
+PENALTY_DEBTOR_GE3 = 35.0         # 被执行 >= 3 次
+PENALTY_TERMINATED_GE3 = 25.0     # 终本 >= 3 次
+PENALTY_COMBO_ALL3 = 15.0         # 失信 + 被执行 + 限高三项全有（叠加在上两项之上）
+PENALTY_SERIOUS_VIOLATION = 20.0  # 严重违法
+PENALTY_BUSINESS_EXCEPTION = 12.0  # 经营异常
+PENALTY_ASSET_FROZEN_GE3 = 45.0   # 核心资产冻结/质押 >= 3 类
+PENALTY_MINOR_EACH = 5.0          # 欠税 / 税收违法 / 行政处罚：单条轻微
+PENALTY_MINOR_CAP = 10.0          # 轻微项合计封顶，避免「千刀万剐」式累加
+
+BONUS_LISTING = 10.0              # 上市公司
+BONUS_FINANCIAL = 6.0             # 有公开财务数据
+BONUS_CONTROLLER_ASSET = 5.0      # 实控人有可追溯资产（逐人叠加）
+
+
 def _stage_h_calc_metrics(
     stage_b: dict, stage_c: dict, stage_d: dict,
     stage_e: dict, stage_f: dict, stage_g: dict
 ) -> dict:
-    """计算最终指标：回款概率、判赔调整系数、时间延量"""
+    """
+    计算最终指标：回款能力、时间延量、规模档位（加减分规则表）
+
+    起点 78（config.RECOVERY_BASE_SCORE）：公开记录查不到问题就按「可取回」处理，
+    不利往下扣、有利往上加，最后夹到 0–100。
+    """
     metrics = {
-        "recovery_probability": 50.0,
+        "recovery_probability": RECOVERY_BASE_SCORE,
+        "recovery_base": RECOVERY_BASE_SCORE,
         "damages_adjustment": "基准",
         "time_extra_months": 0,
         "red_flags": [],
@@ -754,116 +797,332 @@ def _stage_h_calc_metrics(
         "details": {},
     }
 
-    # ── 回款概率基础 50% ──
-    prob = 50.0
-
-    # P0 一票否决
+    # P0 一票否决：主体已经不存在，判决无从执行
     for label in ("注销记录", "清算信息", "破产重整"):
         if stage_d.get(label, {}).get("_count", 0) > 0:
-            prob = 0.0
             metrics["red_flags"].append(f"主体存续异常({label})")
+            metrics["recovery_probability"] = 0.0
+            metrics["damages_adjustment"] = "一票否决-主体存续异常"
+            return metrics
 
-    if prob == 0.0:
-        metrics["recovery_probability"] = 0.0
-        metrics["damages_adjustment"] = "一票否决-主体存续异常"
-        return metrics
+    delta = 0.0
 
-    # P1 失信/被执行/限高
+    # P1 核心偿付
     dishonest_count = stage_d.get("失信信息", {}).get("_count", 0)
     judgment_debtor_count = stage_d.get("被执行人", {}).get("_count", 0)
     high_consume_count = stage_d.get("限高消费", {}).get("_count", 0)
     terminated_count = stage_d.get("终本案件", {}).get("_count", 0)
 
     if dishonest_count > 0:
-        prob *= 0.1
+        delta -= PENALTY_DISHONEST
         metrics["red_flags"].append(f"失信被执行({dishonest_count}条)")
     if judgment_debtor_count >= 3:
-        prob *= 0.3
+        delta -= PENALTY_DEBTOR_GE3
         metrics["red_flags"].append(f"被执行≥3次({judgment_debtor_count}条)")
     if terminated_count >= 3:
-        prob *= 0.4
+        delta -= PENALTY_TERMINATED_GE3
         metrics["red_flags"].append(f"终本≥3次({terminated_count}条)")
     if dishonest_count > 0 and judgment_debtor_count > 0 and high_consume_count > 0:
-        prob *= 0.05
+        delta -= PENALTY_COMBO_ALL3
         metrics["red_flags"].append("失信+被执行+限高三项全有")
 
     # 严重违法 / 经营异常
     if stage_d.get("严重违法", {}).get("_count", 0) > 0:
-        prob *= 0.7
+        delta -= PENALTY_SERIOUS_VIOLATION
         metrics["red_flags"].append("严重违法")
     if stage_d.get("经营异常", {}).get("_count", 0) > 0:
-        prob *= 0.8
+        delta -= PENALTY_BUSINESS_EXCEPTION
         metrics["red_flags"].append("经营异常")
 
-    # P2 资产冻结/质押
+    # P2 资产可执行性
     frozen_count = 0
     for label in ("股权冻结", "动产抵押", "土地抵押", "股权出质", "股票质押"):
-        c = stage_d.get(label, {}).get("_count", 0)
-        if c > 0:
+        if stage_d.get(label, {}).get("_count", 0) > 0:
             frozen_count += 1
     if frozen_count >= 3:
-        prob *= 0.2
+        delta -= PENALTY_ASSET_FROZEN_GE3
         metrics["red_flags"].append(f"核心资产大面积冻结/质押({frozen_count}类)")
 
-    # 上市公司 → +30%
-    listing = stage_b.get("上市信息", {})
-    if listing.get("_count", 0) > 0:
-        prob *= 1.3
-        metrics["green_flags"].append("上市公司")
+    # P3 轻微合规瑕疵：此前采集了却不参与计算，界面上「命中了但分数不动」的
+    # 矛盾有一半来自这里。单条影响有限，故合计封顶，避免小额欠税压垮结论。
+    minor_hits = []
+    for label in ("欠税公告", "税收违法", "行政处罚"):
+        if stage_d.get(label, {}).get("_count", 0) > 0:
+            minor_hits.append(label)
+    if minor_hits:
+        delta -= min(PENALTY_MINOR_EACH * len(minor_hits), PENALTY_MINOR_CAP)
+        metrics["red_flags"].append(f"轻微合规瑕疵({'/'.join(minor_hits)})")
 
-    # 营收 > 阈值（从财务数据推断）
-    fin_data = stage_b.get("财务数据", {})
-    if fin_data.get("_items"):
-        # 有财务数据 = 企业经营规范 → 适当上调
-        prob *= 1.2
+    # 有利信号
+    if stage_b.get("上市信息", {}).get("_count", 0) > 0:
+        delta += BONUS_LISTING
+        metrics["green_flags"].append("上市公司")
+    if stage_b.get("财务数据", {}).get("_items"):
+        delta += BONUS_FINANCIAL
         metrics["green_flags"].append("有公开财务数据")
 
-    # 实际控制人失信
+    # 实际控制人：失信扣、有可追溯资产加
     for pname, pdata in stage_e.items():
         if pdata.get("scans", {}).get("失信", {}).get("_count", 0) > 0:
-            prob *= 0.6
+            delta -= PENALTY_DISHONEST * 0.5
             metrics["red_flags"].append(f"实控人{pname}失信")
-        # 实控人有可执行资产推断（有股权/投资 → 有财产）
         has_assets = pdata.get("scans", {}).get("股权冻结", {}).get("_count", 0) > 0
         if not has_assets and pdata.get("scans", {}).get("股权出质", {}).get("_count", 0) > 0:
             has_assets = True
         if has_assets:
-            prob *= 1.15
+            delta += BONUS_CONTROLLER_ASSET
             metrics["green_flags"].append(f"实控人{pname}有可追溯资产")
 
-    # 上限截断
-    prob = max(min(prob, 100), 0)
+    prob = max(min(RECOVERY_BASE_SCORE + delta, 100.0), 0.0)
     metrics["recovery_probability"] = round(prob, 1)
-
-    # ── 判赔调整系数 ──
-    channel_count = sum(
-        stage_f.get(k, {}).get("_count", 0)
-        for k in ("线上店铺", "APP信息", "小程序", "微信公众号", "抖音账号")
-    )
-    trademark_count = stage_f.get("商标资产", {}).get("_count", 0)
-
-    if channel_count >= 5:
-        metrics["damages_adjustment"] = "大规模侵权渠道 → 上调"
-    elif trademark_count >= 20:
-        metrics["damages_adjustment"] = "成熟品牌 → 上调"
-    elif channel_count == 0 and trademark_count == 0:
-        metrics["damages_adjustment"] = "小微型 → 下调"
-    else:
-        metrics["damages_adjustment"] = "中等规模 → 基准"
+    metrics["recovery_delta"] = round(delta, 1)
+    metrics["recovery_tier"] = (
+        "ok" if prob >= RECOVERY_TIER_OK
+        else "weak" if prob < RECOVERY_TIER_WEAK
+        else "neutral")
 
     # ── 时间延长量 ──
     case_count = stage_g.get("被诉历史", {}).get("_count", 0)
-    terminated_c = stage_d.get("终本案件", {}).get("_count", 0)
     extra_months = 0
     if case_count > 0:
         extra_months += min(case_count, 10)  # 每件被诉 +1月，封顶10月
-    if terminated_c > 0:
-        extra_months += terminated_c * 3  # 每个终本 +3月
+    if terminated_count > 0:
+        extra_months += terminated_count * 3  # 每个终本 +3月
     if judgment_debtor_count > 0:
         extra_months += judgment_debtor_count * 2
+    # 法院立案 / 裁判文书：此前只展示不计算，命中了却对周期毫无影响。
+    # 它们反映被告「官司缠身」，主要作用是拖长周期而非削弱偿付能力。
+    # 显式记录到 time_only_hits：界面上出现过「明细里写着法院立案 1 条、
+    # 下面却说没命中任何迹象」的自相矛盾，原因就是这类命中不进分数。
+    time_only_hits = []
+    filing_count = stage_d.get("法院立案", {}).get("_count", 0)
+    doc_count = stage_d.get("裁判文书", {}).get("_count", 0)
+    if filing_count > 0:
+        extra_months += min(filing_count, 6)
+        time_only_hits.append(f"法院立案{filing_count}条")
+    if doc_count > 0:
+        extra_months += min(doc_count, 6)
+        time_only_hits.append(f"裁判文书{doc_count}条")
     metrics["time_extra_months"] = extra_months
+    metrics["time_only_hits"] = time_only_hits
+
+    # ── 规模档位 ──
+    # 纯展示/审计标签。它不参与任何金额或分数计算——被告经营规模影响判赔的
+    # 法律通道是「侵权获利」，应由 LLM 在法定框架内判断，而非由外部数据机械乘除。
+    reg0 = _first_item(stage_b, "工商登记")
+    tier, basis = _classify_scale(
+        _num_from_cn(reg0.get("参保人数")),
+        _num_from_cn(reg0.get("注册资本")),
+    )
+    metrics["damages_adjustment"] = tier
+    metrics["scale_tier_basis"] = basis
 
     return metrics
+
+
+# ============================================================
+# 结构化事实（facts）
+# ============================================================
+#
+# 为什么需要：8 阶段 70+ 次 RPC 的明细此前只被解析器消费了一小部分
+# （recovery_probability 进评分、damages_adjustment 进文案），
+# 工商主体事实（统一社会信用代码、法定代表人、参保人数、登记状态…）
+# 既没进 LLM 的判赔推理，也没在界面上露出来——用户据此怀疑「根本没调企查查」。
+# facts 把散在各阶段的关键事实提炼成可直接展示 / 可直接注入 prompt 的结构。
+
+_FOREIGN_CURRENCIES = ("美元", "港元", "欧元", "日元", "英镑", "新元")
+
+
+def _first_item(stage: dict, label: str) -> dict:
+    """取某阶段某工具的原始明细第一条（工商登记/企业简介这类单主体数据只有一条）。"""
+    items = ((stage or {}).get(label) or {}).get("_items") or []
+    for it in items:
+        if isinstance(it, dict):
+            return it
+    return {}
+
+
+def _num_from_cn(value: Any) -> Optional[float]:
+    """从企查查的中文字段里抽数值：'104.167万元' → 104.167；'165' → 165.0
+
+    单位处理：含「亿」→ 折算成万元；含「万」→ 原值；外币单位与识别不出的一律 None
+    ——宁可留空也不做没把握的换算，否则会把 100 万美元当成 100 万元人民币。
+    """
+    if value is None:
+        return None
+    s = str(value).strip().replace(",", "")
+    if not s:
+        return None
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)", s)
+    if not m:
+        return None
+    try:
+        num = float(m.group(1))
+    except ValueError:
+        return None
+    if any(c in s for c in _FOREIGN_CURRENCIES):
+        return None
+    if "亿" in s:
+        return num * 10000
+    if "万" in s:
+        return num
+    # 无单位且本身是纯数字（参保数、各种计数）→ 原值
+    return num if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s) else None
+
+
+def _classify_scale(insured: Optional[float],
+                    capital_wan: Optional[float]) -> tuple:
+    """按工商硬指标分企业规模档位（仅产出标签，不参与金额计算）
+
+    为什么不用原来的「线上店铺/APP/小程序/抖音」计数：这些字段对多数行业
+    （尤其餐饮、制造）返回 0，channel_count 几乎恒为 0-1 → 所有案子都落
+    「中等规模 → 基准」，标签实际没有区分度（评测 P1-5）。
+    参保与注册资本是工商必填项，覆盖率与可解释性都好得多。
+    """
+    if insured is None and capital_wan is None:
+        return "未分档", "参保人数与注册资本均未取到"
+
+    ins = insured if insured is not None else 0.0
+    cap = capital_wan if capital_wan is not None else 0.0
+
+    parts = []
+    if insured is not None:
+        parts.append(f"参保 {int(ins)} 人")
+    if capital_wan is not None:
+        parts.append(f"注册资本 {cap:g} 万元")
+    basis = " / ".join(parts) or "无工商硬指标数据"
+
+    if ins >= 1000 or cap >= 10000:          # 1 亿 = 10000 万元
+        return "大型", basis
+    if ins >= 100 or cap >= 1000:
+        return "中型", basis
+    if ins < 20 and cap < 100:
+        return "小微", basis
+    return "中小型", basis
+
+
+def _build_facts(stage_a: dict, stage_b: dict, stage_c: dict, stage_d: dict,
+                 stage_f: dict, stage_g: dict, red_flags: List[str],
+                 green_flags: List[str], queried_name: str = "") -> dict:
+    """把 8 阶段明细压成 {entity, risk, scale, meta} 四组事实。
+
+    取不到就留空字符串/None，绝不回填占位值——前端与 prompt 都按「有没有值」渲染，
+    回填会让「没查到」看起来像「查到了」。
+    """
+    reg = _first_item(stage_b, "工商登记")
+    intro = _first_item(stage_b, "企业简介")
+
+    insured = _num_from_cn(reg.get("参保人数"))
+    capital_raw = reg.get("注册资本") or ""
+    capital_wan = _num_from_cn(capital_raw)
+    tier, basis = _classify_scale(insured, capital_wan)
+
+    # 企业名只取工商登记全量记录：阶段 A 的 locked_name 是模糊搜索挑出来的，
+    # 在孪生坏账里它可能就是那家「同名不同司」——把它当成已核实的事实用，
+    # 等于把最该被打问号的字段当成最可信的字段。搜索命中另行放在 locked_name，
+    # 两者并列展示，读者自己能看出「查到了名字但没拿到登记明细」。
+    locked_name = (stage_a or {}).get("locked_name") or ""
+
+    def cnt(container: dict, key: str) -> int:
+        return int(((container or {}).get(key) or {}).get("_count", 0) or 0)
+
+    industry = reg.get("国标行业")
+    if isinstance(industry, dict):
+        industry = industry.get("门类", "")
+
+    return {
+        "entity": {
+            "queried_name": queried_name,
+            "name": reg.get("企业名称") or "",
+            "locked_name": locked_name,
+            "credit_code": reg.get("统一社会信用代码") or "",
+            "legal_rep": reg.get("法定代表人", ""),
+            "reg_status": reg.get("登记状态", ""),
+            "established": reg.get("成立日期", ""),
+            "registered_capital": capital_raw,
+            "registered_capital_wan": capital_wan,
+            "insured_count": int(insured) if insured is not None else None,
+            "staff_scale": reg.get("人员规模", ""),
+            "industry": industry if isinstance(industry, str) else "",
+            "region": reg.get("所属地区", ""),
+            "match_status": (stage_a or {}).get("match_status", ""),
+            # 查的名字和实际锁定的主体不一致 = 张冠李戴风险，必须显式暴露
+            "name_matches_query": (not queried_name or queried_name == locked_name),
+        },
+        "risk": {
+            "deregistered": cnt(stage_d, "注销记录"),
+            "liquidation": cnt(stage_d, "清算信息"),
+            "bankruptcy": cnt(stage_d, "破产重整"),
+            "executed": cnt(stage_d, "被执行人"),
+            "dishonest": cnt(stage_d, "失信信息"),
+            "terminated": cnt(stage_d, "终本案件"),
+            "restricted": cnt(stage_d, "限高消费"),
+            "serious_violation": cnt(stage_d, "严重违法"),
+            "abnormal": cnt(stage_d, "经营异常"),
+            "court_filed": cnt(stage_d, "法院立案"),
+            "hit_dimensions": int((stage_c or {}).get("total_hit_dimensions", 0) or 0),
+        },
+        "scale": {
+            "trademark_count": cnt(stage_f, "商标资产"),
+            "online_shops": cnt(stage_f, "线上店铺"),
+            "app": cnt(stage_f, "APP信息"),
+            "miniprogram": cnt(stage_f, "小程序"),
+            "wechat_mp": cnt(stage_f, "微信公众号"),
+            "douyin": cnt(stage_f, "抖音账号"),
+            "bidding": cnt(stage_f, "招投标"),
+            "financing": cnt(stage_f, "融资记录"),
+            "honors": cnt(stage_f, "荣誉信息"),
+            "litigation_history": cnt(stage_g, "被诉历史"),
+        },
+        "financial_data_available": bool((stage_b or {}).get("财务数据", {}).get("_items")),
+        "signals_hit": len(red_flags or []) + len(green_flags or []),
+        "scale_tier": tier,
+        "scale_tier_basis": basis,
+    }
+
+
+def _build_individual_facts(name: str, stages: dict, metrics: dict) -> dict:
+    """自然人被告没有工商登记，事实退化为个人执行/失信/控股权三条。"""
+    dishonest_stage = (stages or {}).get("E_失信被执行限高") or {}
+    asset_stage = (stages or {}).get("E_资产状况") or {}
+    return {
+        "entity": {
+            "queried_name": name,
+            "name": name,
+            "locked_name": name,
+            "credit_code": "",
+            "legal_rep": "",
+            "reg_status": "自然人",
+            "established": "",
+            "registered_capital": "",
+            "registered_capital_wan": None,
+            "insured_count": None,
+            "staff_scale": "",
+            "industry": "",
+            "region": "",
+            "match_status": "",
+            "name_matches_query": True,
+        },
+        "risk": {
+            "deregistered": 0, "liquidation": 0, "bankruptcy": 0,
+            "executed": int(dishonest_stage.get("被执行", 0) or 0),
+            "dishonest": int(dishonest_stage.get("失信", 0) or 0),
+            "terminated": 0,
+            "restricted": int(dishonest_stage.get("限高", 0) or 0),
+            "serious_violation": 0, "abnormal": 0, "court_filed": 0,
+            "hit_dimensions": 0,
+        },
+        "scale": {
+            "trademark_count": 0, "online_shops": 0, "app": 0,
+            "miniprogram": 0, "wechat_mp": 0, "douyin": 0,
+            "bidding": 0, "financing": 0, "honors": 0,
+            "litigation_history": 0,
+        },
+        "financial_data_available": False,
+        "signals_hit": len(metrics.get("red_flags") or []) + len(metrics.get("green_flags") or []),
+        "scale_tier": "自然人",
+        "scale_tier_basis": "被告为自然人，无工商登记盘",
+    }
 
 
 # ============================================================
@@ -877,7 +1136,8 @@ def _search_individual(d: dict) -> Dict:
         "_summary": "",
         "stages": {},
         "metrics": {
-            "recovery_probability": 50.0,
+            "recovery_probability": RECOVERY_BASE_SCORE,
+            "recovery_base": RECOVERY_BASE_SCORE,
             "damages_p50": None,
             "time_extra_months": 0,
             "red_flags": [],
@@ -898,19 +1158,22 @@ def _search_individual(d: dict) -> Dict:
         result["_summary"] = f"❌ {fail}"
         return result
 
+    # 与企业侧同一张加减分表：起始 RECOVERY_BASE_SCORE，不利往下扣、有利往上加
+    delta = 0.0
+
     # 失信 / 被执行 / 限高
     dishonest = _safe_call("get_executive_dishonest", pname, server="executive",
                            extra_args={"personName": pname})
     if _count_items(dishonest) > 0:
         result["metrics"]["red_flags"].append(f"失信被执行人")
-        result["metrics"]["recovery_probability"] *= 0.1
+        delta -= PENALTY_DISHONEST
 
     debtor = _safe_call("get_executive_judgment_debtor", pname, server="executive",
                         extra_args={"personName": pname})
     jd_count = _count_items(debtor)
     if jd_count >= 3:
         result["metrics"]["red_flags"].append(f"被执行人≥{jd_count}次")
-        result["metrics"]["recovery_probability"] *= 0.3
+        delta -= PENALTY_DEBTOR_GE3
 
     high_consume = _safe_call("get_executive_high_consumption_ban", pname, server="executive",
                                extra_args={"personName": pname})
@@ -929,7 +1192,7 @@ def _search_individual(d: dict) -> Dict:
     cc_count = _count_items(controlled)
     if cc_count > 0:
         result["metrics"]["green_flags"].append(f"控制{cc_count}家企业")
-        result["metrics"]["recovery_probability"] *= 1.2
+        delta += BONUS_CONTROLLER_ASSET
 
     # 股权冻结/质押
     eq_freeze = _safe_call("get_executive_equity_freeze", pname, server="executive",
@@ -949,11 +1212,18 @@ def _search_individual(d: dict) -> Dict:
     }
 
     # 最终计算
-    result["metrics"]["recovery_probability"] = round(
-        max(min(result["metrics"]["recovery_probability"], 100), 0), 1
-    )
+    prob = max(min(RECOVERY_BASE_SCORE + delta, 100.0), 0.0)
+    result["metrics"]["recovery_probability"] = round(prob, 1)
+    result["metrics"]["recovery_delta"] = round(delta, 1)
+    result["metrics"]["recovery_tier"] = (
+        "ok" if prob >= RECOVERY_TIER_OK
+        else "weak" if prob < RECOVERY_TIER_WEAK
+        else "neutral")
     result["metrics"]["time_extra_months"] = jd_count * 2
     result["metrics"]["damages_adjustment"] = "自然人 → 上限下调" if cc_count == 0 else "有控制企业 → 基准"
+    result["metrics"]["facts"] = _build_individual_facts(
+        pname, result["stages"], result["metrics"])
+    result["metrics"]["scale_tier"] = "自然人"
 
     summary_parts.append(f"💰 回款概率: {result['metrics']['recovery_probability']:.0f}%")
     if result["metrics"]["red_flags"]:

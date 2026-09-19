@@ -12,7 +12,7 @@ import math
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import evaluate_nodes, scoring
+from . import evaluate_nodes, scoring, damages_wording
 from .case_context import CaseContext
 from .config import get_runtime_settings
 from .evidence_review import review_evidence
@@ -251,6 +251,34 @@ class Orchestrator:
             except Exception:
                 pass
 
+    def _pkulaw_session(self):
+        """一次评估共用的类案检索预算账本（见 pkulaw/precedent_ladder）。
+
+        多个节点都要类案，各自记账的话一次评估会跑掉二十几次 RPC，
+        串行起来足以让演示超时——所以账本挂在编排器上，按整轮评估统一限额。
+        """
+        if getattr(self, "_ladder_session", None) is None:
+            from .pkulaw.precedent_ladder import LadderSession
+            self._ladder_session = LadderSession()
+        return self._ladder_session
+
+    def _pkulaw_hint(self):
+        """汇总可用的地域线索，供类案检索的顺位③换算本省高级人民法院。
+
+        省份来源优先级（用户 2026-09-19 定：被告工商所在地兜底）：
+        工商登记「所属地区」> 被告 location_hint > 案情描述。管辖法院系统不采集，
+        顺位④跳过并写明原因，不猜。
+        """
+        from .pkulaw.court_resolver import hint_from_case
+        profile = getattr(self.ctx, "defendant_profile", None) or {}
+        facts = (profile.get("metrics") or {}).get("facts") or {}
+        entity = facts.get("entity") or {}
+        return hint_from_case(
+            region=entity.get("region") or "",
+            location_hint=(self.ctx.defendant_info or {}).get("location_hint") or "",
+            case_description=self.ctx.case_description or "",
+        )
+
     def _retrieve_legal_pkulaw(self, node: str):
         """法律可行性三节点接入北大法宝：检索权利基础 / 侵权认定 / 诉讼程序相关法条与类案。
 
@@ -267,7 +295,10 @@ class Orchestrator:
             if node == "rights":
                 return pkulaw_api.search_for_rights_foundation(self.ctx.cause_type)
             if node == "infringement":
-                return pkulaw_api.search_for_infringement(self.ctx.cause_type)
+                return pkulaw_api.search_for_infringement(
+                    self.ctx.cause_type,
+                    hint=self._pkulaw_hint(),
+                    session=self._pkulaw_session())
             return pkulaw_api.search_for_procedure()
         except Exception as e:  # 检索异常不应让评估节点挂掉
             return {"status": "error", "error": str(e)[:200],
@@ -400,8 +431,37 @@ class Orchestrator:
         ctx = self.ctx
         cb = self.on_event
         if ctx.goal_type == "要钱":
-            # 判赔规模（LLM）× 回款能力（企查查规则，零 LLM）
-            _step(cb, "business", "第一步：评估判赔规模（结合同类案件判赔区间）")
+            # 顺序为什么必须是「先查被告 → 再算回款 → 最后算判赔」：
+            # 判赔规模要参照被告的经营规模与偿付背景，企查查排在判赔之后，等于让 LLM
+            # 在没有任何工商事实的情况下估判赔额，只能照抄案卷里的自述数字——实测出现
+            # 材料称门店 2268 家、工商实查参保 165 人，系统全程无人质疑的情形。
+            # 企查查失败不阻塞：facts 为空 → 注入块为空串 → 判赔照常按案情估算。
+            profile = self._fetch_defendant_profile()
+            prof_err = profile.get("error") if isinstance(profile, dict) else "画像返回格式异常"
+            metrics = profile.get("metrics", {}) if isinstance(profile, dict) else {}
+            ctx.defendant_profile = profile
+            ctx.recovery_ability = metrics.get("recovery_probability")
+            self._set_dim("recovery",
+                              {"recovery_ability": ctx.recovery_ability,
+                               "red_flags": metrics.get("red_flags", []),
+                               "green_flags": metrics.get("green_flags", []),
+                               "facts": metrics.get("facts") or {}},
+                              status="failed" if prof_err else "ok",
+                              error=prof_err)
+            _step(cb, "business",
+                  (f"第二步：按规则计算回款能力：{_fmt_score(ctx.recovery_ability)} 分"
+                   + (f"，被告规模档位「{metrics.get('damages_adjustment')}」"
+                      if metrics.get("damages_adjustment") else "")
+                   + (f"，预计诉讼周期延长 {metrics.get('time_extra_months')} 个月"
+                      if metrics.get("time_extra_months") else "")),
+                  status="failed" if prof_err else "ok",
+                  detail="；".join(
+                      [f"风险信号：{f}" for f in (metrics.get("red_flags") or [])[:3]]
+                      + [f"利好信号：{f}" for f in (metrics.get("green_flags") or [])[:3]]
+                  ))
+            self.control.pause_point(cb)
+
+            _step(cb, "business", "第三步：结合被告工商事实评估判赔规模")
             damages: Dict[str, Any] = {}
             try:
                 damages = evaluate_nodes.evaluate_damages(ctx, use_mock=self.mock)
@@ -410,48 +470,15 @@ class Orchestrator:
                                   error=damages.get("error"))
             except Exception as e:
                 self._set_dim("damages", {}, status="failed", error=str(e))
-            _step(cb, "business",
-                  (f"判赔规模完成：{_fmt_score(damages.get('score'))} 分"
-                   + (f"，参考区间 P10 {_fmt_score(damages.get('p10'))} 万 / "
-                      f"P50 {_fmt_score(damages.get('p50'))} 万 / "
-                      f"P90 {_fmt_score(damages.get('p90'))} 万"
-                      if damages.get("p50") is not None else "")),
+            # 判赔文案统一走 damages_wording：p10/p50/p90 是数据字段名，
+            # 直接印在时间线上没人看得懂，这里输出的是「保守估计/最可能/争取上限」。
+            _step(cb, "business", damages_wording.damages_step_text(damages),
                   status="failed" if damages.get("error") else "ok",
                   detail=str(damages.get("analysis") or damages.get("error") or "")[:400])
-
-            if self.mock:
-                from .mock import mock_defendant_profile
-                profile = mock_defendant_profile()
-                _mcp(cb, "business", "企查查", "查询被告的工商、经营与风险状况（当前为模拟数据）",
-                     status="warning", detail="USE_MOCK=True，未发起真实外部调用")
-            else:
-                _step(cb, "business", "第二步：向企查查查询被告的经营与风险状况（共 8 个环节）")
-                from .qcc_api import search_for_financial_qcc_full
-                try:
-                    profile = search_for_financial_qcc_full(ctx.defendant_info)
-                except Exception as e:
-                    profile = {"error": str(e)}
-                self._emit_qcc_stages(profile)
-            ctx.defendant_profile = profile
-            metrics = profile.get("metrics", {}) if isinstance(profile, dict) else {}
-            ctx.recovery_ability = metrics.get("recovery_probability")
-            self._set_dim("recovery",
-                              {"recovery_ability": ctx.recovery_ability,
-                               "red_flags": metrics.get("red_flags", []),
-                               "green_flags": metrics.get("green_flags", [])},
-                              status="failed" if profile.get("error") else "ok",
-                              error=profile.get("error"))
-            _step(cb, "business",
-                  (f"第三步：按规则计算回款能力：{_fmt_score(ctx.recovery_ability)} 分"
-                   + (f"，判赔调整「{metrics.get('damages_adjustment')}」"
-                      if metrics.get("damages_adjustment") else "")
-                   + (f"，预计诉讼周期延长 {metrics.get('time_extra_months')} 个月"
-                      if metrics.get("time_extra_months") else "")),
-                  status="failed" if profile.get("error") else "ok",
-                  detail="；".join(
-                      [f"风险信号：{f}" for f in (metrics.get("red_flags") or [])[:3]]
-                      + [f"利好信号：{f}" for f in (metrics.get("green_flags") or [])[:3]]
-                  ))
+            conflict = damages.get("external_conflict")
+            if conflict:
+                _step(cb, "business", "材料陈述与工商数据存在矛盾，已在判赔推理中校正",
+                      status="warning", detail=str(conflict)[:300])
         else:
             _step(cb, "business", "按判例价值维度评估业务预期（检索同类在先判决）")
             try:
@@ -463,6 +490,31 @@ class Orchestrator:
                 self._set_dim("precedent", {}, status="failed", error=str(e))
 
         self._record_business_rollup()
+
+    def _fetch_defendant_profile(self) -> Dict[str, Any]:
+        """
+        拉取被告画像（8 阶段）。提取为独立方法，是因为它现在是 **damages 的上游**——
+        原先内联在 _run_business 里时位于 damages 之后，判赔节点跑的时候
+        ctx.defendant_profile 还是空的，LLM 只能照抄案卷自述规模。
+
+        失败一律返回带 error 的字典，由调用方决定是否降级：外部增强项失败
+        不应拖垮判赔主链路，所以这里不抛异常。
+        """
+        cb = self.on_event
+        if self.mock:
+            from .mock import mock_defendant_profile
+            _mcp(cb, "business", "企查查", "查询被告的工商、经营与风险状况（当前为模拟数据）",
+                 status="warning", detail="USE_MOCK=True，未发起真实外部调用")
+            return mock_defendant_profile()
+
+        _step(cb, "business", "第一步：向企查查查询被告的经营与风险状况（共 8 个环节）")
+        from .qcc_api import search_for_financial_qcc_full
+        try:
+            profile = search_for_financial_qcc_full(self.ctx.defendant_info)
+        except Exception as e:
+            profile = {"error": str(e)}
+        self._emit_qcc_stages(profile)
+        return profile
 
     def _emit_qcc_stages(self, profile: Dict[str, Any]) -> None:
         """

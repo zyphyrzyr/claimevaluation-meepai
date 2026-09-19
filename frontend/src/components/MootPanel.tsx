@@ -27,6 +27,28 @@ export interface MootJudgeInfo {
    * 两者都是空 summary，但用户看到的解释必须不一样。
    */
   from_history?: boolean
+  /**
+   * 系数从哪来。此前系数是法官 LLM 顺手给的一个数，问「为什么 0.85」答不出来；
+   * 现在由 10 项子分推导，这里记录取值链走到了哪一级，界面要如实说出来。
+   */
+  coefficient_source?: 'derived' | 'model' | 'fallback'
+  /** 推导明细：两侧加权强度 + 人话算式 + 是否被裁剪到边界 */
+  coefficient_detail?: {
+    coefficient: number
+    source: string
+    plaintiff?: number | null
+    defendant?: number | null
+    model_value?: number | null
+    clamped: boolean
+    formula: string
+  }
+}
+
+/** 取值链的人话标签：用户看到的必须是「怎么来的」，而不是内部枚举名 */
+export const COEFF_SOURCE_LABEL: Record<string, string> = {
+  derived: '由原被告 10 项子分推导',
+  model: '子项评分不齐，采用法官自评',
+  fallback: '无可用依据，按不修正计入',
 }
 
 export interface MootScoresUpdated {
@@ -297,7 +319,30 @@ export default function MootPanel({
                 <div className="text-3xl font-medium text-fg mt-1.5 tabular-nums">
                   {judge!.correction_coefficient ?? '—'}
                 </div>
-                <div className="text-[10px] text-muted mt-1.5">范围 0.70 – 1.30</div>
+                {/*
+                  系数下方优先显示「怎么算出来的」，而不是恒显示区间。
+                  数字本身对用户没有意义——0.85 和 0.90 的差别他判断不了，
+                  但「原告论证 69 ÷ 被告抗辩 83」他一眼能看懂并自行核对。
+                  取不到明细（历史回填）时才退回区间提示。
+                */}
+                {judge!.coefficient_detail?.formula ? (
+                  <div className="mt-1.5 space-y-1">
+                    <div className="text-[11px] text-fg leading-relaxed tabular-nums">
+                      {judge!.coefficient_detail!.formula}
+                    </div>
+                    <div className="text-[10px] text-muted leading-relaxed">
+                      {COEFF_SOURCE_LABEL[judge!.coefficient_detail!.source] ??
+                        judge!.coefficient_detail!.source}
+                    </div>
+                    {judge!.coefficient_detail!.clamped && (
+                      <div className="text-[10px] text-[var(--warning)] leading-relaxed">
+                        原始比值已超出 0.70–1.30，按边界取值
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-muted mt-1.5">范围 0.70 – 1.30</div>
+                )}
               </div>
 
               {judge!.defense_strength > 0 && (

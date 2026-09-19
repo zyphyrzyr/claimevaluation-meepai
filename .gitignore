@@ -22,3 +22,6 @@ frontend/.npm-cache/
 
 # Vite 临时产物
 frontend/vite.config.ts.timestamp-*.mjs
+
+# WorkBuddy 项目备忘（本地，不入库）
+.workbuddy/

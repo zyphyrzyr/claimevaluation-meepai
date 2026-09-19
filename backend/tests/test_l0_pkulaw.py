@@ -120,7 +120,7 @@ class TestQueriesFollowTheSelectedCause:
     def _capture(monkeypatch):
         calls = []
 
-        def fake_rpc(tool_name, args):
+        def fake_rpc(tool_name, args, timeout=25):
             calls.append((tool_name, args))
             return {"result": {"content": [{"text": "[]"}]}}
 

@@ -239,15 +239,71 @@ def _validate_payload(payload: Dict[str, Any], node: Optional[str]) -> Optional[
     return None
 
 
+# ── JSON 节点的输出预算 ────────────────────────────────────
+# 法官归纳实测自然长度约 4600 tokens（system prompt 注入「可引用依据」块后更长）。
+# 原来的默认 4000 会在输出中途截断：finish_reason=length，JSON 断在字符串中间，
+# json.loads 报 "Unterminated string"，而 call_json 只回一句「JSON 解析失败」——
+# 报错文案指向格式，真实原因却是额度，这个错位让排查绕了很久（库里 4 场真实
+# 庭审的法官归纳因此全部失败）。
+# 8000 取 deepseek-chat 的 8192 上限留一点余量。其余节点实际用不到 4000，
+# 放宽默认值不会让它们真的多花钱：max_tokens 是上限，不是预扣。
+DEFAULT_JSON_MAX_TOKENS = 8000
+
+# 撞上上限时重试的倍数与天花板。天花板是必需的：各供应商单次输出上限不一致
+# （deepseek-chat 是 8192，别家可能更低），无上限翻倍会直接 400，
+# 把一次「可诊断的截断」变成一个新异常，比不重试还糟。
+JSON_TRUNCATION_RETRY_FACTOR = 2
+JSON_MAX_TOKENS_CEILING = 8192
+
+# 报错时回显的原始输出长度。原来是 500，而法官归纳的截断位置在 7000 字开外，
+# 500 字之后断在哪永远看不到，现场无法自证。
+RAW_SNIPPET_LIMIT = 2000
+
+
+def _json_attempt(system_prompt: str, user_prompt: str, model: str,
+                  temperature: float, max_tokens: int):
+    """
+    发一次 JSON 请求，返回 (finish_reason, 原始输出)。
+
+    单独抽出来是因为截断重试要再发一次，而 HTTPResponse 只能读一次——
+    不抽函数就得把请求体的构造复制两遍。
+    finish_reason 必须一起带回来：它是区分「模型不会写 JSON」和
+    「额度不够没写完」的唯一证据，丢了就只能靠猜（见 DEFAULT_JSON_MAX_TOKENS）。
+    """
+    resp = _post_chat(
+        [{"role": "system", "content": system_prompt},
+         {"role": "user", "content": user_prompt}],
+        model, temperature, max_tokens, json_mode=True,
+    )
+    body = json.loads(resp.read().decode("utf-8"))
+    choice = body["choices"][0]
+    return choice.get("finish_reason"), (choice["message"]["content"] or "")
+
+
+def _json_error(problem: str, raw: str, finish_reason, model: str) -> Dict[str, Any]:
+    """
+    统一的失败返回。除 error / raw 外固定带上 finish_reason 与 model：
+    没有这两个字段，界面上就只有一句「JSON 解析失败」，既分不清是格式问题
+    还是额度问题，也不知道当时打的是哪个模型。
+    """
+    return {"error": problem,
+            "raw": raw[:RAW_SNIPPET_LIMIT],
+            "finish_reason": finish_reason,
+            "model": model}
+
+
 def call_json(system_prompt: str, user_prompt: str, *,
               node: Optional[str] = None, temperature: float = 0.2,
-              max_tokens: int = 4000) -> Dict[str, Any]:
+              max_tokens: int = DEFAULT_JSON_MAX_TOKENS) -> Dict[str, Any]:
     """
     结构化 JSON 输出（评估节点、法官归纳）。
 
     失败一律返回含 "error" 的 dict 而不抛异常——编排器据此把节点标 failed 并让
     下游失效，而不是让整轮评估中断。调用方（orchestrator._run_llm_node 等）
     通过 "error" in result 判定，不要改成抛异常。
+
+    输出被 max_tokens 掐断时（finish_reason="length"）会放大预算自动重试一次，
+    因为那不是模型不会写 JSON，原样重发只会再断一次。
     """
     model = pick_model(node)
     # JSON 节点必须走「支持 json 模式」的模型，否则推理模型（如 deepseek-reasoner）
@@ -260,24 +316,36 @@ def call_json(system_prompt: str, user_prompt: str, *,
         fallback = next(iter(whitelist), None)
         if fallback:
             model = fallback
-    resp = _post_chat(
-        [{"role": "system", "content": system_prompt},
-         {"role": "user", "content": user_prompt}],
-        model, temperature, max_tokens, json_mode=True,
-    )
-    result = json.loads(resp.read().decode("utf-8"))
-    raw = _clean_json(result["choices"][0]["message"]["content"])
+
+    finish_reason, content = _json_attempt(
+        system_prompt, user_prompt, model, temperature, max_tokens)
+
+    retry_budget = min(max_tokens * JSON_TRUNCATION_RETRY_FACTOR,
+                       JSON_MAX_TOKENS_CEILING)
+    if finish_reason == "length" and retry_budget > max_tokens:
+        # 输出没写完就被掐断。放大预算再要一次；重试本身失败（供应商上限比我们
+        # 给的额度更低，会 400）就沿用第一次的结果——兜底动作不能把一次
+        # 本来可诊断的失败顶掉，那比不重试更糟。
+        first_reason, first_content = finish_reason, content
+        try:
+            finish_reason, content = _json_attempt(
+                system_prompt, user_prompt, model, temperature, retry_budget)
+        except LLMError:
+            finish_reason, content = first_reason, first_content
+
+    raw = _clean_json(content)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return {"error": "JSON 解析失败", "raw": raw[:500]}
+        return _json_error("JSON 解析失败", raw, finish_reason, model)
 
     if not isinstance(payload, dict):
-        return {"error": f"返回结构不是 JSON 对象：{type(payload).__name__}", "raw": raw[:500]}
+        return _json_error(f"返回结构不是 JSON 对象：{type(payload).__name__}",
+                           raw, finish_reason, model)
 
     problem = _validate_payload(payload, node)
     if problem:
-        return {"error": problem, "raw": raw[:500]}
+        return _json_error(problem, raw, finish_reason, model)
     return payload
 
 

@@ -13,7 +13,7 @@ from datetime import datetime
 
 from ..config import (CAUSE_TRADEMARK, SUPPORTED_CAUSE_TYPES,
                       GOAL_TYPES, RUNTIME_DIR)
-from .pkulaw_api import CAUSE_SEARCH_PROFILE, TOOL_ENDPOINTS
+from .pkulaw_api import CAUSE_SEARCH_PROFILE, TOOL_ENDPOINTS, five_years_ago
 
 DATA_DIR = RUNTIME_DIR  # 挂在 config.DATA_DIR 下，随 SOFT_IP_DATA_DIR 一起被测试隔离
 
@@ -162,7 +162,9 @@ def generate_all_queries(case_id: str, cause_type: str = CAUSE_TRADEMARK,
                     "query": prof["damages_query"],
                     "case_type": "民事案件",
                     "doc_type": "判决书",
-                    "decision_date_start": "2020-01-01",
+                    # 与 pkulaw_api.search_for_financial 同源的时间窗口——
+                    # 计划与执行用同一个函数算，避免「计划写五年、执行写死 2020-01-01」
+                    "decision_date_start": five_years_ago(),
                     "size": 5,
                     "purpose": "检索近年判赔类案，校准判赔区间"
                 }

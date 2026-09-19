@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 from core.auth import case_owned, case_readable
 from core.case_context import CaseContext
 from core.config import (SCORE_THRESHOLD_GO, SCORE_THRESHOLD_PATCH,
-                         QUADRANT_AXIS_MID, POWER_MEAN_P)
+                         QUADRANT_AXIS_MID, POWER_MEAN_P,
+                         RECOVERY_BASE_SCORE, RECOVERY_TIER_OK,
+                         RECOVERY_TIER_WEAK)
 from core.database import Case, ScoreSnapshot, AuditEvent, get_db
 from core.orchestrator import (Orchestrator, NODE_ORDER, NODE_LABELS,
                                BUSINESS_DIMENSIONS, RERUNNABLE_NODES)
@@ -400,6 +402,11 @@ def evaluation_result(case_id: str, db: Session = Depends(get_db),
             "patch": SCORE_THRESHOLD_PATCH,
             "quadrant_mid": QUADRANT_AXIS_MID,
             "power_mean_p": POWER_MEAN_P,
+            # 回款能力是概率型指标，中性点不等于决策分的 62/78，档位单独下发，
+            # 否则前端只能再硬编码一份，两处必然漂移。
+            "recovery_base": RECOVERY_BASE_SCORE,
+            "recovery_ok": RECOVERY_TIER_OK,
+            "recovery_weak": RECOVERY_TIER_WEAK,
         },
     }
 
