@@ -8,7 +8,8 @@ import json
 import re
 import urllib.request
 import urllib.error
-from typing import Dict, List
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from ..config import get_runtime_settings
 
@@ -107,8 +108,12 @@ def _pkulaw_unconfigured_result() -> Dict:
     }
 
 
-def _rpc_call(tool_name: str, args: dict) -> Dict:
-    """通用 PKULaw JSON-RPC 调用"""
+def _rpc_call(tool_name: str, args: dict, timeout: int = 25) -> Dict:
+    """通用 PKULaw JSON-RPC 调用。
+
+    timeout 可覆盖：四顺位级联每次调用给 10s（预算由 precedent_ladder 记账），
+    默认 25s 用于一次性调用（法条检索、核验）。
+    """
     endpoint = TOOL_ENDPOINTS.get(tool_name, "mcp-law-search-service")
     url = f"{API_BASE}/{endpoint}"
     payload = {
@@ -119,7 +124,7 @@ def _rpc_call(tool_name: str, args: dict) -> Dict:
     }
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=_pkulaw_headers())
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
         return {"error": str(e)[:200]}
@@ -137,6 +142,21 @@ def _rpc_call(tool_name: str, args: dict) -> Dict:
         return {"error": f"SSE 解析失败: {raw[:200]}"}
 
 
+def _rpc_text(rpc_result) -> str:
+    """取出 result.content[0].text（无论它是 JSON 列表还是散文）。"""
+    if not isinstance(rpc_result, dict):
+        return ""
+    r = rpc_result.get("result")
+    if not isinstance(r, dict):
+        return ""
+    content = r.get("content")
+    if isinstance(content, list) and content:
+        first = content[0]
+        if isinstance(first, dict):
+            return str(first.get("text") or "")
+    return ""
+
+
 def _rpc_failed(rpc_result) -> str:
     """识别 RPC 失败并返回人类可读原因；无失败返回空串。
 
@@ -150,6 +170,20 @@ def _rpc_failed(rpc_result) -> str:
     """
     if not isinstance(rpc_result, dict):
         return ""
+    # 注意：**先**查参数校验，再查 error 键。
+    #
+    # 2026-09-19 实跑确认：参数键拼错（如 courthouse=）的接口返回形态是
+    # HTTP **200** + content[0].text = "1 validation error for call[search_case]
+    # … Extra inputs are not permitted"，**没有 error 键**。若沿用旧写法
+    # `if not err: return ""`，就会在这里提前返回空串，把「参数写错」判成
+    # 「调用成功」，下游 _extract_items 返回 [] → 报告称「检索到 0 条类案」。
+    # 与真实的零命中完全无法区分，是本项目最容易埋雷的一种静默失败。
+    body = _rpc_text(rpc_result)
+    low = body[:400].lower()
+    if "validation error" in low or "extra inputs are not permitted" in low:
+        detail = body.strip().replace("\n", " ")[:200]
+        return f"北大法宝参数校验失败（参数名不受支持）：{detail}"
+
     err = rpc_result.get("error")
     if not err:
         return ""
@@ -164,12 +198,92 @@ def _rpc_failed(rpc_result) -> str:
         return "北大法宝鉴权失败(401)：PKULAW_API_TOKEN 无效或已过期"
     if "403" in err_text or "Forbidden" in err_text:
         return "北大法宝无权限(403)：该 token 未开通对应工具"
-    return f"北大法宝调用失败：{err_text}"
+    # 网络层/传输层失败：_rpc_call 把它塞进了 error 字符串（没有 content 正文）
+    if err_text:
+        return f"北大法宝调用失败：{err_text}"
+    return ""
+
+
+def five_years_ago() -> str:
+    """评估发起日 − 5 年 → YYYY-MM-DD（规则文档第四节「近五年」）。
+
+    此前写死 "2020-01-01"，逐年漂移成六年窗口。闰日走到 2 月 29 日时回退到 28 日。
+    """
+    now = datetime.now()
+    try:
+        marker = now.replace(year=now.year - 5)
+    except ValueError:  # 2 月 29 日
+        marker = now.replace(year=now.year - 5, day=28)
+    return marker.strftime("%Y-%m-%d")
 
 
 # 类案散文头部： "1. [普通案例] <标题> | <案号>"  —— 北大法宝语义检索常返回这种散文而非 JSON。
-# 案号本身可能含括号（如 (2017)苏0412民初6116号），所以案号捕获到行尾而非只到第一个 )。
-_CASE_HEADER = re.compile(r'^\s*\d+\.\s*\[([^\]]*)\]\s*(.+?)\s*\|\s*(.+)$', re.MULTILINE)
+#
+# 两处必须容忍的形态差异（2026-09-19 实跑）：
+#   1. 案号可能为空：法院发布的典型案例汇编条目大多没有案号，行尾就是 "…案 | "。
+#      旧的 `\|\s*(.+)$` 要求案号非空，整条会被丢弃 → 最高权威顺位白检索。
+#   2. 正文标签不统一：普通案例是「本院查明 / 本院认为」，典型案例是
+#      「基本案情 / 裁判结果 / 典型意义」，还有【裁判要旨】【裁判要点】这种方括号写法。
+# 竖线两侧只允许空格制表符，不能用 \s —— \s 含换行，会让空案号的条目
+# 把下一行的元数据吃进来当案号（"案 | \n   文书类型：…" → ahao 变成整串元数据）。
+_CASE_HEADER = re.compile(
+    r'^\s*(\d+)\.\s*\[([^\]]*)\][ \t]*(.+?)[ \t]*\|[ \t]*(.*)$', re.MULTILINE)
+
+# 顺序即优先级：裁判说理在前，案情叙述在后
+_BODY_LABELS = ("裁判要点", "裁判要旨", "本院认为", "裁判理由", "裁判结果",
+                "典型意义", "基本案情", "案情简介", "本院查明")
+_LABEL_LINE = re.compile(
+    r'^\s*[【\[]?\s*(' + "|".join(_BODY_LABELS) + r')\s*[】\]]?\s*[:：]?\s*(.*)$')
+_DATE_RE = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def _field(chunk: str, label: str) -> str:
+    """取元数据行的值；值后面可能跟着 "| 审结日期：…"，截到竖线为止。"""
+    m = re.search(re.escape(label) + r'[：:]\s*(.*)', chunk)
+    if not m:
+        return ""
+    return m.group(1).split("|")[0].strip()
+
+
+def _date_value(raw: str) -> str:
+    raw = (raw or "").strip()
+    m = _DATE_RE.search(raw)
+    return m.group(0) if m else ""
+
+
+def _parse_sections(chunk: str) -> Dict[str, str]:
+    """把条目正文切成 {标签: 内容}。标签行之后的连续行都归它，直到下一个标签或「链接：」。"""
+    sections: Dict[str, str] = {}
+    current = None
+    for line in chunk.splitlines():
+        s = line.strip()
+        if s.startswith("链接："):
+            break
+        m = _LABEL_LINE.match(line)
+        if m:
+            current = m.group(1)
+            sections.setdefault(current, "")
+            tail = m.group(2).strip()
+            if tail:
+                sections[current] += tail
+            continue
+        if current and s:
+            sections[current] += s
+    return {k: v.strip() for k, v in sections.items() if v.strip()}
+
+
+def _compose_summary(sections: Dict[str, str], chunk: str) -> str:
+    """按「裁判说理优先」拼摘要。
+
+    为什么要挑：此前注入 prompt 的类案只有标题+法院+案号，**裁判说理一个字都没有**，
+    模型无从判断「这个类案像不像本案」。现在优先取裁判要点/本院认为，
+    标签全无时才退到整段正文。
+    """
+    ordered = [k for k in _BODY_LABELS if k in sections]
+    if ordered:
+        return "\n".join(f"{k}：{sections[k]}" for k in ordered)[:1200]
+    fallback = re.sub(r'^\s*链接：.*$', '', chunk, flags=re.MULTILINE).strip()
+    return fallback[:1200]
 
 
 def _parse_case_prose(text: str) -> List[dict]:
@@ -178,15 +292,21 @@ def _parse_case_prose(text: str) -> List[dict]:
     解析不出来就返回 []，绝不抛错——失败只是「少几个类案」，不能让报告崩。
     """
     items: List[dict] = []
-    for m in _CASE_HEADER.finditer(text):
-        ctype, title, ahao = m.group(1), m.group(2).strip(), m.group(3).strip()
-        rest = text[m.end():]
-        court_m = re.search(r'审理法院[：:]\s*([^\n|]+)', rest)
+    matches = list(_CASE_HEADER.finditer(text))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        chunk = text[m.end():end]
+        sections = _parse_sections(chunk)
         items.append({
-            "title": title,
-            "court": court_m.group(1).strip() if court_m else "",
-            "ahao": ahao,
-            "case_type": ctype,
+            "title": m.group(3).strip(),
+            "court": _field(chunk, "审理法院"),
+            "date": _date_value(_field(chunk, "审结日期")),
+            "ahao": m.group(4).strip(),
+            "case_type": m.group(2).strip(),
+            "cause": _field(chunk, "案由"),
+            "url": _field(chunk, "链接"),
+            "summary": _compose_summary(sections, chunk),
+            "sections": sections,
         })
     return items
 
@@ -302,8 +422,47 @@ def search_for_rights_foundation(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     return result
 
 
-def search_for_infringement(cause_type: str = CAUSE_TRADEMARK) -> Dict:
-    """1.2 侵权认定：search_case + search_article"""
+def _ladder_payload(query_text: str, cause_type: str = "", hint: Optional[dict] = None,
+                    session=None, target: int = 5) -> Dict:
+    """按《类案检索规则 v1.1》四顺位取类案（见 precedent_ladder）。
+
+    顺位③/④ 依赖「省份 / 管辖法院」两个输入，缺哪个就跳过哪一档并写明原因，
+    绝不用空参数去顶替（空值进接口等于不过滤，是最容易误判的静默失真）。
+    cause_type 参与案由相关性判定，不能省略——漏传会让噪声案例计入达标数。
+    """
+    from .precedent_ladder import retrieve_similar_cases
+    hint = hint or {}
+    return retrieve_similar_cases(
+        query_text, cause_type=cause_type, session=session,
+        province=hint.get("province") or None,
+        court=hint.get("court") or None,
+        target=target,
+    )
+
+
+def _apply_ladder(result: Dict, ladder: Dict, label: str, summary: List[str]) -> None:
+    """把级联结果并入节点返回值：cases 进 payload，顺位账目单独留一份给报告。"""
+    result["cases"] = ladder.get("cases") or []
+    result["case_search"] = {
+        "tier_counts": ladder.get("tier_counts", {}),
+        "executed_calls": ladder.get("executed_calls", 0),
+        "relevant_total": ladder.get("relevant_total", 0),
+        "dropped_irrelevant": ladder.get("dropped_irrelevant", 0),
+        "skipped": ladder.get("skipped", []),
+        "insufficient_note": ladder.get("insufficient_note", ""),
+        "budget_exhausted": ladder.get("budget_exhausted", False),
+        "time_exhausted": ladder.get("time_exhausted", False),
+    }
+    summary.append(f"【{label}】{ladder.get('_summary', '')}")
+    if ladder.get("status") == "error":
+        result["status"] = "error"
+        result["error"] = "；".join(ladder.get("errors") or ["类案检索失败"])
+
+
+def search_for_infringement(cause_type: str = CAUSE_TRADEMARK,
+                            hint: Optional[dict] = None,
+                            session=None) -> Dict:
+    """1.2 侵权认定：search_article 取法条 + 四顺位级联取类案"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
     prof = _profile(cause_type)
@@ -331,22 +490,13 @@ def search_for_infringement(cause_type: str = CAUSE_TRADEMARK) -> Dict:
         pass
 
     try:
-        sc = _rpc_call("search_case", {
-            "text": prof["infringement_query"],
-            "case_type": "民事案件", "doc_type": "判决书", "size": 5
-        })
-        for it in _extract_items(sc)[:5]:
-            if isinstance(it, dict):
-                result["cases"].append({
-                    "title": it.get("title", ""),
-                    "court": it.get("courthouse_name", it.get("court", "")),
-                    "date": it.get("decision_date", it.get("date", "")),
-                    "summary": (it.get("ascertain", it.get("summary", "")))[:300]
-                })
-    except Exception:
-        pass
+        ladder = _ladder_payload(prof["infringement_query"], cause_type, hint, session)
+        _apply_ladder(result, ladder, "侵权认定", summary)
+    except Exception as e:
+        # 类案拿不到不该让整个节点挂掉；失败原因单独显式露出
+        result["error"] = f"类案级联检索异常：{e}"
+        summary.append(f"⚠️ 【侵权认定】类案检索异常：{str(e)[:120]}")
 
-    summary.append(f"【侵权认定】检索到 {len(result['laws'])} 条法条, {len(result['cases'])} 个类案")
     result["_summary"] = "\n".join(summary)
     return result
 
@@ -383,37 +533,19 @@ def search_for_procedure() -> Dict:
     return result
 
 
-def search_for_moot_court(cause_type: str = CAUSE_TRADEMARK) -> Dict:
-    """1.4 模拟法庭：search_case（被告抗辩模式）"""
+def search_for_moot_court(cause_type: str = CAUSE_TRADEMARK,
+                          hint: Optional[dict] = None,
+                          session=None) -> Dict:
+    """1.4 模拟法庭：按四顺位取被告抗辩类案（同样的效力层级口径）"""
     if not _pkulaw_configured():
         return _pkulaw_unconfigured_result()
     prof = _profile(cause_type)
     result = {"laws": [], "cases": [], "_summary": ""}
     summary = []
 
-    sc = _rpc_call("search_case", {
-        "text": prof["defense_query"],
-        "case_type": "民事案件", "size": 5
-    })
-    fail = _rpc_failed(sc)
-    if fail:
-        result["status"] = "error"
-        result["error"] = fail
-        result["_summary"] = f"⚠️ {fail}"
-        return result
-    try:
-        for it in _extract_items(sc)[:5]:
-            if isinstance(it, dict):
-                result["cases"].append({
-                    "title": it.get("title", ""),
-                    "court": it.get("courthouse_name", it.get("court", "")),
-                    "date": it.get("decision_date", it.get("date", "")),
-                    "summary": (it.get("ascertain", it.get("summary", "")))[:200]
-                })
-    except Exception:
-        pass
+    ladder = _ladder_payload(prof["defense_query"], cause_type, hint, session)
+    _apply_ladder(result, ladder, "模拟法庭", summary)
 
-    summary.append(f"【模拟法庭】检索到 {len(result['cases'])} 个抗辩类案")
     result["_summary"] = "\n".join(summary)
     return result
 
@@ -429,7 +561,9 @@ def search_for_financial(cause_type: str = CAUSE_TRADEMARK) -> Dict:
     sc = _rpc_call("search_case", {
         "text": prof["damages_query"],
         "case_type": "民事案件", "doc_type": "判决书",
-        "decision_date_start": "2020-01-01", "size": 5
+        # 判赔类案走语义检索，不需要按权威性排顺位；但五年窗口必须动态算——
+        # 写死日期会逐年漂移，越晚演示错得越离谱。
+        "decision_date_start": five_years_ago(), "size": 5
     })
     fail = _rpc_failed(sc)
     if fail:
@@ -465,7 +599,7 @@ def search_for_precedent(case_desc: str = "", cause_type: str = CAUSE_TRADEMARK)
     query = (case_desc[:200] if case_desc else "") + " " + prof["precedent_query"]
     sc = _rpc_call("search_case", {
         "text": query[:500],
-        "case_type": "民事案件", "size": 10
+        "case_type": "民事案件", "doc_type": "判决书", "size": 10
     })
     fail = _rpc_failed(sc)
     if fail:

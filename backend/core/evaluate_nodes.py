@@ -81,7 +81,11 @@ def _format_pkulaw_block(pkulaw: Dict[str, Any]) -> str:
         court = c.get("court", "")
         ahao = c.get("ahao", "")
         summary = (c.get("summary") or "")[:200]
-        lines.append(f"- 类案：{title}（{court} {ahao}） —— {summary}")
+        # 顺位标记告诉模型这个案例的权威等级（最高法指导性案例 vs 本院判例），
+        # 模型据此决定该给多大权重；没有它，四顺位检索的成果在 prompt 里就退化成一串平铺的名称
+        tier = c.get("tier_label", "")
+        tag = f"［{tier}］" if tier else ""
+        lines.append(f"- 类案{tag}：{title}（{court} {ahao}） —— {summary}")
     return "\n".join(lines)
 
 

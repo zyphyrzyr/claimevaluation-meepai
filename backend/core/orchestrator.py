@@ -251,6 +251,34 @@ class Orchestrator:
             except Exception:
                 pass
 
+    def _pkulaw_session(self):
+        """一次评估共用的类案检索预算账本（见 pkulaw/precedent_ladder）。
+
+        多个节点都要类案，各自记账的话一次评估会跑掉二十几次 RPC，
+        串行起来足以让演示超时——所以账本挂在编排器上，按整轮评估统一限额。
+        """
+        if getattr(self, "_ladder_session", None) is None:
+            from .pkulaw.precedent_ladder import LadderSession
+            self._ladder_session = LadderSession()
+        return self._ladder_session
+
+    def _pkulaw_hint(self):
+        """汇总可用的地域线索，供类案检索的顺位③换算本省高级人民法院。
+
+        省份来源优先级（用户 2026-09-19 定：被告工商所在地兜底）：
+        工商登记「所属地区」> 被告 location_hint > 案情描述。管辖法院系统不采集，
+        顺位④跳过并写明原因，不猜。
+        """
+        from .pkulaw.court_resolver import hint_from_case
+        profile = getattr(self.ctx, "defendant_profile", None) or {}
+        facts = (profile.get("metrics") or {}).get("facts") or {}
+        entity = facts.get("entity") or {}
+        return hint_from_case(
+            region=entity.get("region") or "",
+            location_hint=(self.ctx.defendant_info or {}).get("location_hint") or "",
+            case_description=self.ctx.case_description or "",
+        )
+
     def _retrieve_legal_pkulaw(self, node: str):
         """法律可行性三节点接入北大法宝：检索权利基础 / 侵权认定 / 诉讼程序相关法条与类案。
 
@@ -267,7 +295,10 @@ class Orchestrator:
             if node == "rights":
                 return pkulaw_api.search_for_rights_foundation(self.ctx.cause_type)
             if node == "infringement":
-                return pkulaw_api.search_for_infringement(self.ctx.cause_type)
+                return pkulaw_api.search_for_infringement(
+                    self.ctx.cause_type,
+                    hint=self._pkulaw_hint(),
+                    session=self._pkulaw_session())
             return pkulaw_api.search_for_procedure()
         except Exception as e:  # 检索异常不应让评估节点挂掉
             return {"status": "error", "error": str(e)[:200],

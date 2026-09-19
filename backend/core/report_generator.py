@@ -317,6 +317,9 @@ def enrich_with_pkulaw(data: Dict[str, Any], case_id: str,
         reference = {
             "laws": (rights.get("laws") or []) + (infr.get("laws") or []),
             "cases": infr.get("cases") or [],
+            # 类案是怎么检索出来的也要留下痕迹：哪一档命中几个、哪些顺位被跳过、
+            # 为什么跳过。读者据此判断「没有本省类案」到底是查不到还是压根没查。
+            "case_search": infr.get("case_search") or {},
             "query_plan": plan,
         }
         verification = pkulaw_api.run_verification_phase(data.get("markdown", ""))
@@ -344,6 +347,34 @@ def enrich_with_pkulaw(data: Dict[str, Any], case_id: str,
         data["pkulaw"] = {"status": "error", "error": str(e)}
         data.setdefault("warnings", []).append(f"北大法宝增强失败（已跳过）：{e}")
     return data
+
+
+def _ladder_note(search: Dict[str, Any]) -> str:
+    """类案检索过程说明：顺位分布 / 相关性 / 哪些顺位没跑及原因 / 数量是否不足。
+
+    必须写出来的理由：「命中 3 个类案」这个数字本身说明不了任何问题——
+    可能是没有更权威的类案，也可能是因为不知道被告在哪个省所以没检索本省高院。
+    """
+    if not search:
+        return ""
+    parts = []
+    counts = search.get("tier_counts") or {}
+    if counts:
+        parts.append("检索顺位分布：" + "、".join(f"{k} {v} 个" for k, v in counts.items()))
+    dropped = int(search.get("dropped_irrelevant") or 0)
+    if dropped:
+        parts.append(f"其中 {dropped} 个案由相关性较弱，未计入达标数")
+    if search.get("insufficient_note"):
+        parts.append(search["insufficient_note"])
+    for s in search.get("skipped") or []:
+        parts.append(f"顺位{s.get('code')}未执行：{s.get('reason')}")
+    if search.get("budget_exhausted"):
+        parts.append("已达单次检索预算上限，后续顺位未继续")
+    if search.get("time_exhausted"):
+        parts.append("已达单次检索时限，后续顺位未继续")
+    if not parts:
+        return ""
+    return "类案检索说明：" + "；".join(parts) + "。"
 
 
 def render_pkulaw_section(pk: Dict[str, Any], numbering=None) -> List[str]:
@@ -386,10 +417,14 @@ def render_pkulaw_section(pk: Dict[str, Any], numbering=None) -> List[str]:
     if cases:
         lines += ["### 类案参考", ""]
         for i, c in enumerate(cases[:5], 1):
-            lines.append(f"{i}. **{c.get('title', '')}**"
+            tier = f"［{c['tier_label']}］" if c.get("tier_label") else ""
+            lines.append(f"{i}. {tier}**{c.get('title', '')}**"
                          + (f"（{c.get('court', '')}）" if c.get("court") else ""))
             if c.get("summary"):
                 lines.append(f"   - {c['summary'][:160]}")
+        note = _ladder_note(ref.get("case_search") or {})
+        if note:
+            lines += ["", f"_{note}_"]
         lines.append("")
 
     ver = pk.get("verification") or {}
