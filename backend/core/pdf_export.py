@@ -27,7 +27,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate
+from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Table, TableStyle
 
 PDF_MIME = "application/pdf"
 
@@ -103,6 +103,61 @@ def _bullet(text: str, indent_level: int = 0) -> Paragraph:
     return Paragraph("• " + _rich(text), style)
 
 
+# 正文表格可用宽度 = A4 595.28pt − 左右边距 3.17cm×2 ≈ 415.6pt
+_TABLE_WIDTH = 595.28 - 2 * 3.17 * 28.3465
+
+
+def _split_row(line: str) -> List[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _is_table_sep(line: str) -> bool:
+    return bool(re.fullmatch(r"[\s|:\-]+", line)) and "-" in line
+
+
+def _table_col_widths(n: int) -> List[float]:
+    if n == 2:
+        return [_TABLE_WIDTH * 0.62, _TABLE_WIDTH * 0.38]
+    return [_TABLE_WIDTH / n] * n
+
+
+def _table(header: List[str], rows: List[List[str]]):
+    """
+    渲染一张表格：深蓝表头白字 + 斑马纹数据行。
+
+    cell 必须用 Paragraph 包裹（STSong 是 CID 字体，纯字符串放进 Table 不会按
+    CJK 断行，长中文会溢出列宽）；表头同样走 Paragraph，白色加粗。
+    """
+    body = _styles()["body"]
+
+    def _cell(text: str, header_cell: bool = False) -> Paragraph:
+        style = ParagraphStyle(
+            "tcell", parent=body, fontSize=9.5, leading=13,
+            textColor=colors.HexColor("#FFFFFF" if header_cell else _TEXT),
+            spaceAfter=0,
+        )
+        return Paragraph(_rich(text), style)
+
+    data = [[_cell(h, header_cell=True) for h in header]]
+    for r in rows:
+        data.append([_cell(c if c is not None else "") for c in r])
+
+    ncols = len(header)
+    # repeatRows=1：表格跨页时每页重复表头，否则第二页的裸数据行没有列含义
+    t = Table(data, colWidths=_table_col_widths(ncols), hAlign="LEFT", repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(_PRIMARY)),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6FA")]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    return t
+
+
 def _on_page(canvas, doc, header_text: str) -> None:
     """页眉页脚：页眉左侧品牌 + 右侧案件名，页脚左侧免责 + 右侧页码。"""
     canvas.saveState()
@@ -157,10 +212,26 @@ def markdown_to_pdf(markdown: str, *, title: Optional[str] = None,
             flow.append(Paragraph(_rich(line), styles["meta"]))
         meta_flushed = True
 
-    for raw in (markdown or "").splitlines():
+    lines = (markdown or "").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
         line = raw.rstrip()
         stripped = line.strip()
         if not stripped:
+            i += 1
+            continue
+
+        # 表格块：当前行以 | 开头，且下一行是分隔行（| --- | ---: |）
+        if stripped.startswith("|") and i + 1 < len(lines) and _is_table_sep(lines[i + 1].strip()):
+            header = _split_row(stripped)
+            rows: List[List[str]] = []
+            i += 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                rows.append(_split_row(lines[i].strip()))
+                i += 1
+            flow.append(_table(header, rows))
+            flow.append(HRFlowable(width="100%", thickness=0, spaceBefore=0, spaceAfter=6))
             continue
 
         # 分隔线优先于标题判定（--- 也可能被当 setext 标题，这里不需要）
@@ -168,6 +239,7 @@ def markdown_to_pdf(markdown: str, *, title: Optional[str] = None,
             flow.append(HRFlowable(width="100%", thickness=0.5,
                                    color=colors.HexColor("#CCCCCC"),
                                    spaceBefore=6, spaceAfter=6))
+            i += 1
             continue
 
         heading = re.match(r"^(#{1,4})\s+(.*)$", stripped)
@@ -176,25 +248,30 @@ def markdown_to_pdf(markdown: str, *, title: Optional[str] = None,
             flow.append(Paragraph(_rich(heading.group(2).strip()), styles[f"h{lvl}"]))
             if lvl == 1:
                 _flush_meta()
+            i += 1
             continue
 
         if stripped.startswith(">"):
             flow.append(Paragraph(_rich(stripped.lstrip(">").strip()), styles["quote"]))
+            i += 1
             continue
 
         bullet = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
         if bullet:
             flow.append(_bullet(bullet.group(2).strip(),
                                 indent_level=len(bullet.group(1)) // 2))
+            i += 1
             continue
 
         numbered = re.match(r"^\s*(\d+)[.、]\s+(.*)$", line)
         if numbered:
             flow.append(Paragraph(f"{numbered.group(1)}. " + _rich(numbered.group(2).strip()),
                                   styles["body"]))
+            i += 1
             continue
 
         flow.append(Paragraph(_rich(stripped), styles["body"]))
+        i += 1
 
     _flush_meta()  # 正文没有 H1 时兜底：meta 仍要出现
     return flow

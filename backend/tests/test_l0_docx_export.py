@@ -20,6 +20,7 @@ os.environ.setdefault("USE_MOCK", "True")
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.shared import RGBColor
 
 from core.docx_export import markdown_to_docx, markdown_to_docx_bytes
 from routers.report import _content_disposition
@@ -133,6 +134,57 @@ class TestMarkdownMapping:
 
     def test_empty_markdown_does_not_crash(self):
         assert markdown_to_docx_bytes("")[:2] == b"PK"
+
+
+TABLE_MD = """\
+# 主诉评估结果：表格测试案
+
+## 一、维度明细
+
+| 评估维度 | 得分 |
+| --- | ---: |
+| 权利基础 | 78.0 |
+
+## 二、证据盘点与缺口清单
+
+| 缺口项 | 类别 | 支撑要件 | 补证建议 |
+| --- | --- | --- | --- |
+| 商标注册证原件 | 权利基础 | 权利有效性 | 需补充续展证明 |
+"""
+
+
+class TestTableRendering:
+    """维度汇总表 / 证据缺口表是 GFM 管道表格，必须渲染成真表格而非裸竖线"""
+
+    def _doc(self) -> Document:
+        return Document(io.BytesIO(markdown_to_docx_bytes(TABLE_MD)))
+
+    def test_tables_are_real_tables(self):
+        assert len(self._doc().tables) == 2, "两张 GFM 表应渲染成两个 Word 表格"
+
+    def test_header_row_is_dark_blue_with_white_text(self):
+        cell = self._doc().tables[0].rows[0].cells[0]
+        assert cell.text == "评估维度"
+        shd = cell._tc.tcPr.find(qn("w:shd"))
+        assert shd is not None and shd.get(qn("w:fill")) == "1F4E79"
+        run = cell.paragraphs[0].runs[0]
+        assert run.font.color.rgb == RGBColor(0xFF, 0xFF, 0xFF)
+
+    def test_header_row_repeats_across_pages(self):
+        """跨页表格必须重复表头，否则第二页的裸数据行没有列含义"""
+        for table in self._doc().tables:
+            tr_pr = table.rows[0]._tr.trPr
+            assert tr_pr is not None and tr_pr.find(qn("w:tblHeader")) is not None
+
+    def test_no_raw_pipe_leaks_into_paragraphs(self):
+        """竖线是表格语法字符，漏进正文段落就说明表格没被识别"""
+        for p in self._doc().paragraphs:
+            assert "|" not in p.text
+
+    def test_data_rows_carry_content(self):
+        table = self._doc().tables[0]
+        assert table.rows[1].cells[0].text == "权利基础"
+        assert table.rows[1].cells[1].text == "78.0"
 
 
 # ============================================================

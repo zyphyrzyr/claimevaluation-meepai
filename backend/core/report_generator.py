@@ -171,6 +171,27 @@ def build_one_pager(case_name: str, ctx: CaseContext) -> Dict[str, Any]:
 # Markdown 渲染
 # ============================================================
 
+def _dimension_summary_rows(dim: Dict[str, Any]) -> List:
+    """
+    维度得分汇总表的数据行。只列**实际算出结果**的维度，与正文明细保持一致——
+    要钱路径没有判例价值、要名路径没有回款能力，硬列 6 行会与正文对不上。
+
+    回款能力的字段名是 recovery_ability（不是 score），其余维度都是 score。
+    """
+    rows = []
+    for label, d, key in (
+        ("权利基础", dim.get("rights"), "score"),
+        ("侵权认定", dim.get("infringement"), "score"),
+        ("诉讼程序", dim.get("procedure"), "score"),
+        ("判赔规模", dim.get("damages"), "score"),
+        ("判例价值", dim.get("precedent"), "score"),
+        ("回款能力", dim.get("recovery"), "recovery_ability"),
+    ):
+        if d:
+            rows.append((label, _fmt(d.get(key))))
+    return rows
+
+
 def render_memo_markdown(data: Dict[str, Any]) -> str:
     """评估结果文档 → Markdown（Word / PDF 导出的共同内容源，见 core/docx_export、core/pdf_export）"""
     s = data["scores"]
@@ -204,6 +225,14 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     # 维度明细
     sec.add(lines, "维度明细")
     dim = data["dimensions"]
+    # 维度得分汇总表：先给一张一览表，再逐维度展开分析
+    summary_rows = _dimension_summary_rows(dim)
+    if summary_rows:
+        lines.append("| 评估维度 | 得分 |")
+        lines.append("| --- | ---: |")
+        for label, score in summary_rows:
+            lines.append(f"| {label} | {score} |")
+        lines.append("")
     if dim["rights"]:
         lines.append(f"### 权利基础（{_fmt(dim['rights'].get('score'))} 分）")
         lines.append(dim["rights"].get("analysis", ""))
@@ -259,9 +288,18 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     sec.add(lines, "证据盘点与缺口清单")
     lines.append(f"证据完整度 {_fmt(ev['completeness'], '%')}。缺口清单：")
     lines.append("")
-    for g in ev["gap_list"]:
-        lines.append(f"- [ ] **{g.get('item', '')}**（{g.get('category', '')}，支撑要件：{g.get('element', '')}）"
-                     f"—— {g.get('suggestion', g.get('reason', ''))}")
+    gap_list = ev.get("gap_list") or []
+    if gap_list:
+        lines.append("| 缺口项 | 类别 | 支撑要件 | 补证建议 |")
+        lines.append("| --- | --- | --- | --- |")
+        for g in gap_list:
+            item = g.get("item", "")
+            cat = g.get("category", "")
+            el = g.get("element", "")
+            sug = g.get("suggestion", g.get("reason", ""))
+            lines.append(f"| {item} | {cat} | {el} | {sug} |")
+    else:
+        lines.append("_（无重大证据缺口）_")
     lines.append("")
 
     # 模拟法庭
