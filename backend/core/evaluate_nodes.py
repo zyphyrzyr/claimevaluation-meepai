@@ -100,6 +100,89 @@ def _pkulaw_payload(pkulaw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _qcc_facts(ctx: CaseContext) -> Dict[str, Any]:
+    """取被告画像里的结构化工商事实；没有就返回 {}。
+
+    只认 metrics.facts：那是 qcc_api 从 8 阶段明细提炼出来、字段经过核对的结构。
+    不在提示词层重新解析 stages——企查查返回的原始中文字段会随版本变动，
+    统一在那道提炼层隔离掉，改动才只有一个地方要跟。
+    """
+    profile = getattr(ctx, "defendant_profile", None)
+    if not isinstance(profile, dict):
+        return {}
+    return (profile.get("metrics") or {}).get("facts") or {}
+
+
+def _format_qcc_block(ctx: CaseContext) -> str:
+    """把企查查工商事实压成 prompt 文本块；无数据返回空串。
+
+    与 _format_pkulaw_block 同一条规矩：确有数据才注入。把「没查到」的空壳塞进
+    prompt，LLM 会把「无信息」误读成「被告是家空壳公司」，比不注入更糟。
+    """
+    facts = _qcc_facts(ctx)
+    if not facts:
+        return ""
+
+    e, r, s = facts.get("entity") or {}, facts.get("risk") or {}, facts.get("scale") or {}
+
+    def join_kv(pairs) -> str:
+        return "、".join(f"{k} {v}" for k, v in pairs if v not in (None, "", []))
+
+    lines = ["## 被告工商登记事实（企查查实查，用于校正案情中对侵权规模的自述）"]
+
+    name_line = f"- 主体：{e.get('name') or '（未取到）'}"
+    if e.get("credit_code"):
+        name_line += f"（统一社会信用代码 {e['credit_code']}）"
+    if e.get("queried_name") and not e.get("name_matches_query", True):
+        # 查错人会让后面所有事实全部张冠李戴，且不会有任何报错——必须显式说破
+        name_line += f"；⚠️ 注意：实际锁定主体与所查名称「{e['queried_name']}」不一致，请谨慎采信"
+    lines.append(name_line)
+
+    status_line = join_kv([
+        ("登记状态", e.get("reg_status")),
+        ("成立", e.get("established")),
+        ("注册资本", e.get("registered_capital")),
+        ("参保人数", f"{e['insured_count']} 人" if e.get("insured_count") is not None else None),
+        ("人员规模标注", e.get("staff_scale")),
+        ("行业", e.get("industry")),
+        ("所在地", e.get("region")),
+    ])
+    if status_line:
+        lines.append(f"- 工商登记：{status_line}")
+    if e.get("legal_rep"):
+        lines.append(f"- 法定代表人：{e['legal_rep']}")
+
+    risk_line = join_kv([
+        ("注销", r.get("deregistered")), ("清算", r.get("liquidation")),
+        ("破产重整", r.get("bankruptcy")), ("被执行", r.get("executed")),
+        ("失信", r.get("dishonest")), ("终本", r.get("terminated")),
+        ("限高", r.get("restricted")), ("严重违法", r.get("serious_violation")),
+        ("经营异常", r.get("abnormal")), ("法院立案", r.get("court_filed")),
+    ])
+    risk_line += "（各单位均为记录条数，0 表示未查到记录）"
+    if r.get("hit_dimensions"):
+        risk_line += f"；风险分诊命中 {r['hit_dimensions']} 个维度"
+    lines.append(f"- 涉诉与风险：{risk_line}")
+
+    scale_line = join_kv([
+        ("商标", s.get("trademark_count")), ("线上店铺", s.get("online_shops")),
+        ("APP", s.get("app")), ("小程序", s.get("miniprogram")),
+        ("微信公众号", s.get("wechat_mp")), ("抖音", s.get("douyin")),
+        ("融资记录", s.get("financing")), ("荣誉", s.get("honors")),
+        ("被诉历史", f"{s.get('litigation_history')} 件" if s.get("litigation_history") is not None else None),
+    ])
+    if scale_line:
+        lines.append(f"- 经营与资产：{scale_line}")
+
+    tier = facts.get("scale_tier")
+    if tier:
+        lines.append(f"- 规模档位：{tier}（{facts.get('scale_tier_basis') or '无依据'}）"
+                     f"——仅作规模参考，不得据此直接加减判赔金额")
+
+    lines.append("- 上述为工商登记的客观数据；与案情陈述不一致时，以工商数据为准。")
+    return "\n".join(lines)
+
+
 def evaluate_rights(ctx: CaseContext, use_mock: bool = False,
                     pkulaw: Dict[str, Any] = None) -> Dict[str, Any]:
     """子维度 1.1 权利基础（<60 触发红灯）"""
@@ -203,16 +286,34 @@ def evaluate_damages(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]
         from .mock import mock_damages
         return mock_damages(ctx.cause_type)
 
+    qcc_block = _format_qcc_block(ctx)
+    cross_check = """
+④ 规模交叉核对（有工商事实才做）——案情自述的侵权规模（门店数、销量、覆盖范围）
+   必须与上述工商客观数据（参保人数、注册资本、涉诉记录、渠道保有量）对得上：
+   - 明显不符时（例如自述两千余家门店，工商实查参保百余人、线上渠道个位数），
+     以工商数据为准下调 scale_support，并把矛盾写进 external_conflict；
+   - 无矛盾时 external_conflict 填空字符串。
+
+【重要】判赔金额完全由你按法定赔偿区间与类案水平判断。上述工商事实只用于校正
+案情里主张的侵权规模，不要因为外部数据而脱离法定框架随意加价或减价：既不得有
+乘数，也不得把工商数据当成突破法定赔偿上限的理由。""" if qcc_block else ""
+
+    # external_conflict 字段也只在有工商事实时要求：没有事实就谈不上「交叉核对」，
+    # 让模型对着不存在的数据编一句矛盾描述，比不给这个字段更糟。
+    conflict_field = ('  "external_conflict": "案情主张与外部工商数据矛盾的具体描述，'
+                      '无矛盾则填空字符串",\n') if qcc_block else ""
+
     prompt = f"""{_base(ctx)}
 
 {damages_clause(ctx.cause_type)}
+{qcc_block}
 
 ## 评估任务
 估算本案判赔规模（0-100 相对评分），综合三方面：
 ① 判赔金额量级——估算判赔金额概率分布（P10/P50/P90，单位：万元），严格以本案由的
    法定赔偿区间为边界、以类案判赔水平为锚，并说明走的是哪个计算顺位
 ② 回报倍数——P50 判赔额 ÷ 预估总成本（律师费+诉讼费+公证费等，按 8-15 万估）
-③ 侵权规模支撑度——案情中的销量/店铺规模等能否支撑高判赔
+③ 侵权规模支撑度——案情中的销量/店铺规模等能否支撑高判赔{cross_check}
 
 ## 返回 JSON
 {{
@@ -220,9 +321,14 @@ def evaluate_damages(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]
   "p10": 数值（万元）, "p50": 数值（万元）, "p90": 数值（万元）,
   "return_multiple": 数值（回报倍数）,
   "scale_support": "high|medium|low",
-  "analysis": "分析（200字内）"
+{conflict_field}  "analysis": "分析（200字内）"
 }}"""
-    return call_json(_SYSTEM, prompt, node="damages")
+    result = call_json(_SYSTEM, prompt, node="damages")
+    # 无工商事实时不该出现 external_conflict：那是「查过但没查出问题」与
+    # 「根本没查」的区别，留空比填 '' 更不容易被误读。
+    if not qcc_block:
+        result.pop("external_conflict", None)
+    return result
 
 
 def evaluate_precedent(ctx: CaseContext, use_mock: bool = False) -> Dict[str, Any]:

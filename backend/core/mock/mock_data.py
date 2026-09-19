@@ -521,17 +521,95 @@ def mock_precedent(cause_type: str = CAUSE_TRADEMARK) -> Dict[str, Any]:
     return dict(_table(cause_type)["eval"]()["precedent"])
 
 
+def _mock_scale_stage(pairs) -> Dict[str, Any]:
+    return {k: {"_count": v, "_summary": f"{v}条"} for k, v in pairs}
+
+
 def mock_defendant_profile() -> Dict[str, Any]:
-    """企查查 8 阶段画像 Mock：正常经营企业，回款能力中等偏上"""
+    """企查查 8 阶段画像 Mock：正常经营企业，回款能力中等偏上
+
+    为什么要和真实模式刻意不一样：原先 mock 输出的 recovery_probability=50.0、
+    damages_adjustment="中等规模 → 基准" 与真实模式的常见输出**完全相同**，
+    演示时界面上自证不了数据来源（评测 P1-5）。现在除了数值错开，
+    还额外给出 simulated=True 与 "(模拟)" 后缀的企业名，让来源一眼可辨。
+
+    facts / stages 的字段形状必须与真实 qcc_api 一致，否则前端渲染
+    在 mock 与真实两条路径下行为不一致，等于给展示层埋了个只在演示时炸的雷。
+    """
     return {
-        "locked_name": "示例被告科技有限公司",
+        "locked_name": "示例被告科技有限公司（模拟）",
         "metrics": {
-            "recovery_probability": 72.0,
-            "damages_adjustment": "中等规模 → 基准",
+            # 基准 78（公开记录查不到问题）+ 有公开财务数据 +6 = 84，与企业侧真实规则表同口径。
+            # 数值仍与真实默认值错开，演示时界面上自证得了数据来源。
+            "recovery_probability": 84.0,
+            "recovery_base": 78.0,
+            "recovery_delta": 6.0,
+            "recovery_tier": "ok",
+            "damages_adjustment": "中型",
+            "scale_tier": "中型",
+            "scale_tier_basis": "参保 120 人 / 注册资本 500 万元",
             "time_extra_months": 0,
             "red_flags": [],
             "green_flags": ["有公开财务数据"],
             "details": {},
+            "simulated": True,
+            "facts": {
+                "entity": {
+                    "queried_name": "示例被告科技有限公司（模拟）",
+                    "name": "示例被告科技有限公司（模拟）",
+                    "locked_name": "示例被告科技有限公司（模拟）",
+                    "credit_code": "91110000MA0000000X",
+                    "legal_rep": "示例·法定代表人",
+                    "reg_status": "开业（存续）",
+                    "established": "2016-03-08",
+                    "registered_capital": "500万元",
+                    "registered_capital_wan": 500.0,
+                    "insured_count": 120,
+                    "staff_scale": "100-199人",
+                    "industry": "科学研究和技术服务业",
+                    "region": "北京市海淀区",
+                    "match_status": "唯一精确匹配",
+                    "name_matches_query": True,
+                },
+                "risk": {
+                    "deregistered": 0, "liquidation": 0, "bankruptcy": 0,
+                    "executed": 0, "dishonest": 0, "terminated": 0,
+                    "restricted": 0, "serious_violation": 0, "abnormal": 0,
+                    "court_filed": 0, "hit_dimensions": 0,
+                },
+                "scale": {
+                    "trademark_count": 3, "online_shops": 2, "app": 1,
+                    "miniprogram": 1, "wechat_mp": 1, "douyin": 0,
+                    "bidding": 0, "financing": 1, "honors": 1,
+                    "litigation_history": 0,
+                },
+                "financial_data_available": True,
+                "signals_hit": 1,
+                "scale_tier": "中型",
+                "scale_tier_basis": "参保 120 人 / 注册资本 500 万元",
+            },
+        },
+        "stages": {
+            "A_主体锁定": {"ok": True, "locked_name": "示例被告科技有限公司（模拟）",
+                           "credit_code": "91110000MA0000000X", "candidates": [],
+                           "match_status": "唯一精确匹配"},
+            "B_基本盘": {
+                "工商登记": {"_count": 1, "_summary": "1条记录"},
+                "财务数据": {"_count": 2, "_summary": "2条记录"},
+                "上市信息": {"_count": 0, "_summary": "无数据"},
+            },
+            "C_风险分诊": {"hits": {}, "_summary": "未命中风险维度", "total_hit_dimensions": 0},
+            "D_风险下钻": _mock_scale_stage([
+                ("注销记录", 0), ("清算信息", 0), ("破产重整", 0), ("被执行人", 0),
+                ("失信信息", 0), ("终本案件", 0), ("限高消费", 0), ("严重违法", 0),
+                ("经营异常", 0), ("法院立案", 0),
+            ]),
+            "F_经营规模": _mock_scale_stage([
+                ("商标资产", 3), ("线上店铺", 2), ("APP信息", 1), ("小程序", 1),
+                ("微信公众号", 1), ("抖音账号", 0), ("招投标", 0),
+                ("融资记录", 1), ("荣誉信息", 1),
+            ]),
+            "G_诉讼时间": {"被诉历史": {"_count": 0, "_summary": "0件"}},
         },
         "stages_skipped": False,
         "error": None,

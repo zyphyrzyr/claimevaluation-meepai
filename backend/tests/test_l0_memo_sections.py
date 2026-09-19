@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("USE_MOCK", "True")
 
 from core import report_generator
+from core import damages_wording
 from core.case_context import CaseContext
 from core.config import CAUSE_COPYRIGHT, CAUSE_TRADEMARK
 from core.orchestrator import Orchestrator
@@ -132,7 +133,10 @@ class TestAnalysisRendering:
         md = memo["markdown"]
         assert d["analysis"] in md
         assert str(d["p50"]) in md
-        assert d["scale_support"] in md
+        # 断言的是「支撑度进了正文」，不是「英文枚举原样进了正文」。
+        # scale_support 已由 damages_wording 翻成中文（medium → 中），
+        # 直接拿原始枚举比对会在措辞改造后误报——这里比对齐后的中文标签。
+        assert damages_wording.SCALE_SUPPORT_LABEL[d["scale_support"]] in md
 
 
 # ============================================================

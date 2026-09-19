@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 from .case_context import CaseContext
 from .config import CAUSE_TRADEMARK, QUADRANT_AXIS_MID
+from . import damages_wording
 
 
 def _fmt(v, suffix: str = "") -> str:
@@ -139,8 +140,10 @@ def build_one_pager(case_name: str, ctx: CaseContext) -> Dict[str, Any]:
     # 理由 2：业务预期
     business = scores.get("business_expectation")
     if ctx.goal_type == "要钱" and business is not None:
-        reasons.append(f"业务预期 {_fmt(business)} 分（判赔规模 × 回款能力"
-                       + (f" {_fmt(ctx.recovery_ability)}" if ctx.recovery_ability is not None else "")
+        # 幂平均（短板主导）而非相乘：写成「×」会让读者以为 78×60 这种算式成立，
+        # 实际两维是短板效应合成，量纲也不同（一个是相对分、一个是回款把握度）。
+        reasons.append(f"业务预期 {_fmt(business)} 分（判赔规模与回款能力按短板效应合成"
+                       + (f"，回款能力 {_fmt(ctx.recovery_ability)}" if ctx.recovery_ability is not None else "")
                        + "）")
     elif business is not None:
         reasons.append(f"业务预期 {_fmt(business)} 分（判例价值维度）")
@@ -225,9 +228,11 @@ def render_memo_markdown(data: Dict[str, Any]) -> str:
     if dim["damages"]:
         d = dim["damages"]
         lines.append(f"### 判赔规模（{_fmt(d.get('score'))} 分）")
-        lines.append(f"类案判赔区间：P10 {_fmt(d.get('p10'), ' 万')} / P50 {_fmt(d.get('p50'), ' 万')} / "
-                     f"P90 {_fmt(d.get('p90'), ' 万')}；回报倍数 {_fmt(d.get('return_multiple'))}"
-                     + (f"；侵权规模支撑度 {d['scale_support']}" if d.get("scale_support") else ""))
+        # 判赔文案统一走 damages_wording：不出现 P10/P50/P90 这类分位数术语，
+        # 英文枚举 scale_support 也在这里翻成中文。该行会随 markdown 进 docx / pdf。
+        damages_line = damages_wording.damages_report_line(d)
+        if damages_line:
+            lines.append(damages_line)
         if d.get("analysis"):
             lines.append("")
             lines.append(d["analysis"])
