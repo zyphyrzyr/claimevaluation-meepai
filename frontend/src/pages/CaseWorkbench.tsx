@@ -195,6 +195,11 @@ export default function CaseWorkbench() {
         .mootHistory(id)
         .then((h) => {
           if (!h?.transcript?.length) return
+          const j = h.judge || {}
+          // 兜底：旧数据没存 moot_judge，从 transcript 第 5 轮（法官归纳）提取正文。
+          // 结构化明细（弱项/补强建议/系数推导）拿不到就留空，由 MootPanel 按回退逻辑展示。
+          const judgeRound = h.transcript.find((r: any) => r.role === 'judge')
+          const summary = j.judge_summary || judgeRound?.content || ''
           setMoot((m) =>
             m.rounds.length
               ? m
@@ -204,11 +209,13 @@ export default function CaseWorkbench() {
                   shownRounds: h.transcript,
                   judge: {
                     correction_coefficient: h.correction_coeff,
-                    defense_strength: 0,
-                    judge_summary: '',
-                    weak_points: [],
-                    focus_points: [],
-                    from_history: true,
+                    defense_strength: j.defense_strength ?? 0,
+                    judge_summary: summary,
+                    weak_points: j.weak_points ?? [],
+                    focus_points: j.focus_points ?? [],
+                    coefficient_source: j.coefficient_source,
+                    coefficient_detail: j.coefficient_detail,
+                    from_history: !summary,
                   },
                 },
           )

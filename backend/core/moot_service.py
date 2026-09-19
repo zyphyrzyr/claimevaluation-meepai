@@ -176,6 +176,22 @@ def run_embedded(ctx: CaseContext, shared_legal_context: str = ""):
     ]
     prev_coeff = ctx.correction_coeff
     ctx.correction_coeff = result.correction_coefficient
+    # 法官归纳的结构化结果整体落库（刷新页面后历史记录要能回显判决书正文与明细，
+    # 而不是只回显一个系数）。transcript 第 5 轮只有正文，弱项/补强建议/系数推导
+    # 这些字段只在这里有，必须单独存。
+    ctx.moot_judge = {
+        "judge_summary": result.judge_summary,
+        "summary_structured": result.summary_structured,
+        "weak_points": result.weak_points,
+        "focus_points": result.focus_points,
+        "judge_scores": result.judge_scores,
+        "legal_basis": result.legal_basis,
+        "precedents": result.precedents,
+        "experience_refs": result.experience_refs,
+        "defense_strength": result.defense_strength,
+        "coefficient_source": result.coefficient_source,
+        "coefficient_detail": result.coefficient_detail,
+    }
     ctx.log_event(
         "moot_finished", node="moot",
         effect=f"内嵌模拟法庭完成，修正系数 {prev_coeff} → {result.correction_coefficient}，"

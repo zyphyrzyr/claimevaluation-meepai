@@ -50,6 +50,10 @@ class CaseContext:
     # 模拟法庭
     moot_transcript: List[Dict[str, Any]] = field(default_factory=list)
     correction_coeff: float = 1.0
+    # 法官归纳的结构化结果（判决书正文 + 薄弱点/补强建议/十项子分/引用/系数推导明细）。
+    # 单独存一份而不只靠 transcript 第 5 轮：transcript 只留发言正文，这些结构化字段
+    # 刷新页面后也要能回显，否则历史记录只剩一个光秃秃的系数。
+    moot_judge: Dict[str, Any] = field(default_factory=dict)
 
     # 企查查画像与回款能力
     defendant_profile: Dict[str, Any] = field(default_factory=dict)
