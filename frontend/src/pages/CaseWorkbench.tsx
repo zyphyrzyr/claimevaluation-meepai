@@ -297,7 +297,9 @@ export default function CaseWorkbench() {
     setActiveTab('run')
     setDetail((d: any) => (d ? { ...d, status: 'evaluating' } : d))
     refreshResult()
-    runEvaluation(id, onEvent, ac.signal).catch((e) => setEvalError(String(e)))
+    runEvaluation(id, onEvent, ac.signal)
+      .catch((e) => setEvalError(String(e)))
+      .finally(() => syncPhaseFromBackend())
   }
 
   /**
@@ -337,10 +339,9 @@ export default function CaseWorkbench() {
   const resumeEval = () => {
     if (!id) return
     setEvalError('')
-    resumeEvaluation(id, onEvent).catch(() => {
-      setEvalError('评估已不在运行中（可能已结束或服务重启过），已为你同步为实际状态')
-      syncPhaseFromBackend()
-    })
+    resumeEvaluation(id, onEvent)
+      .catch(() => setEvalError('评估已不在运行中（可能已结束或服务重启过），已为你同步为实际状态'))
+      .finally(() => syncPhaseFromBackend())
   }
   // 终止：后端立即中止并清空本次结果（全部作废）；同时切断本地读流
   const stopEval = () => {

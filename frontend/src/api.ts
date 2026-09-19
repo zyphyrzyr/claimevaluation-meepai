@@ -114,12 +114,28 @@ export function humanError(err: unknown): string {
   return body || '操作失败，请重试'
 }
 
+// 请求超时兜底：跨境链路 RTT 高、后端偶发卡住，fetch 默认永不超时会「无限转圈」。
+// 普通 JSON 请求 30 秒、FormData 上传 120 秒（传文件跨海慢，放宽）。
+const REQUEST_TIMEOUT_MS = 30_000
+const UPLOAD_TIMEOUT_MS = 120_000
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData
-  const resp = await fetch(`${BASE}${path}`, {
-    headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
-    ...init,
-  })
+  const timeout = isFormData ? UPLOAD_TIMEOUT_MS : REQUEST_TIMEOUT_MS
+  let resp: Response
+  try {
+    resp = await fetch(`${BASE}${path}`, {
+      headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
+      ...init,
+      signal: AbortSignal.timeout(timeout),
+    })
+  } catch (err) {
+    // AbortSignal.timeout 超时抛的是 TimeoutError（不是 AbortError），按 name 判断才不漏
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error('请求超时，请检查网络后重试')
+    }
+    throw err
+  }
   if (!resp.ok) {
     const text = await resp.text()
     // 认证端点自己会解释 401（邮箱或密码不正确）。这类 401 不该再弹一次
