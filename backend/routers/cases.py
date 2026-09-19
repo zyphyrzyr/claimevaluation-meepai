@@ -18,6 +18,7 @@ from core.case_context import CaseContext
 from core.config import SUPPORTED_CAUSE_TYPES, GOAL_TYPES
 from core.database import (
     Case, EvidenceFile, Party, KnowledgeEntry, RetrievalRecord, User, get_db,
+    SessionLocal,
 )
 from core.evidence_parser import (
     is_image_file, is_pdf_file, is_zip_file, ocr_image, parse_pdf, parse_zip_archive,
