@@ -78,9 +78,11 @@ class TestFileFormat:
         assert zipfile.is_zipfile(io.BytesIO(docx_bytes))
         Document(io.BytesIO(docx_bytes))               # 解析失败会抛
 
-    def test_meta_line_precedes_body(self, docx_bytes):
+    def test_meta_line_follows_title(self, docx_bytes):
+        """标题在上、生成日期紧随其后：层级正挂，日期不能压在主标题上面"""
         paragraphs = _paragraphs(docx_bytes)
-        assert paragraphs[0].text.startswith("生成日期：")
+        assert paragraphs[0].text.startswith("主诉评估结果")
+        assert paragraphs[1].text.startswith("生成日期：")
 
 
 # ============================================================

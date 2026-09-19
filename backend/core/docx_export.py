@@ -15,10 +15,10 @@ import re
 from typing import List, Optional
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 
 DOCX_MIME = ("application/vnd.openxmlformats-officedocument"
              ".wordprocessingml.document")
@@ -28,16 +28,24 @@ _EAST_ASIA_FONT = "宋体"
 _LATIN_FONT = "Times New Roman"
 _BODY_SIZE = 10.5
 
+# 颜色规范（十六进制，与 pdf_export 保持一致）
+_PRIMARY = "1F4E79"   # 深蓝藏青：标题、强调
+_TEXT = "1A1A1A"      # 正文近黑
+_MUTED = "808080"     # 辅助灰：meta、页脚
 
-def _style(run, size: float = _BODY_SIZE, bold: bool = False) -> None:
+
+def _style(run, size: float = _BODY_SIZE, bold: bool = False,
+           color: str = _TEXT) -> None:
     """
     中文字体必须显式设 eastAsia，只设 font.name 的话 Word 里中文会掉回默认字体，
     而西文却是设好的——中英混排的备忘录会显示成两种字号的拼接，非常明显。
 
     字号用 10.5pt（五号）：这是中文正式文档的通例，比 Word 默认的 11pt 更紧凑。
+    颜色默认正文近黑 _TEXT，标题 / meta 层再覆盖成 _PRIMARY / _MUTED。
     """
     run.font.size = Pt(size)
     run.bold = bold
+    run.font.color.rgb = RGBColor.from_string(color)
     rpr = run._element.get_or_add_rPr()
     rfonts = rpr.get_or_add_rFonts()
     rfonts.set(qn("w:eastAsia"), _EAST_ASIA_FONT)
@@ -66,11 +74,13 @@ def _heading(doc: Document, text: str, level: int) -> None:
     paragraph = doc.add_paragraph()
     paragraph.paragraph_format.space_before = Pt(14 if level == 1 else 8)
     paragraph.paragraph_format.space_after = Pt(6)
+    paragraph.paragraph_format.keep_with_next = True  # 标题不孤立在页尾
     if level == 1:
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _add_runs(paragraph, text, bold=True)
     for run in paragraph.runs:
         run.font.size = Pt(_HEADING_SIZES.get(level, 11))
+        run.font.color.rgb = RGBColor.from_string(_PRIMARY)
 
 
 def _quote(doc: Document, text: str) -> None:
@@ -90,27 +100,90 @@ def _bullet(doc: Document, text: str, indent_level: int = 0) -> None:
     _add_runs(paragraph, text)
 
 
-def _rule(doc: Document) -> None:
-    """分隔线：给空段落加下边框，比塞一串破折号干净"""
-    paragraph = doc.add_paragraph()
+def _add_bottom_border(paragraph, color: str = "CCCCCC", sz: str = "4",
+                       space: str = "2") -> None:
+    """给段落加下边框（页眉分隔线 / 正文分隔线共用）"""
+    p_pr = paragraph._p.get_or_add_pPr()
     borders = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
     bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "6")
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "CCCCCC")
+    bottom.set(qn("w:sz"), sz)
+    bottom.set(qn("w:space"), space)
+    bottom.set(qn("w:color"), color)
     borders.append(bottom)
-    paragraph._p.get_or_add_pPr().append(borders)
+    p_pr.append(borders)
+
+
+def _rule(doc: Document) -> None:
+    """分隔线：给空段落加下边框，比塞一串破折号干净"""
+    paragraph = doc.add_paragraph()
+    _add_bottom_border(paragraph, "CCCCCC", "6", "1")
+
+
+def _add_field(run, instr: str) -> None:
+    """插入 Word 域（页脚页码用 PAGE 域）"""
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    text = OxmlElement("w:instrText")
+    text.set(qn("xml:space"), "preserve")
+    text.text = instr
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run._r.append(begin)
+    run._r.append(text)
+    run._r.append(end)
+
+
+def _brand_run(paragraph, text: str, size: float) -> None:
+    """页眉页脚文字：辅助灰 + 小字号"""
+    run = paragraph.add_run(text)
+    _style(run, size=size, color=_MUTED)
+    return run
+
+
+def _setup_branding(doc: Document, header_text: Optional[str]) -> None:
+    """
+    页眉页脚（与 pdf_export._on_page 对齐）：
+    - 页眉：左侧「诉算 · 主诉评估结果」+ 右侧案件名，下加细分隔线
+    - 页脚：左侧免责声明 + 右侧「第 X 页」（PAGE 域，Word 打开自动算页码）
+    """
+    section = doc.sections[0]
+    usable = section.page_width - section.left_margin - section.right_margin
+
+    header = section.header
+    hp = header.paragraphs[0]
+    hp.text = ""
+    hp.paragraph_format.tab_stops.add_tab_stop(usable, WD_TAB_ALIGNMENT.RIGHT)
+    _brand_run(hp, "诉算 · 主诉评估结果", 9)
+    if header_text:
+        hp.add_run("\t")
+        _brand_run(hp, header_text, 9)
+    _add_bottom_border(hp, "CCCCCC", "4", "2")
+
+    footer = section.footer
+    fp = footer.paragraphs[0]
+    fp.text = ""
+    fp.paragraph_format.tab_stops.add_tab_stop(usable, WD_TAB_ALIGNMENT.RIGHT)
+    _brand_run(fp, "AI 辅助生成，仅供内部决策参考", 8.5)
+    fp.add_run("\t")
+    _brand_run(fp, "第 ", 8.5)
+    page_run = fp.add_run()
+    _style(page_run, size=8.5, color=_MUTED)
+    _add_field(page_run, "PAGE")
+    _brand_run(fp, " 页", 8.5)
 
 
 def markdown_to_docx(markdown: str, *, title: Optional[str] = None,
-                     meta: Optional[List[str]] = None) -> Document:
+                     meta: Optional[List[str]] = None,
+                     header_text: Optional[str] = None) -> Document:
     """
     渲染为 python-docx 的 Document 对象。
 
     title 单独传而不从 markdown 的 H1 里取：导出时标题往往是「案件名 + 文档类型」，
     与正文里的 H1 并不一致（例：正文 H1 是「主诉评估结果：某某案」，
     而导出的文件名只需要后半段）。
+
+    header_text 用于页眉右侧（通常传案件名），与 pdf_export 的 header_text 对齐。
     """
     doc = Document()
 
@@ -120,13 +193,27 @@ def markdown_to_docx(markdown: str, *, title: Optional[str] = None,
         section.top_margin = section.bottom_margin = Pt(72)
         section.left_margin = section.right_margin = Pt(90)
 
-    if title:
-        _heading(doc, title, 1)
+    _setup_branding(doc, header_text)
 
-    for line in (meta or []):
+    def _meta_paragraph(line: str) -> None:
         paragraph = doc.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         _add_runs(paragraph, line)
+        for run in paragraph.runs:
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor.from_string(_MUTED)
+
+    meta_lines = list(meta or [])
+    if title:
+        # 显式传了 title：维持「标题 → meta → 正文」的旧顺序
+        _heading(doc, title, 1)
+        for line in meta_lines:
+            _meta_paragraph(line)
+        meta_flushed = True
+    else:
+        # 未传 title（结果/庭审导出的实际情况）：meta 延迟到正文第一个 H1 之后渲染。
+        # 否则「生成日期」会压在报告主标题上面，层级倒挂。
+        meta_flushed = False
 
     for raw in (markdown or "").splitlines():
         line = raw.rstrip()
@@ -143,6 +230,10 @@ def markdown_to_docx(markdown: str, *, title: Optional[str] = None,
         heading = re.match(r"^(#{1,4})\s+(.*)$", stripped)
         if heading:
             _heading(doc, heading.group(2).strip(), len(heading.group(1)))
+            if len(heading.group(1)) == 1 and not meta_flushed:
+                for m in meta_lines:
+                    _meta_paragraph(m)
+                meta_flushed = True
             continue
 
         if stripped.startswith(">"):
@@ -163,11 +254,17 @@ def markdown_to_docx(markdown: str, *, title: Optional[str] = None,
         paragraph.paragraph_format.space_after = Pt(4)
         _add_runs(paragraph, stripped)
 
+    if not meta_flushed:  # 正文没有 H1 时兜底：meta 仍要出现
+        for m in meta_lines:
+            _meta_paragraph(m)
+
     return doc
 
 
 def markdown_to_docx_bytes(markdown: str, *, title: Optional[str] = None,
-                           meta: Optional[List[str]] = None) -> bytes:
+                           meta: Optional[List[str]] = None,
+                           header_text: Optional[str] = None) -> bytes:
     buffer = io.BytesIO()
-    markdown_to_docx(markdown, title=title, meta=meta).save(buffer)
+    markdown_to_docx(markdown, title=title, meta=meta,
+                     header_text=header_text).save(buffer)
     return buffer.getvalue()
