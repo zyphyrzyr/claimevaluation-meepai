@@ -136,6 +136,57 @@ class TestKnowledgeConsistency:
 
 
 # ============================================================
+# 2.5 手动检索的合格线 + 标题保底（修复「搜 LV 返回全部」）
+# ============================================================
+
+class TestSearchThreshold:
+    """检索接口的 min_score 过滤与标题保底。
+
+    用 0.99 作「高阈值」：它高于任何真实向量分（bge-m3 / 哈希兜底的上限都够不到），
+    因此只有标题保底能活下来——测试不依赖具体向量分布，跨后端稳定。
+    """
+
+    def _seed(self, db):
+        e_lv = add_knowledge(db, "global", "C", "LV测试 评估结果",
+                             "主诉评估结果：LV测试商标侵权案。法律可行性 78 分，业务预期 60 分。")
+        e_other = add_knowledge(db, "global", "B", "著作权登记经验",
+                                "美术作品完成即可获得著作权，及时登记可强化证明效力。")
+        return e_lv, e_other
+
+    def test_title_boost_recovers_title_only_match(self, db):
+        """query 只在标题里出现：向量分低被滤掉，标题保底应把它找回来"""
+        e_lv, e_other = self._seed(db)
+        try:
+            hits = search_knowledge(db, "LV", scope="global", min_score=0.99)
+            titles = [h["title"] for h in hits]
+            assert any("LV测试" in t for t in titles), f"标题保底未命中：{titles}"
+            assert not any("著作权" in t for t in titles), f"不相关条目未被过滤：{titles}"
+        finally:
+            delete_knowledge(db, e_lv.id)
+            delete_knowledge(db, e_other.id)
+
+    def test_min_score_filters_all_when_nothing_matches(self, db):
+        """阈值高于所有分数且标题无命中 → 空结果，而不是返回全部"""
+        e_lv, e_other = self._seed(db)
+        try:
+            hits = search_knowledge(db, "完全无关的词", scope="global", min_score=0.99)
+            assert hits == [], f"应返回空，实际 {[h['title'] for h in hits]}"
+        finally:
+            delete_knowledge(db, e_lv.id)
+            delete_knowledge(db, e_other.id)
+
+    def test_min_score_none_keeps_legacy_behavior(self, db):
+        """min_score=None 时不过滤——自动召回等既有调用方行为不变"""
+        e_lv, e_other = self._seed(db)
+        try:
+            hits = search_knowledge(db, "商标", scope="global", min_score=None, top_k=10)
+            assert len(hits) >= 1, "min_score=None 时不应过滤"
+        finally:
+            delete_knowledge(db, e_lv.id)
+            delete_knowledge(db, e_other.id)
+
+
+# ============================================================
 # 3. 跨案隔离（防污染核心）
 # ============================================================
 

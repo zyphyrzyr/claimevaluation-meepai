@@ -338,7 +338,7 @@ export default function KnowledgeBase() {
         ) : (
           <p className="text-sm text-muted mt-4">
             {isSearch
-              ? '无命中。换个说法再试，或确认这条经验是否已入库。'
+              ? `未找到与「${query}」相关的条目。换个说法再试，或确认这条经验是否已入库。`
               : sourceFilter !== 'all'
                 ? '该来源下暂无条目。'
                 : '暂无条目。办案中产生的经验可在案件「评估结果」页底部一键沉淀到本库。'}
