@@ -162,6 +162,15 @@ export default function NewCaseForm({
     api.meta().then(setMeta).catch(() => {})
   }, [])
 
+  // 已保存文件列表跟随后端详情：保存草稿后父组件会重新拉详情、后台解析完成（parse_status
+  // 由 pending 变 ok）都会改变 initial.evidence_files 的引用，这里据此同步 savedFiles，
+  // 避免「保存后界面还停留在待上传区、解析完成徽章不刷新」。
+  useEffect(() => {
+    if (initial?.evidence_files) {
+      setSavedFiles(initial.evidence_files)
+    }
+  }, [initial?.evidence_files])
+
   const clearInvalid = (key: string) =>
     setInvalid((prev) => (prev.has(key) ? new Set([...prev].filter((k) => k !== key)) : prev))
 
@@ -269,10 +278,13 @@ export default function NewCaseForm({
       if (caseId) {
         const updated = await api.updateDraft(caseId, payload)
         setZipSummary(updated.parse_summary ?? null)
+        // 保存成功：清空待上传文件，否则下次保存会把已传文件再传一遍（重复落库）
+        setFiles([])
         onCreated(caseId, 'draft')
       } else {
         const created = await api.createCase(payload)
         setZipSummary(created.parse_summary ?? null)
+        setFiles([])
         onCreated(created.id, 'draft')
       }
       setSubmitting(false)
