@@ -21,6 +21,7 @@ from typing import Dict, Any, List, Optional, Callable
 
 from ..config import CAUSE_TRADEMARK
 from .agents import PlaintiffAgent, DefendantAgent, JudgeAgent
+from .coefficient import derive_coefficient
 
 
 # ============================================================
@@ -43,6 +44,11 @@ class MootCourtResult:
     """完整庭审结果"""
     rounds: List[RoundResult] = field(default_factory=list)
     correction_coefficient: float = 1.0
+    # 系数的来源与推导过程：source=derived（由 10 项子分推导）/ model（退回自评）
+    # / fallback（1.00 不修正）。带上它是为了让「为什么是这个系数」可复核，
+    # 也便于界面在降级时给出提示，而不是让用户看到一个来路不明的数字。
+    coefficient_source: str = "fallback"
+    coefficient_detail: Dict[str, Any] = field(default_factory=dict)
     defense_strength: int = 50
     judge_summary: str = ""
     summary_structured: Dict[str, str] = field(default_factory=dict)
@@ -68,6 +74,8 @@ class MootCourtResult:
                 for r in self.rounds
             ],
             "correction_coefficient": self.correction_coefficient,
+            "coefficient_source": self.coefficient_source,
+            "coefficient_detail": self.coefficient_detail,
             "defense_strength": self.defense_strength,
             "judge_summary": self.judge_summary,
             "summary_structured": self.summary_structured,
@@ -287,17 +295,21 @@ class MootCourtProcedure:
 
         if "error" in judge_raw:
             result.correction_coefficient = 1.0
-            result.error = f"法官归纳异常: {judge_raw.get('error', '')}"
+            # finish_reason="length" 表示输出被 max_tokens 掐断，不是模型不会写 JSON。
+            # 不带出这个区分，界面上永远只有一句「JSON 解析失败」，排查方向直接被
+            # 带偏成「格式/强模型问题」——真正的额度问题因此拖了很久才定位。
+            reason = judge_raw.get("error", "")
+            if judge_raw.get("finish_reason") == "length":
+                reason = f"{reason}（输出被长度上限截断，非格式问题）"
+            result.error = f"法官归纳异常: {reason}"
             return
 
-        # 提取修正系数（带安全裁剪）
-        coeff = judge_raw.get("correction_coefficient", 1.0)
-        try:
-            coeff = float(coeff)
-            coeff = max(0.70, min(1.30, coeff))  # 裁剪到合法范围
-        except (TypeError, ValueError):
-            coeff = 1.0
-        result.correction_coefficient = coeff
+        # 修正系数：由法官打出的 10 项子分推导，不再直接采用模型给的数。
+        # detail 里同时保留模型自评值做对照（不参与取值），并标明来源与是否被裁剪。
+        detail = derive_coefficient(judge_raw)
+        result.correction_coefficient = detail["coefficient"]
+        result.coefficient_source = detail["source"]
+        result.coefficient_detail = detail
 
         result.defense_strength = int(judge_raw.get("defense_strength", 50))
         result.judge_summary = judge_raw.get("summary", "")

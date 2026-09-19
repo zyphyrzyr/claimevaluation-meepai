@@ -13,6 +13,7 @@ from typing import Any, Dict, Generator, List, Optional
 from .case_context import CaseContext
 from .config import CAUSE_TRADEMARK, get_runtime_settings
 from .legal_rules import build_evidence_checklist
+from .moot_court.coefficient import derive_coefficient
 from .moot_court.procedure import MootCourtProcedure, MootCourtResult, STEP_NAMES
 
 
@@ -65,7 +66,13 @@ def _mock_run(materials: Dict[str, Any],
         yield {"event": "round", **rnd}
     # 解析法官结果
     judge_raw = mock_judge_result(cause_type)
-    result.correction_coefficient = float(judge_raw.get("correction_coefficient", 1.0))
+    # 与真实模式同一条推导路径：mock 也必须用 10 项子分算出系数，
+    # 不能直接读 mock 里的 correction_coefficient——否则 mock 与真实两套逻辑，
+    # 演示时系数怎么来的说不清，且子分与系数脱节的问题在 mock 下永远暴露不了。
+    detail = derive_coefficient(judge_raw)
+    result.correction_coefficient = detail["coefficient"]
+    result.coefficient_source = detail["source"]
+    result.coefficient_detail = detail
     result.defense_strength = int(judge_raw.get("defense_strength", 50))
     result.judge_summary = judge_raw.get("summary", "")
     result.summary_structured = judge_raw.get("summary_structured", {})
@@ -122,6 +129,8 @@ def _final_event(result: MootCourtResult, mode: str) -> Dict[str, Any]:
             for r in result.rounds
         ],
         "correction_coefficient": result.correction_coefficient,
+        "coefficient_source": result.coefficient_source,
+        "coefficient_detail": result.coefficient_detail,
         "defense_strength": result.defense_strength,
         "judge_summary": result.judge_summary,
         "summary_structured": result.summary_structured,
