@@ -204,7 +204,9 @@ def _dedupe_join(db: Session, hits: List[Dict[str, Any]],
 
 def search_knowledge(db: Session, query: str, *, case_id: Optional[str] = None,
                      scope: Optional[str] = None, top_k: int = 5,
-                     user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                     user_id: Optional[str] = None,
+                     min_score: Optional[float] = None,
+                     title_boost: bool = True) -> List[Dict[str, Any]]:
     """
     语义检索。规则（防污染）：
     - scope=case：必须带 case_id，仅检索该案材料库
@@ -212,6 +214,12 @@ def search_knowledge(db: Session, query: str, *, case_id: Optional[str] = None,
     - 默认（scope=None）：该案材料库 + 全局经验库（自动召回场景）
 
     user_id 为 None = 未登录，此时全局库只剩公共部分。
+
+    min_score：最低相似度合格线。为 None 时**不过滤**（历史行为，自动召回
+    用它再自行按 auto_recall_min_score 过滤，保持两处互不干扰）；传值时先按
+    分数过滤，再做**标题保底**——query 的任一词元（大小写不敏感）命中条目标题
+    即重新纳入并把分抬到合格线。标题保底只在可见范围过滤后的集合内进行，
+    不改变权限/跨案隔离。
     """
     query = (query or "").strip()
     if not query:
@@ -224,7 +232,26 @@ def search_knowledge(db: Session, query: str, *, case_id: Optional[str] = None,
         all_hits += store.query(vec, {"scope": "case", "case_id": case_id}, top_k=top_k)
     if scope in (None, "global"):
         all_hits += store.query(vec, _global_where(user_id), top_k=top_k)
-    return _dedupe_join(db, all_hits, user_id=user_id)[:top_k]
+    joined = _dedupe_join(db, all_hits, user_id=user_id)
+
+    if min_score is None:
+        return joined[:top_k]
+
+    tokens = [t for t in re.split(r"\s+", query.lower()) if t]
+    kept: List[Dict[str, Any]] = []
+    for h in joined:
+        score = float(h.get("score", 0))
+        if score >= min_score:
+            kept.append(h)
+            continue
+        # 标题保底：query 词元命中条目标题（只放宽，不收紧，且保底分设成合格线）
+        if title_boost and tokens and any(
+                t in (h.get("title") or "").lower() for t in tokens):
+            boosted = dict(h)
+            boosted["score"] = min_score
+            kept.append(boosted)
+    kept.sort(key=lambda h: float(h.get("score", 0)), reverse=True)
+    return kept[:top_k]
 
 
 # ---------------------------------------------------------- 注入 / 自动召回

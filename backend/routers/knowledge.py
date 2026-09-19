@@ -14,11 +14,13 @@ from core.auth import (
     case_owned, case_readable, current_user_optional, entry_owned, require_user,
 )
 from core.case_context import CaseContext
+from core.config import auto_recall_min_score
 from core.database import Case, KnowledgeEntry, User, get_db
 from core.knowledge import (
     add_knowledge, delete_knowledge, list_entries, search_knowledge,
     ingest_case_materials, info,
 )
+from core.knowledge.embeddings import use_mock_embedding
 from core.report_generator import generate_memo
 from core.text_extractor import extract_text_from_file
 from routers.evaluation import _load_ctx, _save_ctx
@@ -173,7 +175,8 @@ def search(payload: SearchRequest, db: Session = Depends(get_db),
            user: Optional[User] = Depends(current_user_optional)):
     return search_knowledge(db, payload.query, case_id=payload.case_id,
                             scope=payload.scope, top_k=payload.top_k,
-                            user_id=user.id if user else None)
+                            user_id=user.id if user else None,
+                            min_score=auto_recall_min_score(use_mock_embedding()))
 
 
 # ---------------------------------------------------------- 案件级操作
