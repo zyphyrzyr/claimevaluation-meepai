@@ -3,6 +3,7 @@ import { KnowledgeEntryItem, SearchHit, humanError, knowledgeApi } from '../api'
 import SlideOver from '../components/SlideOver'
 import { useAuth } from '../auth/AuthProvider'
 import { fmtDateTime, relativeTime } from '../lib/time'
+import { markdownToPlainText } from '../lib/utils'
 
 /**
  * 个人知识库（§7 RAG 双集合分库之一；界面上原叫「全局经验库」）
@@ -32,6 +33,13 @@ const SOURCE_LABEL: Record<string, string> = {
   C: '观点沉淀',
   D: '独立建库',
 }
+
+/**
+ * 观点沉淀（C）存的是评估结果 markdown 原文，展示时转成干净纯文本；
+ * 其余来源（B/D 手动录入、A 证据）本就是纯文本，原样显示，不做任何处理。
+ */
+const displayText = (sourceType: string | undefined, text: string) =>
+  sourceType === 'C' ? markdownToPlainText(text) : (text ?? '')
 
 export default function KnowledgeBase() {
   const auth = useAuth()
@@ -291,12 +299,14 @@ export default function KnowledgeBase() {
 
                   {/* 摘要：检索态显示真正命中的那一段，全量态显示内容开头 */}
                   <p className="text-xs text-muted mt-1 truncate">
-                    {hit ? hit.matched_chunk : (e.snippet ?? e.content ?? '')}
+                    {hit
+                      ? displayText(hit.source_type, hit.matched_chunk)
+                      : displayText(e.source_type, e.snippet ?? e.content ?? '')}
                   </p>
 
                   {open && (
                     <div className="mt-2 mb-1 bg-canvas rounded-lg p-3">
-                      <div className="text-xs text-muted whitespace-pre-wrap leading-relaxed">{e.content}</div>
+                      <div className="text-xs text-muted whitespace-pre-wrap leading-relaxed">{displayText(e.source_type, e.content ?? '')}</div>
                       <div className="flex items-center gap-4 flex-wrap mt-3 pt-2 border-t border-line text-[11px] text-muted">
                         <span>来源 {e.source_type_label}</span>
                         <span>入库 {fmtDateTime(e.created_at)}</span>
