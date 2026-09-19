@@ -236,16 +236,16 @@ def test_advisor_loop():
     check("对话历史落库", len(hist.get("messages", [])) >= 2,
           f"{len(hist.get('messages', []))} 条")
 
-    # 沉淀 → 全局库可检索
-    dep = req(f"/knowledge/cases/{cid}/deposit", "POST",
-              {"title": "E2E沉淀-判赔口径",
-               "content": "天猫店铺月销三万件、单价199元的商标侵权案，判赔可争取30万元以上。"})
+    # 沉淀 → 全局库可检索（内容 = 后端生成的评估结果完整原文，无请求体）
+    dep = req(f"/knowledge/cases/{cid}/deposit", "POST")
     check("观点沉淀成功", dep.get("ok") is True or dep.get("id"), f"{dep}")
+    check("沉淀标题为「案件名 评估结果」",
+          dep.get("title") == "E2E-顾问 评估结果", f"{dep.get('title')}")
 
     hits = req("/knowledge/search", "POST",
-               {"query": "天猫店铺判赔 三十万", "top_k": 5})
+               {"query": "主诉评估结果 判赔规模", "top_k": 5})
     check("沉淀内容可被全局检索命中",
-          any("E2E沉淀" in h["title"] for h in hits),
+          any("E2E-顾问" in h["title"] for h in hits),
           f"命中：{[h['title'][:16] for h in hits]}")
 
     # 跨案隔离

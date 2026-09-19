@@ -268,15 +268,32 @@ class TestKnowledgeIsolation:
 
     def test_deposit_belongs_to_the_depositor(self, client_a, client_b, case_a):
         """沉淀出来的经验记在自己名下：它是跨案复用的私有经验，
-        不该变成所有人都看得到、却谁都删不掉的公共数据。"""
-        r = client_a.post(f"/api/knowledge/cases/{case_a}/deposit", json={
-            "title": "A 沉淀的观点", "content": "从本案结论里提炼出来的经验。"})
+        不该变成所有人都看得到、却谁都删不掉的公共数据。
+
+        观点沉淀内容由后端生成评估结果全文（不接收前端 content），
+        本用例只验证归属隔离与标题格式，不校验内容。
+        """
+        r = client_a.post(f"/api/knowledge/cases/{case_a}/deposit")
         assert r.status_code == 200, r.text
         eid = r.json()["id"]
+        assert r.json()["title"] == "A 的私密案件 评估结果"
         mine = [e["id"] for e in client_a.get("/api/knowledge/entries?scope=global").json()]
         theirs = [e["id"] for e in client_b.get("/api/knowledge/entries?scope=global").json()]
         assert eid in mine
         assert eid not in theirs
+
+    def test_deposit_stores_markdown_not_summary(self, client_a, case_a):
+        """观点沉淀存的是评估结果 markdown 原文（H1 开头），不是前端拼装的摘要。
+
+        前端摘要以「结论：」开头，markdown 原文以「# 主诉评估结果」开头——
+        用开头即可区分，锁死「观点沉淀 = 评估结果完整原文」这条契约，防回归。
+        """
+        eid = client_a.post(f"/api/knowledge/cases/{case_a}/deposit").json()["id"]
+        entries = client_a.get("/api/knowledge/entries?scope=global").json()
+        content = next(e["content"] for e in entries if e["id"] == eid)
+        assert content.startswith("# 主诉评估结果"), \
+            f"沉淀内容不是 markdown 原文：{content[:40]!r}"
+        assert "评估未完成" in content, "空案件也应生成完整报告骨架，而非空内容或报错"
 
     def test_public_entry_cannot_be_deleted(self, client_a, db_session):
         e = add_knowledge(db_session, scope="global", source_type="D",
